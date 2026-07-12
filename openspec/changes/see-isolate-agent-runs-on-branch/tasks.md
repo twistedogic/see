@@ -1,12 +1,12 @@
 ## 1. Add helpers
 
-- [ ] 1.1 Add `originalRef(path string) (string, error)` to `main.go`.
+- [x] 1.1 Add `originalRef(path string) (string, error)` to `main.go`.
       Runs `git -C <path> symbolic-ref --short HEAD`. Returns the trimmed
       output on success, or an empty string and nil error when the ref
       is empty (detached HEAD). Use `CombinedOutput` and check the exit
       code separately so an empty ref doesn't masquerade as an error
       from missing output.
-- [ ] 1.2 Add `ensureBranch(path, sha, name string) error` to `main.go`.
+- [x] 1.2 Add `ensureBranch(path, sha, name string) error` to `main.go`.
       Runs `git -C <path> branch --list <name>`; if the output contains
       `name`, run `git -C <path> switch <name>`. Otherwise run
       `git -C <path> switch -c <name>`. After the branch exists, run
@@ -15,7 +15,7 @@
 
 ## 2. Reproduce the missing-isolation behavior with a failing test
 
-- [ ] 2.1 Add `TestWorkIsolatesAgentRunOnBranch` to `main_test.go`.
+- [x] 2.1 Add `TestWorkIsolatesAgentRunOnBranch` to `main_test.go`.
       Spin up a temp repo, init + commit + switch -c main, set up an
       active change, run `Watcher.work` with a fake agent that succeeds
       and archives the change. Assert that after the run:
@@ -25,7 +25,7 @@
       (c) the working tree is on `main`,
       (d) `git log --all --oneline` shows the agent's `see: apply`
       commit on the `see/<change>` ref before deletion.
-- [ ] 2.2 Run `go test ./...`. Confirm the test fails (current
+- [x] 2.2 Run `go test ./...`. Confirm the test fails (current
       `Watcher.work` commits on `main` directly, so the merge-commit
       assertion fails).
 

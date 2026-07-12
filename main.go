@@ -56,6 +56,42 @@ func GetCurrentCommit(cwd string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// originalRef returns the short symbolic-ref for HEAD on the repo at path,
+// or empty string when HEAD is detached. `git symbolic-ref --short HEAD`
+// exits non-zero with "fatal: not a symbolic ref" when HEAD points directly
+// at a commit; that's an expected state, not a watch error.
+func originalRef(path string) (string, error) {
+	out, err := exec.Command("git", "-C", path, "symbolic-ref", "--short", "HEAD").CombinedOutput()
+	if err != nil && strings.Contains(string(out), "not a symbolic ref") {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// ensureBranch creates or reuses branch name in the repo at path, then pins
+// its tip to sha via reset --hard. Idempotent: a leftover branch from a
+// prior partial run is reused, and the reset wipes whatever state it had.
+func ensureBranch(path, sha, name string) error {
+	list, err := exec.Command("git", "-C", path, "branch", "--list", name).CombinedOutput()
+	if err != nil {
+		return err
+	}
+	args := []string{"switch", name}
+	if !strings.Contains(string(list), name) {
+		args = []string{"switch", "-c", name}
+	}
+	if out, err := exec.Command("git", append([]string{"-C", path}, args...)...).CombinedOutput(); err != nil {
+		return fmt.Errorf("git %v on %s: %v\n%s", args, path, err, out)
+	}
+	if out, err := exec.Command("git", "-C", path, "reset", "--hard", sha).CombinedOutput(); err != nil {
+		return fmt.Errorf("git reset --hard %s on %s: %v\n%s", sha, path, err, out)
+	}
+	return nil
+}
+
 // ponytail: previously took (bool, error); the (false, nil) state could
 // clobber a prior error and report silent success. Contract collapsed to
 // func() error so the bug class is unreachable.
