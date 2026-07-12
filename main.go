@@ -100,6 +100,15 @@ func (w Watcher) work(ctx context.Context, path string) (bool, error) {
 	done := !slices.Contains(ListActiveOpenSpecChanges(path), change)
 	if done {
 		log.Printf("completed %q on %s", change, path)
+		// ponytail: commit runs inline; if `git add` fails (e.g., dirty submodules) we still try commit so manually-staged work isn't lost.
+		add := exec.Command("git", "-C", path, "add", "-A")
+		if err := add.Run(); err != nil {
+			log.Printf("git add failed %q on %s: %v", change, path, err)
+		}
+		msg := fmt.Sprintf("see: apply openspec change %s", change)
+		if err := exec.Command("git", "-C", path, "commit", "-m", msg).Run(); err != nil {
+			log.Printf("git commit failed %q on %s: %v", change, path, err)
+		}
 	}
 	return done, nil
 }
