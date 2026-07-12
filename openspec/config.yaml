@@ -1,0 +1,40 @@
+schema: spec-driven
+
+# Project context for `see` (non-standard field; OpenSpec only reads `schema:`).
+purpose: >
+  Autonomous batch driver: hands OpenSpec change proposals to the `pi` coding
+  agent, one per git repository in the working directory, with retries and
+  auto-commit on success.
+
+loop:
+  discover: >
+    Watcher.Watch polls runOnce in a tight loop until SIGINT or SIGTERM.
+    runOnce walks wd/ and keeps immediate subdirs that have .git/ and at
+    least one commit (verified via `git rev-parse HEAD`).
+  pick: >
+    For each repo, read `openspec/changes/`, drop `archive/`, drop files.
+    Work the first entry (changes[0]); the rest are ignored this round.
+  dispatch: >
+    Shell out to `pi --mode json --no-session "<prompt>"` with cmd.Dir set
+    to the repo. Prompt: 'Apply the openspec change "<name>": read its
+    proposal and tasks, implement them, run the tests, verify, then archive
+    the change. Sync specs if needed.'
+  settle:
+    success_archived: >
+      Re-read the change list. If the picked change is gone (agent archived
+      it), run `git add -A` then `git commit -m "see: apply openspec change <name>"`.
+    failure: >
+      `git reset --hard` back to the pre-run commit, swallow the dirt.
+      retryN wraps work up to -retry attempts; first exhausted repo aborts
+      the whole batch.
+
+flags:
+  -pi: path to the pi binary (default "pi")
+  -retry: max attempts per repo (default 3)
+
+shape_choices: # known, not flagged as bugs by tests
+  - abort-on-first-failure: one exhausted repo halts Watcher.Watch
+  - tight poll loop with no backoff (ponytail-acknowledged in main.go)
+  - only the first listed active change per repo is worked this round
+  - git reset --hard on failure wipes any pre-existing dirty tree
+  - git add -A on success can swallow untracked files the user did not intend to commit

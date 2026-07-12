@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-07-12
+goal: Isolate the agent's in-progress edits from the original branch so partial
+  or failed runs never pollute it; deliver the change to the original branch via
+  a merge commit on success.
