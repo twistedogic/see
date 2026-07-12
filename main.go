@@ -20,10 +20,6 @@ type PiAgent struct {
 	Binary string
 }
 
-func NewPi(binary string) Agent {
-	return PiAgent{Binary: binary}
-}
-
 func (p PiAgent) Run(ctx context.Context, path, prompt string) error {
 	cmd := exec.CommandContext(ctx, p.Binary, "--mode", "json", "--no-session", prompt)
 	cmd.Dir = path
@@ -59,15 +55,6 @@ func GetCurrentCommit(cwd string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-func IsGitRepo(path string) bool {
-	_, err := os.Stat(filepath.Join(path, ".git"))
-	return err == nil
-}
-
-func gitHardReset(path, commit string) error {
-	return exec.Command("git", "-C", path, "reset", "--hard", commit).Run()
-}
-
 func retryN(n int, f func() (bool, error)) error {
 	var err error
 	for range n {
@@ -87,7 +74,7 @@ type Watcher struct {
 }
 
 func NewWatcher(n int) Watcher {
-	return Watcher{agent: NewPi("pi"), RetyCount: n}
+	return Watcher{agent: PiAgent{Binary: "pi"}, RetyCount: n}
 }
 
 func (w Watcher) work(ctx context.Context, path string) (bool, error) {
@@ -104,7 +91,7 @@ func (w Watcher) work(ctx context.Context, path string) (bool, error) {
 	log.Printf("working %q on %s", change, path)
 	if err := w.agent.Run(ctx, path, applyPrompt(change)); err != nil {
 		log.Printf("failed %q on %s: %v", change, path, err)
-		if rerr := gitHardReset(path, current); rerr != nil {
+		if rerr := exec.Command("git", "-C", path, "reset", "--hard", current).Run(); rerr != nil {
 			return false, rerr
 		}
 		return false, err
@@ -130,13 +117,17 @@ func (w Watcher) runOnce(ctx context.Context, wd string) error {
 				continue
 			}
 			repo := filepath.Join(wd, entry.Name())
-			if !IsGitRepo(repo) {
+			if _, err := os.Stat(filepath.Join(repo, ".git")); err != nil {
+				continue
+			}
+			if _, err := GetCurrentCommit(repo); err != nil {
+				log.Printf("skipping %s: no commits", repo)
 				continue
 			}
 			if err := retryN(w.RetyCount, func() (bool, error) {
 				return w.work(ctx, repo)
 			}); err != nil {
-				return err
+				return fmt.Errorf("%s: %w", repo, err)
 			}
 		}
 	}

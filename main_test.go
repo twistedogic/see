@@ -20,18 +20,7 @@ func (f *fakeAgent) Run(_ context.Context, path, _ string) error {
 	return f.err
 }
 
-func TestIsGitRepo(t *testing.T) {
-	dir := t.TempDir()
-	if IsGitRepo(dir) {
-		t.Fatal("empty dir should not be a git repo")
-	}
-	if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if !IsGitRepo(dir) {
-		t.Fatal("dir with .git should be a git repo")
-	}
-}
+
 
 func TestListActiveOpenSpecChanges(t *testing.T) {
 	dir := t.TempDir()
