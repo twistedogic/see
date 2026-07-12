@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,8 +44,6 @@ func (r *recordingObserver) eventTypes() []string {
 	return out
 }
 
-
-
 func TestListActiveOpenSpecChanges(t *testing.T) {
 	dir := t.TempDir()
 	changes := filepath.Join(dir, "openspec", "changes")
@@ -73,6 +72,55 @@ func TestApplyPromptMentionsChange(t *testing.T) {
 	p := applyPrompt("add-foo")
 	if !strings.Contains(p, "add-foo") {
 		t.Fatalf("prompt should mention change name: %q", p)
+	}
+}
+
+func TestPiAgentRedirectsOutputToStderr(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "agent")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf stdout-line\nprintf stderr-line >&2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalStderr := os.Stderr
+	t.Cleanup(func() {
+		os.Stderr = originalStderr
+		reader.Close()
+		writer.Close()
+	})
+	os.Stderr = writer
+	err = (PiAgent{Binary: script, RedirectOutput: true}).Run(context.Background(), t.TempDir(), "prompt")
+	os.Stderr = originalStderr
+	if closeErr := writer.Close(); err == nil {
+		err = closeErr
+	}
+	output, readErr := io.ReadAll(reader)
+	reader.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	got := string(output)
+	if !strings.Contains(got, "stdout-line") || !strings.Contains(got, "stderr-line") {
+		t.Fatalf("stderr = %q, want agent stdout and stderr", got)
+	}
+}
+
+func TestPiAgentPreservesExitCodeByDefault(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "agent")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 7\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	err := (PiAgent{Binary: script}).Run(context.Background(), t.TempDir(), "prompt")
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
+		t.Fatalf("Run() error = %v, want exit code 7", err)
 	}
 }
 

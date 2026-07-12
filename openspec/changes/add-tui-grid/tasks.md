@@ -221,8 +221,9 @@
 - [ ] 7.1 Add a flag or boolean to `PiAgent` (or to `Watcher`) that
       controls whether `cmd.Stdout` and `cmd.Stderr` are set to
       `os.Stderr`. Default false (current behavior). The TUI mode
-      sets it true.
-- [ ] 7.2 Confirm existing tests still pass with the default
+      sets it true. (`PiAgent.RedirectOutput` and its behavioral test are
+      complete; wiring TUI mode remains.)
+- [x] 7.2 Confirm existing tests still pass with the default
       (stderr-redirect off): `cmd.Run()` returns the agent's exit
       code, not a "stdout already set" error.
 

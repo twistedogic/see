@@ -18,12 +18,17 @@ type Agent interface {
 }
 
 type PiAgent struct {
-	Binary string
+	Binary         string
+	RedirectOutput bool
 }
 
 func (p PiAgent) Run(ctx context.Context, path, prompt string) error {
 	cmd := exec.CommandContext(ctx, p.Binary, "--mode", "json", "--no-session", prompt)
 	cmd.Dir = path
+	if p.RedirectOutput {
+		cmd.Stdout = os.Stderr
+		cmd.Stderr = os.Stderr
+	}
 	return cmd.Run()
 }
 
