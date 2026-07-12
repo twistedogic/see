@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,6 +26,21 @@ func (f *fakeAgent) Run(_ context.Context, path, _ string) error {
 		}
 	}
 	return f.err
+}
+
+// recordingObserver captures the event sequence emitted by a Watcher.
+type recordingObserver struct{ events []Event }
+
+func (r *recordingObserver) Observe(e Event) { r.events = append(r.events, e) }
+
+// eventTypes returns the type names in order, useful when a test only cares
+// about sequence shape and not full event payloads.
+func (r *recordingObserver) eventTypes() []string {
+	out := make([]string, len(r.events))
+	for i, e := range r.events {
+		out[i] = fmt.Sprintf("%T", e)
+	}
+	return out
 }
 
 
@@ -146,6 +162,89 @@ func TestWorkCommitsOnSuccess(t *testing.T) {
 	}
 }
 
+// Regression: runOnce on a successful change must emit RepoSeen,
+// ChangeStarted, and ChangeDone in that order. This pins the observer
+// seam added by the add-tui-grid change so future refactors cannot
+// silently drop event emission.
+func TestRunOnceEmitsEventSequenceOnSuccess(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "proj")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "t@e")
+	run("config", "user.name", "t")
+	run("commit", "--allow-empty", "-q", "-m", "init")
+	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/main").Run(); err != nil {
+		run("switch", "-c", "main")
+	}
+	if err := os.MkdirAll(filepath.Join(repo, "openspec", "changes", "task-1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, "openspec", "changes", "archive"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	agent := &fakeAgent{
+		onRun: func() error {
+			return os.Rename(
+				filepath.Join(repo, "openspec", "changes", "task-1"),
+				filepath.Join(repo, "openspec", "changes", "archive", "task-1"),
+			)
+		},
+	}
+	obs := &recordingObserver{}
+	w := Watcher{agent: agent, RetyCount: 1, observer: obs}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := w.runOnce(ctx, root); err != nil {
+		t.Fatal(err)
+	}
+	got := obs.eventTypes()
+	wantPrefix := []string{"main.RepoSeen", "main.ChangeStarted", "main.ChangeDone"}
+	if len(got) < len(wantPrefix) {
+		t.Fatalf("got %d events, want at least %d: %v", len(got), len(wantPrefix), got)
+	}
+	for i, name := range wantPrefix {
+		if got[i] != name {
+			t.Fatalf("event[%d] = %s, want %s (full sequence: %v)", i, got[i], name, got)
+		}
+	}
+	// Confirm the RepoSeen payload reports HasOpenspec=true.
+	rs, ok := obs.events[0].(RepoSeen)
+	if !ok {
+		t.Fatalf("first event is not RepoSeen: %T", obs.events[0])
+	}
+	if !rs.HasOpenspec {
+		t.Fatalf("RepoSeen.HasOpenspec = false, want true")
+	}
+	if rs.Path != repo {
+		t.Fatalf("RepoSeen.Path = %q, want %q", rs.Path, repo)
+	}
+	cs, ok := obs.events[1].(ChangeStarted)
+	if !ok {
+		t.Fatalf("second event is not ChangeStarted: %T", obs.events[1])
+	}
+	if cs.Change != "task-1" || cs.Path != repo {
+		t.Fatalf("ChangeStarted = %+v, want {Path: %q, Change: task-1}", cs, repo)
+	}
+	cd, ok := obs.events[2].(ChangeDone)
+	if !ok {
+		t.Fatalf("third event is not ChangeDone: %T", obs.events[2])
+	}
+	if cd.Change != "task-1" || cd.Path != repo {
+		t.Fatalf("ChangeDone = %+v, want {Path: %q, Change: task-1}", cd, repo)
+	}
+}
+
 // Regression: agent runs must not pollute the original branch directly. They
 // run on a dedicated see/<change> branch and the original branch receives a
 // --no-ff merge commit afterwards. Pins the post-refactor contract.
@@ -262,7 +361,8 @@ func TestRunOncePassesRepoPathToAgent(t *testing.T) {
 	}
 
 	agent := &fakeAgent{err: nil}
-	w := Watcher{agent: agent, RetyCount: 1}
+	obs := &recordingObserver{}
+	w := Watcher{agent: agent, RetyCount: 1, observer: obs}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := w.runOnce(ctx, root); err != nil {
@@ -270,6 +370,22 @@ func TestRunOncePassesRepoPathToAgent(t *testing.T) {
 	}
 	if len(agent.runs) != 1 || agent.runs[0] != repo {
 		t.Fatalf("agent.Run called with %v, want exactly [%q]", agent.runs, repo)
+	}
+	// runOnce must emit exactly one RepoSeen for the proj repo; the
+	// non-repo sibling emits none. The proj repo also picks up the
+	// active change so ChangeStarted fires after RepoSeen.
+	got := obs.eventTypes()
+	if len(got) < 1 || got[0] != "main.RepoSeen" {
+		t.Fatalf("first event must be RepoSeen, got: %v", got)
+	}
+	repoSeenCount := 0
+	for _, name := range got {
+		if name == "main.RepoSeen" {
+			repoSeenCount++
+		}
+	}
+	if repoSeenCount != 1 {
+		t.Fatalf("RepoSeen count = %d, want 1 (full sequence: %v)", repoSeenCount, got)
 	}
 }
 
@@ -508,5 +624,243 @@ func TestWorkRejectsDetachedHead(t *testing.T) {
 	}
 	if postSHA != detachedSHA {
 		t.Fatalf("expected HEAD at %s after bail, got %s", detachedSHA, postSHA)
+	}
+}
+
+// Regression: RetryAttempt events must fire between failed attempts,
+// not on the first attempt. Pin the ordering for the agent-fails-twice-
+// then-succeeds scenario.
+func TestObserverReceivesRetrySequence(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "proj")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "t@e")
+	run("config", "user.name", "t")
+	run("commit", "--allow-empty", "-q", "-m", "init")
+	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/main").Run(); err != nil {
+		run("switch", "-c", "main")
+	}
+	if err := os.MkdirAll(filepath.Join(repo, "openspec", "changes", "task-1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, "openspec", "changes", "archive"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var calls int
+	agent := &fakeAgent{
+		onRun: func() error {
+			calls++
+			if calls < 3 {
+				return errors.New("flake")
+			}
+			return os.Rename(
+				filepath.Join(repo, "openspec", "changes", "task-1"),
+				filepath.Join(repo, "openspec", "changes", "archive", "task-1"),
+			)
+		},
+	}
+	obs := &recordingObserver{}
+	w := Watcher{agent: agent, RetyCount: 3, observer: obs}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := w.runOnce(ctx, root); err != nil {
+		t.Fatal(err)
+	}
+	got := obs.eventTypes()
+	want := []string{
+		"main.RepoSeen",
+		"main.ChangeStarted",
+		"main.RetryAttempt",
+		"main.ChangeStarted",
+		"main.RetryAttempt",
+		"main.ChangeStarted",
+		"main.ChangeDone",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d events, want %d: %v", len(got), len(want), got)
+	}
+	for i, name := range want {
+		if got[i] != name {
+			t.Fatalf("event[%d] = %s, want %s (full sequence: %v)", i, got[i], name, got)
+		}
+	}
+	// RetryAttempt payload sanity-check: N=2 on first retry, N=3 on second.
+	if ra, ok := obs.events[2].(RetryAttempt); !ok || ra.N != 2 || ra.Max != 3 {
+		t.Fatalf("event[2] = %+v, want RetryAttempt{N:2, Max:3}", obs.events[2])
+	}
+	if ra, ok := obs.events[4].(RetryAttempt); !ok || ra.N != 3 || ra.Max != 3 {
+		t.Fatalf("event[4] = %+v, want RetryAttempt{N:3, Max:3}", obs.events[4])
+	}
+}
+
+// Regression: after retryN exhausts attempts, ChangeFailed must fire
+// exactly once with the final error.
+func TestObserverReceivesChangeFailedAfterRetriesExhausted(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "proj")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "t@e")
+	run("config", "user.name", "t")
+	run("commit", "--allow-empty", "-q", "-m", "init")
+	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/main").Run(); err != nil {
+		run("switch", "-c", "main")
+	}
+	if err := os.MkdirAll(filepath.Join(repo, "openspec", "changes", "task-1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, "openspec", "changes", "archive"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	agentErr := errors.New("always fails")
+	agent := &fakeAgent{err: agentErr}
+	obs := &recordingObserver{}
+	w := Watcher{agent: agent, RetyCount: 2, observer: obs}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := w.runOnce(ctx, root); err == nil {
+		t.Fatal("expected runOnce to return error after retries exhausted")
+	}
+	got := obs.eventTypes()
+	want := []string{
+		"main.RepoSeen",
+		"main.ChangeStarted",
+		"main.RetryAttempt",
+		"main.ChangeStarted",
+		"main.ChangeFailed",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d events, want %d: %v", len(got), len(want), got)
+	}
+	for i, name := range want {
+		if got[i] != name {
+			t.Fatalf("event[%d] = %s, want %s (full sequence: %v)", i, got[i], name, got)
+		}
+	}
+	cf, ok := obs.events[len(got)-1].(ChangeFailed)
+	if !ok {
+		t.Fatalf("last event is not ChangeFailed: %T", obs.events[len(got)-1])
+	}
+	if cf.Change != "task-1" {
+		t.Fatalf("ChangeFailed.Change = %q, want task-1", cf.Change)
+	}
+	if !strings.Contains(cf.Err, "always fails") {
+		t.Fatalf("ChangeFailed.Err = %q, want it to contain %q", cf.Err, "always fails")
+	}
+}
+
+// Regression: a git repo with no openspec/ must still emit RepoSeen
+// (with HasOpenspec=false) and nothing else.
+func TestRepoSeenFiresForRepoWithoutOpenspec(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "proj")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "t@e")
+	run("config", "user.name", "t")
+	run("commit", "--allow-empty", "-q", "-m", "init")
+	obs := &recordingObserver{}
+	agent := &fakeAgent{err: nil}
+	w := Watcher{agent: agent, RetyCount: 1, observer: obs}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := w.runOnce(ctx, root); err != nil {
+		t.Fatal(err)
+	}
+	got := obs.eventTypes()
+	if len(got) != 1 || got[0] != "main.RepoSeen" {
+		t.Fatalf("events = %v, want exactly [RepoSeen]", got)
+	}
+	rs := obs.events[0].(RepoSeen)
+	if rs.HasOpenspec {
+		t.Fatalf("RepoSeen.HasOpenspec = true, want false")
+	}
+	if rs.Path != repo {
+		t.Fatalf("RepoSeen.Path = %q, want %q", rs.Path, repo)
+	}
+	// And the agent must not have been invoked for a no-spec repo.
+	if len(agent.runs) != 0 {
+		t.Fatalf("agent.Run called %d times for no-spec repo, want 0", len(agent.runs))
+	}
+}
+
+// Regression: a Watcher constructed without an observer must run the
+// same code path as today without panicking. Existing tests cover this
+// transitively; this is the explicit assertion.
+func TestNilObserverIsSafe(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "proj")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "t@e")
+	run("config", "user.name", "t")
+	run("commit", "--allow-empty", "-q", "-m", "init")
+	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/main").Run(); err != nil {
+		run("switch", "-c", "main")
+	}
+	if err := os.MkdirAll(filepath.Join(repo, "openspec", "changes", "task-1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, "openspec", "changes", "archive"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	agent := &fakeAgent{
+		onRun: func() error {
+			return os.Rename(
+				filepath.Join(repo, "openspec", "changes", "task-1"),
+				filepath.Join(repo, "openspec", "changes", "archive", "task-1"),
+			)
+		},
+	}
+	// No observer set; the watcher should still run end-to-end.
+	w := Watcher{agent: agent, RetyCount: 1}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := w.runOnce(ctx, root); err != nil {
+		t.Fatal(err)
+	}
+	if len(agent.runs) != 1 {
+		t.Fatalf("agent.Run called %d times, want 1", len(agent.runs))
 	}
 }

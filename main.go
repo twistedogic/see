@@ -105,8 +105,55 @@ func retryN(n int, f func() error) error {
 	return err
 }
 
+// Event is a sealed interface; only the five concrete types below may
+// implement it. The watcher emits one of these at each phase boundary
+// and the tui package type-switches in Update.
+type Event interface{ isEvent() }
+
+type RepoSeen struct {
+	Path        string
+	HasOpenspec bool
+}
+
+func (RepoSeen) isEvent() {}
+
+type ChangeStarted struct {
+	Path   string
+	Change string
+}
+
+func (ChangeStarted) isEvent() {}
+
+type RetryAttempt struct {
+	Path   string
+	Change string
+	N, Max int
+	Err    string
+}
+
+func (RetryAttempt) isEvent() {}
+
+type ChangeDone struct {
+	Path   string
+	Change string
+}
+
+func (ChangeDone) isEvent() {}
+
+type ChangeFailed struct {
+	Path   string
+	Change string
+	Err    string
+}
+
+func (ChangeFailed) isEvent() {}
+
+type Observer interface{ Observe(Event) }
+
 type Watcher struct {
 	agent Agent
+
+	observer Observer
 
 	RetyCount int
 }
@@ -136,6 +183,9 @@ func (w Watcher) work(ctx context.Context, path string) error {
 	change := changes[0]
 	log.Printf("working %q on %s", change, path)
 	branch := "see/" + change
+	if w.observer != nil {
+		w.observer.Observe(ChangeStarted{Path: path, Change: change})
+	}
 	if err := ensureBranch(path, current, branch); err != nil {
 		return err
 	}
@@ -166,6 +216,9 @@ func (w Watcher) work(ctx context.Context, path string) error {
 	msg := fmt.Sprintf("see: apply openspec change %s", change)
 	if err := exec.Command("git", "-C", path, "commit", "-m", msg).Run(); err != nil {
 		log.Printf("git commit failed %q on %s: %v", change, path, err)
+	}
+	if w.observer != nil {
+		w.observer.Observe(ChangeDone{Path: path, Change: change})
 	}
 	// ponytail: merge --no-ff so the watcher's involvement shows up as a graph node even on a single-commit see/<change>.
 	if out, err := exec.Command("git", "-C", path, "switch", ref).CombinedOutput(); err != nil {
@@ -212,14 +265,54 @@ func (w Watcher) runOnce(ctx context.Context, wd string) error {
 				log.Printf("skipping %s: no commits", repo)
 				continue
 			}
-			if err := retryN(w.RetyCount, func() error {
-				return w.work(ctx, repo)
-			}); err != nil {
+			if w.observer != nil {
+				w.observer.Observe(RepoSeen{Path: repo, HasOpenspec: repoHasOpenspec(repo)})
+			}
+			var prevErr error
+			attempt := 0
+			var lastChange string
+			err := retryN(w.RetyCount, func() error {
+				attempt++
+				var changeName string
+				if cs := ListActiveOpenSpecChanges(repo); len(cs) > 0 {
+					changeName = cs[0]
+					lastChange = changeName
+				}
+				if prevErr != nil && w.observer != nil {
+					w.observer.Observe(RetryAttempt{
+						Path: repo, Change: changeName, N: attempt, Max: w.RetyCount,
+						Err: prevErr.Error(),
+					})
+				}
+				workErr := w.work(ctx, repo)
+				prevErr = workErr
+				return workErr
+			})
+			if err != nil {
+				if w.observer != nil {
+					w.observer.Observe(ChangeFailed{Path: repo, Change: lastChange, Err: err.Error()})
+				}
 				return fmt.Errorf("%s: %w", repo, err)
 			}
 		}
 	}
 	return nil
+}
+
+// ponytail: lives here so the observer wiring in runOnce doesn't pull
+// repoHasOpenspec through an extra hop. Same logic as ListActiveOpenSpecChanges
+// minus the name list — boolean only so the RepoSeen payload stays small.
+func repoHasOpenspec(path string) bool {
+	entries, err := os.ReadDir(filepath.Join(path, "openspec", "changes"))
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.IsDir() && e.Name() != "archive" {
+			return true
+		}
+	}
+	return false
 }
 
 func (w Watcher) Watch(ctx context.Context, wd string) error {

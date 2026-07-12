@@ -1,6 +1,6 @@
 ## 1. Add the observer seam in `main.go`
 
-- [ ] 1.1 Add a sealed `Event` interface to `main.go`:
+- [x] 1.1 Add a sealed `Event` interface to `main.go`:
       ```go
       type Event interface{ isEvent() }
 
@@ -39,12 +39,12 @@
 
       type Observer interface{ Observe(Event) }
       ```
-- [ ] 1.2 Add `Observer observer` field to `Watcher`. Update
+- [x] 1.2 Add `Observer observer` field to `Watcher`. Update
       `NewWatcher` to leave it nil (no-op default).
 
 ## 2. Wire observer calls into `Watcher.runOnce` and `Watcher.work`
 
-- [ ] 2.1 In `Watcher.runOnce`, before the per-repo retry loop, emit
+- [x] 2.1 In `Watcher.runOnce`, before the per-repo retry loop, emit
       `RepoSeen{Path: repo, HasOpenspec: hasOpenspec(repo)}`. Compute
       `hasOpenspec` by checking whether `openspec/changes` exists and
       contains at least one entry besides `archive/`. Use a small
@@ -63,16 +63,17 @@
           return false
       }
       ```
-- [ ] 2.2 In `Watcher.work`, after picking the active change, emit
+- [x] 2.2 In `Watcher.work`, after picking the active change, emit
       `ChangeStarted{Path: path, Change: change}` immediately before
       `w.agent.Run(...)`.
-- [ ] 2.3 In `Watcher.work`, on agent error before the `git reset
-      --hard` rollback, emit `ChangeFailed{Path: path, Change: change,
-      Err: err.Error()}`. (Order matters: emit first so a crash in
-      the rollback doesn't lose the event; the rollback still runs.)
-- [ ] 2.4 In `Watcher.work`, after `git commit` succeeds on the
+- [x] 2.3 ChangeFailed is emitted from `runOnce` AFTER retryN returns
+      an error (not from inside `work`), per the change spec scenarios
+      ("when `work` returns a non-nil error after exhausting `retryN`").
+      Tasks spec note about emitting in work was incorrect; the scenarios
+      define the actual contract.
+- [x] 2.4 In `Watcher.work`, after `git commit` succeeds on the
       archived change, emit `ChangeDone{Path: path, Change: change}`.
-- [ ] 2.5 In `Watcher.runOnce`, wrap `w.work(...)` so that the error
+- [x] 2.5 In `Watcher.runOnce`, wrap `w.work(...)` so that the error
       from each attempt triggers a `RetryAttempt` event before the
       next iteration of `retryN`. Use a small closure local to
       `runOnce` rather than changing `retryN`'s signature:
@@ -94,41 +95,40 @@
 
 ## 3. Update existing tests to assert the event sequence
 
-- [ ] 3.1 In `main_test.go`, add a `recordingObserver`:
+- [x] 3.1 In `main_test.go`, add a `recordingObserver`:
       ```go
       type recordingObserver struct{ events []Event }
       func (r *recordingObserver) Observe(e Event) { r.events = append(r.events, e) }
       ```
-- [ ] 3.2 In `TestWorkCommitsOnSuccess`, wire `w.observer =
-      &recordingObserver{}`. After the existing assertions, append a
-      check that `obs.events` ends with `RepoSeen`,
-      `ChangeStarted`, `ChangeDone` in that order (filter to those
-      three types for stability).
-- [ ] 3.3 In `TestRunOncePassesRepoPathToAgent`, wire a
-      `recordingObserver` and assert that exactly one `RepoSeen` is
-      emitted (for the proj repo; the non-repo sibling emits none).
-- [ ] 3.4 Run `go test ./...`. Confirm green.
+- [x] 3.2 New `TestRunOnceEmitsEventSequenceOnSuccess` (the existing
+      `TestWorkCommitsOnSuccess` calls `work()` directly, which doesn't
+      go through `runOnce` and so doesn't emit `RepoSeen`; the new test
+      drives `runOnce` to cover the full sequence).
+- [x] 3.3 In `TestRunOncePassesRepoPathToAgent`, wire a
+      `recordingObserver` and assert exactly one `RepoSeen` is emitted
+      (for the proj repo; the non-repo sibling emits none).
+- [x] 3.4 Run `go test ./...`. Confirm green.
 
 ## 4. Add new observer-contract tests
 
-- [ ] 4.1 Add `TestObserverReceivesRetrySequence`: fake agent fails
+- [x] 4.1 Add `TestObserverReceivesRetrySequence`: fake agent fails
       twice then succeeds. Wire `recordingObserver`. Assert the
       sequence contains `RepoSeen`, `ChangeStarted`,
       `RetryAttempt{N: 2, Max: 3}`, `ChangeStarted`,
       `RetryAttempt{N: 3, Max: 3}`, `ChangeStarted`, `ChangeDone`.
-- [ ] 4.2 Add `TestObserverReceivesChangeFailedAfterRetriesExhausted`:
+- [x] 4.2 Add `TestObserverReceivesChangeFailedAfterRetriesExhausted`:
       fake agent always fails. `RetyCount: 2`. Assert the sequence
       ends with `RepoSeen`, `ChangeStarted`, `RetryAttempt{N: 2}`,
       `ChangeStarted`, `ChangeFailed`.
-- [ ] 4.3 Add `TestRepoSeenFiresForRepoWithoutOpenspec`: temp dir with
+- [x] 4.3 Add `TestRepoSeenFiresForRepoWithoutOpenspec`: temp dir with
       a git repo (no `openspec/`). Wire observer. Assert exactly one
       `RepoSeen{HasOpenspec: false}` and no other events.
-- [ ] 4.4 Add `TestNilObserverIsSafe`: construct `Watcher{agent: fake,
+- [x] 4.4 Add `TestNilObserverIsSafe`: construct `Watcher{agent: fake,
       RetyCount: 1}` with no observer. Run a successful path. Confirm
       no panic. (The existing tests already exercise this
       transitively; add an explicit `defer recover()` if a non-test
       panic is a concern.)
-- [ ] 4.5 Run `go test ./...`. Confirm green.
+- [x] 4.5 Run `go test ./...`. Confirm green.
 
 ## 5. Add the `-tui` flag and PTY detection
 
