@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -73,8 +74,8 @@ type Watcher struct {
 	RetyCount int
 }
 
-func NewWatcher(n int) Watcher {
-	return Watcher{agent: PiAgent{Binary: "pi"}, RetyCount: n}
+func NewWatcher(binary string, n int) Watcher {
+	return Watcher{agent: PiAgent{Binary: binary}, RetyCount: n}
 }
 
 func (w Watcher) work(ctx context.Context, path string) (bool, error) {
@@ -150,7 +151,12 @@ func (w Watcher) Watch(ctx context.Context, wd string) error {
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	w := NewWatcher(3)
+	var (
+		pi    = flag.String("pi", "pi", "path to the pi binary")
+		retry = flag.Int("retry", 3, "retries per repo on failure")
+	)
+	flag.Parse()
+	w := NewWatcher(*pi, *retry)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
 	defer cancel()
 	path, err := os.Getwd()
