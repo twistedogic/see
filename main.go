@@ -120,6 +120,14 @@ func (w Watcher) work(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
+	ref, err := originalRef(path)
+	if err != nil {
+		return err
+	}
+	if ref == "" {
+		log.Printf("detached HEAD on %s; switch to a branch first", path)
+		return fmt.Errorf("detached HEAD on %s", path)
+	}
 	changes := ListActiveOpenSpecChanges(path)
 	if len(changes) == 0 {
 		log.Printf("no active change on %s", path)
@@ -127,25 +135,58 @@ func (w Watcher) work(ctx context.Context, path string) error {
 	}
 	change := changes[0]
 	log.Printf("working %q on %s", change, path)
+	branch := "see/" + change
+	if err := ensureBranch(path, current, branch); err != nil {
+		return err
+	}
 	if err := w.agent.Run(ctx, path, applyPrompt(change)); err != nil {
 		log.Printf("failed %q on %s: %v", change, path, err)
-		if rerr := exec.Command("git", "-C", path, "reset", "--hard", current).Run(); rerr != nil {
-			return rerr
+		// ponytail: rollback runs every cleanup step regardless of the previous failure so a partial undo doesn't strand the branch.
+		if out, rerr := exec.Command("git", "-C", path, "switch", ref).CombinedOutput(); rerr != nil {
+			log.Printf("switch back to %q failed: %v\n%s", ref, rerr, out)
+		}
+		if out, rerr := exec.Command("git", "-C", path, "reset", "--hard", current).CombinedOutput(); rerr != nil {
+			log.Printf("reset --hard %s failed: %v\n%s", current, rerr, out)
+		}
+		if out, rerr := exec.Command("git", "-C", path, "branch", "-D", branch).CombinedOutput(); rerr != nil {
+			log.Printf("branch -D %s failed: %v\n%s", branch, rerr, out)
 		}
 		return err
 	}
 	done := !slices.Contains(ListActiveOpenSpecChanges(path), change)
-	if done {
-		log.Printf("completed %q on %s", change, path)
-		// ponytail: commit runs inline; if `git add` fails (e.g., dirty submodules) we still try commit so manually-staged work isn't lost.
-		add := exec.Command("git", "-C", path, "add", "-A")
-		if err := add.Run(); err != nil {
-			log.Printf("git add failed %q on %s: %v", change, path, err)
+	if !done {
+		return nil
+	}
+	log.Printf("completed %q on %s", change, path)
+	// ponytail: same inline commit pattern as before — runs even when archive or commit fails so partial progress isn't lost.
+	add := exec.Command("git", "-C", path, "add", "-A")
+	if err := add.Run(); err != nil {
+		log.Printf("git add failed %q on %s: %v", change, path, err)
+	}
+	msg := fmt.Sprintf("see: apply openspec change %s", change)
+	if err := exec.Command("git", "-C", path, "commit", "-m", msg).Run(); err != nil {
+		log.Printf("git commit failed %q on %s: %v", change, path, err)
+	}
+	// ponytail: merge --no-ff so the watcher's involvement shows up as a graph node even on a single-commit see/<change>.
+	if out, err := exec.Command("git", "-C", path, "switch", ref).CombinedOutput(); err != nil {
+		return fmt.Errorf("switch to %s: %w\n%s", ref, err, out)
+	}
+	mergeMsg := fmt.Sprintf("see: merge openspec change %s", change)
+	if out, err := exec.Command("git", "-C", path, "merge", "--no-ff", branch, "-m", mergeMsg).CombinedOutput(); err != nil {
+		log.Printf("merge --no-ff %s failed: %v\n%s", branch, err, out)
+		if aout, aerr := exec.Command("git", "-C", path, "merge", "--abort").CombinedOutput(); aerr != nil {
+			log.Printf("merge --abort failed: %v\n%s", aerr, aout)
 		}
-		msg := fmt.Sprintf("see: apply openspec change %s", change)
-		if err := exec.Command("git", "-C", path, "commit", "-m", msg).Run(); err != nil {
-			log.Printf("git commit failed %q on %s: %v", change, path, err)
+		if rout, rerr := exec.Command("git", "-C", path, "reset", "--hard", current).CombinedOutput(); rerr != nil {
+			log.Printf("reset --hard %s failed: %v\n%s", current, rerr, rout)
 		}
+		if dout, derr := exec.Command("git", "-C", path, "branch", "-D", branch).CombinedOutput(); derr != nil {
+			log.Printf("branch -D %s failed: %v\n%s", branch, derr, dout)
+		}
+		return fmt.Errorf("merge %s: %w", branch, err)
+	}
+	if out, err := exec.Command("git", "-C", path, "branch", "-d", branch).CombinedOutput(); err != nil {
+		log.Printf("branch -d %s failed: %v\n%s", branch, err, out)
 	}
 	return nil
 }
