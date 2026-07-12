@@ -158,6 +158,7 @@ func (w Watcher) Watch(ctx context.Context, wd string) error {
 }
 
 func main() {
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	w := NewWatcher(3)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
 	defer cancel()
