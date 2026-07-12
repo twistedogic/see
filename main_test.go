@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -59,6 +60,31 @@ func TestApplyPromptMentionsChange(t *testing.T) {
 	}
 }
 
+// Contract: when every attempt errors, retryN returns the LAST error,
+// not nil and not the first error. This pins the post-refactor
+// contract that the silent-failure scenario (a later attempt returning
+// nil while a prior attempt errored) is unreachable.
+func TestRetryNReturnsLastErrorWhenAllAttemptsFail(t *testing.T) {
+	a := errors.New("a")
+	b := errors.New("b")
+	c := errors.New("c")
+	var calls int
+	got := retryN(3, func() error {
+		calls++
+		switch calls {
+		case 1:
+			return a
+		case 2:
+			return b
+		default:
+			return c
+		}
+	})
+	if got != c {
+		t.Fatalf("expected last error (%v), got %v", c, got)
+	}
+}
+
 // Regression: after work completes without error, the worktree must be committed
 // so the change survives a watcher restart. The agent's edits would otherwise
 // sit unstaged in the working tree.
@@ -100,12 +126,8 @@ func TestWorkCommitsOnSuccess(t *testing.T) {
 	w := Watcher{agent: agent, RetyCount: 1}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done, err := w.work(ctx, repo)
-	if err != nil {
+	if err := w.work(ctx, repo); err != nil {
 		t.Fatal(err)
-	}
-	if !done {
-		t.Fatal("expected done=true")
 	}
 	out, err := exec.Command("git", "-C", repo, "log", "--oneline").CombinedOutput()
 	if err != nil {

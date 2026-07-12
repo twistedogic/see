@@ -56,14 +56,15 @@ func GetCurrentCommit(cwd string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-func retryN(n int, f func() (bool, error)) error {
+// ponytail: previously took (bool, error); the (false, nil) state could
+// clobber a prior error and report silent success. Contract collapsed to
+// func() error so the bug class is unreachable.
+func retryN(n int, f func() error) error {
 	var err error
 	for range n {
-		complete, e := f()
-		if e == nil && complete {
+		if err = f(); err == nil {
 			return nil
 		}
-		err = e
 	}
 	return err
 }
@@ -78,24 +79,24 @@ func NewWatcher(binary string, n int) Watcher {
 	return Watcher{agent: PiAgent{Binary: binary}, RetyCount: n}
 }
 
-func (w Watcher) work(ctx context.Context, path string) (bool, error) {
+func (w Watcher) work(ctx context.Context, path string) error {
 	current, err := GetCurrentCommit(path)
 	if err != nil {
-		return false, err
+		return err
 	}
 	changes := ListActiveOpenSpecChanges(path)
 	if len(changes) == 0 {
 		log.Printf("no active change on %s", path)
-		return true, nil
+		return nil
 	}
 	change := changes[0]
 	log.Printf("working %q on %s", change, path)
 	if err := w.agent.Run(ctx, path, applyPrompt(change)); err != nil {
 		log.Printf("failed %q on %s: %v", change, path, err)
 		if rerr := exec.Command("git", "-C", path, "reset", "--hard", current).Run(); rerr != nil {
-			return false, rerr
+			return rerr
 		}
-		return false, err
+		return err
 	}
 	done := !slices.Contains(ListActiveOpenSpecChanges(path), change)
 	if done {
@@ -110,7 +111,7 @@ func (w Watcher) work(ctx context.Context, path string) (bool, error) {
 			log.Printf("git commit failed %q on %s: %v", change, path, err)
 		}
 	}
-	return done, nil
+	return nil
 }
 
 func (w Watcher) runOnce(ctx context.Context, wd string) error {
@@ -134,7 +135,7 @@ func (w Watcher) runOnce(ctx context.Context, wd string) error {
 				log.Printf("skipping %s: no commits", repo)
 				continue
 			}
-			if err := retryN(w.RetyCount, func() (bool, error) {
+			if err := retryN(w.RetyCount, func() error {
 				return w.work(ctx, repo)
 			}); err != nil {
 				return fmt.Errorf("%s: %w", repo, err)
