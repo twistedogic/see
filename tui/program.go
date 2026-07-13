@@ -54,3 +54,7 @@ func (c *ChanObserver) ChangeDone(path, change string) {
 func (c *ChanObserver) ChangeFailed(path, change, errMsg string) {
 	c.push(ChangeFailedMsg{Path: path, Change: change, Err: errMsg})
 }
+
+func (c *ChanObserver) LogPath(path, change string) {
+	c.push(LogPathMsg{Path: path, Change: change})
+}

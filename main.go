@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"golang.org/x/term"
 
@@ -39,23 +40,62 @@ func selectRunMode(mode string, isTTY bool) (runMode, string) {
 	}
 }
 
+// Agent.Run returns the log path (empty when capture was unavailable)
+// so the caller can surface it via the LogPath event.
 type Agent interface {
-	Run(ctx context.Context, path, prompt string) error
+	Run(ctx context.Context, path, change, prompt string) (string, error)
 }
 
 type PiAgent struct {
-	Binary         string
-	RedirectOutput bool
+	Binary string
 }
 
-func (p PiAgent) Run(ctx context.Context, path, prompt string) error {
+// logPathFor returns the full file path for a (repo, change) agent
+// invocation and ensures the log directory exists. Reads SEE_LOG_DIR
+// on each call; falls back to os.UserCacheDir()/see/logs/. Returns a
+// wrapped error on MkdirAll failure.
+func logPathFor(repo, change string) (string, error) {
+	dir := os.Getenv("SEE_LOG_DIR")
+	if dir == "" {
+		base, err := os.UserCacheDir()
+		if err != nil {
+			return "", fmt.Errorf("log dir: %w", err)
+		}
+		dir = filepath.Join(base, "see", "logs")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("log dir: %w", err)
+	}
+	filename := fmt.Sprintf("%s--%s--%s--%d.jsonl",
+		filepath.Base(repo),
+		change,
+		time.Now().UTC().Format("20060102T150405"),
+		os.Getpid(),
+	)
+	return filepath.Join(dir, filename), nil
+}
+
+func (p PiAgent) Run(ctx context.Context, path, change, prompt string) (string, error) {
 	cmd := exec.CommandContext(ctx, p.Binary, "--mode", "json", "--no-session", prompt)
 	cmd.Dir = path
-	if p.RedirectOutput {
-		cmd.Stdout = os.Stderr
-		cmd.Stderr = os.Stderr
+	logPath, logErr := logPathFor(path, change)
+	captured := false
+	if logErr == nil {
+		if f, err := os.Create(logPath); err != nil {
+			log.Printf("see: log file create failed (%v); running without capture", err)
+		} else {
+			cmd.Stdout = f
+			cmd.Stderr = f
+			defer f.Close()
+			captured = true
+		}
+	} else {
+		log.Printf("see: log dir unavailable (%v); running without capture", logErr)
 	}
-	return cmd.Run()
+	if !captured {
+		logPath = ""
+	}
+	return logPath, cmd.Run()
 }
 
 func applyPrompt(change string) string {
@@ -179,6 +219,13 @@ type ChangeFailed struct {
 
 func (ChangeFailed) isEvent() {}
 
+type LogPath struct {
+	Path   string
+	Change string
+}
+
+func (LogPath) isEvent() {}
+
 type Observer interface{ Observe(Event) }
 
 type Watcher struct {
@@ -223,8 +270,16 @@ func (w Watcher) work(ctx context.Context, path string) error {
 	if err := ensureBranch(path, current, branch); err != nil {
 		return err
 	}
-	if err := w.agent.Run(ctx, path, applyPrompt(change)); err != nil {
-		log.Printf("failed %q on %s: %v", change, path, err)
+	logPath, runErr := w.agent.Run(ctx, path, change, applyPrompt(change))
+	if logPath != "" {
+		if w.observer != nil {
+			w.observer.Observe(LogPath{Path: logPath, Change: change})
+		} else {
+			log.Printf("see: log → %s", logPath)
+		}
+	}
+	if runErr != nil {
+		log.Printf("failed %q on %s: %v", change, path, runErr)
 		// ponytail: rollback runs every cleanup step regardless of the previous failure so a partial undo doesn't strand the branch.
 		if out, rerr := exec.Command("git", "-C", path, "switch", ref).CombinedOutput(); rerr != nil {
 			log.Printf("switch back to %q failed: %v\n%s", ref, rerr, out)
@@ -235,7 +290,7 @@ func (w Watcher) work(ctx context.Context, path string) error {
 		if out, rerr := exec.Command("git", "-C", path, "branch", "-D", branch).CombinedOutput(); rerr != nil {
 			log.Printf("branch -D %s failed: %v\n%s", branch, rerr, out)
 		}
-		return err
+		return runErr
 	}
 	done := !slices.Contains(ListActiveOpenSpecChanges(path), change)
 	if !done {
@@ -411,7 +466,7 @@ func main() {
 // program owns signal handling; when it exits we cancel the watcher's
 // context so the tight poll loop returns.
 func runTUI(ctx context.Context, w *Watcher, binary, wd string) error {
-	w.agent = PiAgent{Binary: binary, RedirectOutput: true}
+	w.agent = PiAgent{Binary: binary}
 	prog, obs := tui.New()
 	w.observer = tuiObserver{obs: obs}
 	ctx, cancel := context.WithCancel(ctx)
@@ -459,5 +514,7 @@ func (o tuiObserver) Observe(e Event) {
 		o.obs.ChangeDone(e.Path, e.Change)
 	case ChangeFailed:
 		o.obs.ChangeFailed(e.Path, e.Change, e.Err)
+	case LogPath:
+		o.obs.LogPath(e.Path, e.Change)
 	}
 }

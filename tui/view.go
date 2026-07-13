@@ -106,7 +106,11 @@ func (m *Model) renderRow(r *RepoRow, showAge, showErr bool) string {
 	if showErr {
 		parts = append(parts, colErr.Render(errCol))
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Left, parts...)
+	row := lipgloss.JoinHorizontal(lipgloss.Left, parts...)
+	if r.LogPath != "" {
+		row += "\n      " + r.LogPath
+	}
+	return row
 }
 
 func phaseString(r *RepoRow) string {

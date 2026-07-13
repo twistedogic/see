@@ -33,3 +33,8 @@ type ChangeFailedMsg struct {
 	Change string
 	Err    string
 }
+
+type LogPathMsg struct {
+	Path   string
+	Change string
+}

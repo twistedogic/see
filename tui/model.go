@@ -57,6 +57,7 @@ type RepoRow struct {
 	StartedAt   time.Time
 	LastErr     string
 	HasOpenspec bool
+	LogPath     string
 }
 
 type Model struct {
@@ -129,6 +130,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		r.Phase = PhaseFailed
 		r.Change = msg.Change
 		r.LastErr = msg.Err
+	case LogPathMsg:
+		r := m.ensureRow(msg.Path)
+		r.LogPath = msg.Path
+		if r.Change == "" {
+			r.Change = msg.Change
+		}
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height

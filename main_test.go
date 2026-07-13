@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,21 +12,31 @@ import (
 	"time"
 )
 
-// fakeAgent records the path each Run was invoked with.
+// fakeAgent records the path each Run was invoked with. logPath, when
+// non-nil, overrides the default success-path return so a test can
+// exercise the capture-failure path (logPath pointing at "" means
+// capture was unavailable; nil preserves the default non-empty path).
 type fakeAgent struct {
-	runs  []string
-	err   error
-	onRun func() error
+	runs    []string
+	err     error
+	logPath *string
+	onRun   func() error
 }
 
-func (f *fakeAgent) Run(_ context.Context, path, _ string) error {
+func (f *fakeAgent) Run(_ context.Context, path, _, _ string) (string, error) {
 	f.runs = append(f.runs, path)
 	if f.onRun != nil {
 		if err := f.onRun(); err != nil {
-			return err
+			return "", err
 		}
 	}
-	return f.err
+	if f.err != nil {
+		return "", f.err
+	}
+	if f.logPath != nil {
+		return *f.logPath, nil
+	}
+	return "/tmp/fakeAgent.jsonl", nil
 }
 
 // recordingObserver captures the event sequence emitted by a Watcher.
@@ -104,39 +113,70 @@ func TestApplyPromptMentionsChange(t *testing.T) {
 	}
 }
 
-func TestPiAgentRedirectsOutputToStderr(t *testing.T) {
-	script := filepath.Join(t.TempDir(), "agent")
+func TestPiAgentCapturesOutputToLogFile(t *testing.T) {
+	dir := t.TempDir()
+	logDir := filepath.Join(dir, "logs")
+	t.Setenv("SEE_LOG_DIR", logDir)
+	script := filepath.Join(dir, "agent")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf stdout-line\nprintf stderr-line >&2\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	reader, writer, err := os.Pipe()
+	logPath, err := (PiAgent{Binary: script}).Run(context.Background(), dir, "task-1", "prompt")
 	if err != nil {
 		t.Fatal(err)
 	}
-	originalStderr := os.Stderr
-	t.Cleanup(func() {
-		os.Stderr = originalStderr
-		reader.Close()
-		writer.Close()
-	})
-	os.Stderr = writer
-	err = (PiAgent{Binary: script, RedirectOutput: true}).Run(context.Background(), t.TempDir(), "prompt")
-	os.Stderr = originalStderr
-	if closeErr := writer.Close(); err == nil {
-		err = closeErr
+	if !strings.HasPrefix(logPath, logDir) {
+		t.Fatalf("logPath = %q, want prefix %q", logPath, logDir)
 	}
-	output, readErr := io.ReadAll(reader)
-	reader.Close()
+	body, err := os.ReadFile(logPath)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("read log file: %v", err)
 	}
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
-	got := string(output)
+	got := string(body)
 	if !strings.Contains(got, "stdout-line") || !strings.Contains(got, "stderr-line") {
-		t.Fatalf("stderr = %q, want agent stdout and stderr", got)
+		t.Fatalf("log content = %q, want agent stdout and stderr", got)
+	}
+}
+
+func TestPiAgentProceedsWhenLogDirCannotBeCreated(t *testing.T) {
+	dir := t.TempDir()
+	// SEE_LOG_DIR points at a path under a regular file -> MkdirAll fails.
+	rogue := filepath.Join(dir, "file")
+	if err := os.WriteFile(rogue, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SEE_LOG_DIR", filepath.Join(rogue, "logs"))
+	script := filepath.Join(dir, "agent")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf hello\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath, err := (PiAgent{Binary: script}).Run(context.Background(), dir, "task-1", "prompt")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if logPath != "" {
+		t.Fatalf("logPath = %q, want empty on capture failure", logPath)
+	}
+}
+
+func TestPiAgentRespectsSeeLogDir(t *testing.T) {
+	dir := t.TempDir()
+	logDir := filepath.Join(dir, "custom")
+	t.Setenv("SEE_LOG_DIR", logDir)
+	script := filepath.Join(dir, "agent")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf hello\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath, err := (PiAgent{Binary: script}).Run(context.Background(), dir, "task-1", "prompt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(logPath, logDir+string(filepath.Separator)) {
+		t.Fatalf("logPath = %q, want prefix %q", logPath, logDir+string(filepath.Separator))
+	}
+	if _, err := os.Stat(logPath); err != nil {
+		t.Fatalf("log file not created at %q: %v", logPath, err)
 	}
 }
 
@@ -146,7 +186,7 @@ func TestPiAgentPreservesExitCodeByDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := (PiAgent{Binary: script}).Run(context.Background(), t.TempDir(), "prompt")
+	_, err := (PiAgent{Binary: script}).Run(context.Background(), t.TempDir(), "task-1", "prompt")
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
 		t.Fatalf("Run() error = %v, want exit code 7", err)
@@ -286,7 +326,7 @@ func TestRunOnceEmitsEventSequenceOnSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := obs.eventTypes()
-	wantPrefix := []string{"main.RepoSeen", "main.ChangeStarted", "main.ChangeDone"}
+	wantPrefix := []string{"main.RepoSeen", "main.ChangeStarted", "main.LogPath", "main.ChangeDone"}
 	if len(got) < len(wantPrefix) {
 		t.Fatalf("got %d events, want at least %d: %v", len(got), len(wantPrefix), got)
 	}
@@ -313,9 +353,9 @@ func TestRunOnceEmitsEventSequenceOnSuccess(t *testing.T) {
 	if cs.Change != "task-1" || cs.Path != repo {
 		t.Fatalf("ChangeStarted = %+v, want {Path: %q, Change: task-1}", cs, repo)
 	}
-	cd, ok := obs.events[2].(ChangeDone)
+	cd, ok := obs.events[3].(ChangeDone)
 	if !ok {
-		t.Fatalf("third event is not ChangeDone: %T", obs.events[2])
+		t.Fatalf("fourth event is not ChangeDone: %T", obs.events[3])
 	}
 	if cd.Change != "task-1" || cd.Path != repo {
 		t.Fatalf("ChangeDone = %+v, want {Path: %q, Change: task-1}", cd, repo)
@@ -762,6 +802,7 @@ func TestObserverReceivesRetrySequence(t *testing.T) {
 		"main.ChangeStarted",
 		"main.RetryAttempt",
 		"main.ChangeStarted",
+		"main.LogPath",
 		"main.ChangeDone",
 	}
 	if len(got) != len(want) {
@@ -939,6 +980,78 @@ func TestNilObserverIsSafe(t *testing.T) {
 	}
 	if len(agent.runs) != 1 {
 		t.Fatalf("agent.Run called %d times, want 1", len(agent.runs))
+	}
+}
+
+// Regression: Watcher.work must emit LogPath after a successful agent
+// run with capture enabled. Pins the surfacing of the per-run log
+// path so TUI consumers can render it.
+func TestWorkEmitsLogPathOnSuccessfulCapture(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "proj")
+	mkRepoWithChange(t, repo, "task-1")
+	want := "/var/folders/x/see/task-1--20260714T153022--99999.jsonl"
+	agent := &fakeAgent{
+		logPath: &want,
+		onRun: func() error {
+			return os.Rename(
+				filepath.Join(repo, "openspec", "changes", "task-1"),
+				filepath.Join(repo, "openspec", "changes", "archive", "task-1"),
+			)
+		},
+	}
+	obs := &recordingObserver{}
+	w := Watcher{agent: agent, RetyCount: 1, observer: obs}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := w.work(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	var lp *LogPath
+	for _, e := range obs.events {
+		if p, ok := e.(LogPath); ok {
+			lp = &p
+		}
+	}
+	if lp == nil {
+		t.Fatalf("no LogPath event emitted; events: %v", obs.eventTypes())
+	}
+	if lp.Path != want {
+		t.Fatalf("LogPath.Path = %q, want %q", lp.Path, want)
+	}
+	if lp.Change != "task-1" {
+		t.Fatalf("LogPath.Change = %q, want task-1", lp.Change)
+	}
+}
+
+// Regression: when the agent signals capture-failure (empty logPath),
+// work must NOT emit LogPath. Capture is observability, not correctness,
+// and a missing file means there is no path to surface.
+func TestWorkDoesNotEmitLogPathOnCaptureFailure(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "proj")
+	mkRepoWithChange(t, repo, "task-1")
+	empty := ""
+	agent := &fakeAgent{
+		logPath: &empty,
+		onRun: func() error {
+			return os.Rename(
+				filepath.Join(repo, "openspec", "changes", "task-1"),
+				filepath.Join(repo, "openspec", "changes", "archive", "task-1"),
+			)
+		},
+	}
+	obs := &recordingObserver{}
+	w := Watcher{agent: agent, RetyCount: 1, observer: obs}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := w.work(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range obs.events {
+		if _, ok := e.(LogPath); ok {
+			t.Fatalf("LogPath emitted despite capture failure; events: %v", obs.eventTypes())
+		}
 	}
 }
 

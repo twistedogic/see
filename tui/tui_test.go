@@ -266,3 +266,41 @@ func TestViewHidesAgeColumnBelow80Cols(t *testing.T) {
 		t.Fatalf("ERR should be hidden at width 60:\n%s", view)
 	}
 }
+
+func TestViewRendersLogPathWhenSet(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	repo := "/tmp/proj"
+	lp := "/tmp/see/task-1--20260714T153022--12345.jsonl"
+	m = driveMessages(m,
+		RepoSeenMsg{Path: repo, HasOpenspec: true},
+		ChangeStartedMsg{Path: repo, Change: "task-1"},
+		ChangeDoneMsg{Path: repo, Change: "task-1"},
+		LogPathMsg{Path: lp, Change: "task-1"},
+	)
+	view := m.View()
+	if !strings.Contains(view, lp) {
+		t.Fatalf("view missing log path %q:\n%s", lp, view)
+	}
+}
+
+func TestViewOmitsLogPathWhenUnset(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	repo := "/tmp/proj"
+	m = driveMessages(m,
+		RepoSeenMsg{Path: repo, HasOpenspec: true},
+		ChangeStartedMsg{Path: repo, Change: "task-1"},
+		ChangeDoneMsg{Path: repo, Change: "task-1"},
+	)
+	view := m.View()
+	// Default shape is header + 1 row + footer = 3 lines. No extra row
+	// bearing a path (which would be a 4th line).
+	lines := strings.Split(view, "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected exactly 3 lines (header + row + footer), got %d:\n%s", len(lines), view)
+	}
+	if strings.Contains(view, ".jsonl") {
+		t.Fatalf("view leaked a log path when none was set:\n%s", view)
+	}
+}
