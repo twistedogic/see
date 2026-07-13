@@ -17,6 +17,28 @@ import (
 	"github.com/twistedogic/see/tui"
 )
 
+type runMode int
+
+const (
+	modeUnknown runMode = iota
+	modeLog
+	modeTUI
+)
+
+func selectRunMode(mode string, isTTY bool) (runMode, string) {
+	switch mode {
+	case "log":
+		return modeLog, ""
+	case "tui":
+		if !isTTY {
+			return modeUnknown, "see: --mode=tui requires a TTY; rerun with --mode=log"
+		}
+		return modeTUI, ""
+	default:
+		return modeUnknown, fmt.Sprintf("see: unknown --mode=%q (want: tui, log)", mode)
+	}
+}
+
 type Agent interface {
 	Run(ctx context.Context, path, prompt string) error
 }
@@ -341,9 +363,9 @@ func (w Watcher) Watch(ctx context.Context, wd string) error {
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	var (
-		pi      = flag.String("pi", "pi", "path to the pi binary")
-		retry   = flag.Int("retry", 3, "retries per repo on failure")
-		tuiFlag = flag.Bool("tui", false, "render a live status grid (requires a TTY)")
+		pi       = flag.String("pi", "pi", "path to the pi binary")
+		retry    = flag.Int("retry", 3, "retries per repo on failure")
+		modeFlag = flag.String("mode", "tui", "output mode (default \"tui\"); one of: tui, log")
 	)
 	flag.Parse()
 	w := NewWatcher(*pi, *retry)
@@ -352,9 +374,13 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if *tuiFlag && !term.IsTerminal(int(os.Stdout.Fd())) {
-		fmt.Fprintln(os.Stderr, "see: --tui requires a TTY; falling back to log mode")
-	} else if *tuiFlag {
+	mode, msg := selectRunMode(*modeFlag, term.IsTerminal(int(os.Stdout.Fd())))
+	if mode == modeUnknown {
+		fmt.Fprintln(os.Stderr, msg)
+		flag.Usage()
+		os.Exit(2)
+	}
+	if mode == modeTUI {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		if err := runTUI(ctx, &w, *pi, path); err != nil {
@@ -362,7 +388,7 @@ func main() {
 		}
 		return
 	}
-
+	// mode == modeLog
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
 	defer cancel()
 	if err := w.Watch(ctx, path); err != nil {

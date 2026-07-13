@@ -44,6 +44,34 @@ func (r *recordingObserver) eventTypes() []string {
 	return out
 }
 
+func TestSelectRunMode(t *testing.T) {
+	tests := []struct {
+		name    string
+		mode    string
+		isTTY   bool
+		want    runMode
+		wantMsg string
+	}{
+		{"log with TTY", "log", true, modeLog, ""},
+		{"log without TTY", "log", false, modeLog, ""},
+		{"tui with TTY", "tui", true, modeTUI, ""},
+		{"tui without TTY", "tui", false, modeUnknown, "see: --mode=tui requires a TTY; rerun with --mode=log"},
+		{"unknown value with TTY", "foo", true, modeUnknown, `see: unknown --mode="foo" (want: tui, log)`},
+		{"empty value with TTY", "", true, modeUnknown, `see: unknown --mode="" (want: tui, log)`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotMode, gotMsg := selectRunMode(tc.mode, tc.isTTY)
+			if gotMode != tc.want {
+				t.Fatalf("mode = %v, want %v", gotMode, tc.want)
+			}
+			if gotMsg != tc.wantMsg {
+				t.Fatalf("msg = %q, want %q", gotMsg, tc.wantMsg)
+			}
+		})
+	}
+}
+
 func TestListActiveOpenSpecChanges(t *testing.T) {
 	dir := t.TempDir()
 	changes := filepath.Join(dir, "openspec", "changes")
