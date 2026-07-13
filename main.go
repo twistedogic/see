@@ -187,6 +187,9 @@ type Watcher struct {
 	observer Observer
 
 	RetyCount int
+	// ponytail: Once mirrors RetyCount — zero-default knob on the watcher,
+	// read inside Watch. Once=true makes Watch run a single pass and return.
+	Once bool
 }
 
 func NewWatcher(binary string, n int) Watcher {
@@ -348,6 +351,12 @@ func repoHasOpenspec(path string) bool {
 
 func (w Watcher) Watch(ctx context.Context, wd string) error {
 	// ponytail: tight poll loop, add a backoff sleep when watching large trees.
+	if w.Once {
+		if err := w.runOnce(ctx, wd); err != nil {
+			return err
+		}
+		return nil
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -366,9 +375,11 @@ func main() {
 		pi       = flag.String("pi", "pi", "path to the pi binary")
 		retry    = flag.Int("retry", 3, "retries per repo on failure")
 		modeFlag = flag.String("mode", "tui", "output mode (default \"tui\"); one of: tui, log")
+		once     = flag.Bool("once", false, "run one scan and exit")
 	)
 	flag.Parse()
 	w := NewWatcher(*pi, *retry)
+	w.Once = *once
 	path, err := os.Getwd()
 	if err != nil {
 		log.Fatal(err)
@@ -407,6 +418,15 @@ func runTUI(ctx context.Context, w *Watcher, binary, wd string) error {
 	defer cancel()
 	watchErr := make(chan error, 1)
 	go func() { watchErr <- w.Watch(ctx, wd) }()
+	// ponytail: watcher-exit → prog.Quit() wiring for --once. In loop mode the
+	// watcher only exits after cancel() runs (which fires after prog.Run()
+	// returns), so Quit() on an already-exited program is a no-op.
+	go func() {
+		if err := <-watchErr; err != nil {
+			log.Printf("watcher: %v", err)
+		}
+		prog.Quit()
+	}()
 	_, runErr := prog.Run()
 	// Program.Run() returned; cancel to break the watcher out of its
 	// poll loop if it's still running, then wait for it.

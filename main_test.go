@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeAgent records the path each Run was invoked with.
@@ -938,5 +939,104 @@ func TestNilObserverIsSafe(t *testing.T) {
 	}
 	if len(agent.runs) != 1 {
 		t.Fatalf("agent.Run called %d times, want 1", len(agent.runs))
+	}
+}
+
+// Regression: with Watcher.Once=true, Watch returns after a single pass,
+// even when the context is still live. Agent is invoked exactly once.
+func TestWatchReturnsAfterOnePassWhenOnce(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "proj")
+	mkRepoWithChange(t, repo, "task-1")
+	agent := &fakeAgent{
+		onRun: func() error {
+			return os.Rename(
+				filepath.Join(repo, "openspec", "changes", "task-1"),
+				filepath.Join(repo, "openspec", "changes", "archive", "task-1"),
+			)
+		},
+	}
+	w := Watcher{agent: agent, RetyCount: 1, Once: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := w.Watch(ctx, root); err != nil {
+		t.Fatalf("Watch returned %v, want nil", err)
+	}
+	if len(agent.runs) != 1 {
+		t.Fatalf("agent.Run called %d times, want 1", len(agent.runs))
+	}
+}
+
+// Regression: with Watcher.Once=false (default), Watch keeps looping
+// until the context is cancelled. Agent runs at least once and ctx
+// cancellation propagates a clean nil return.
+func TestWatchLoopsUntilCtxCancelWhenNotOnce(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "proj")
+	mkRepoWithChange(t, repo, "task-1")
+	agent := &fakeAgent{err: nil} // no onRun → change stays active → loop continues
+	w := Watcher{agent: agent, RetyCount: 1, Once: false}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	if err := w.Watch(ctx, root); err != nil {
+		t.Fatalf("Watch returned %v, want nil after cancel", err)
+	}
+	if len(agent.runs) < 1 {
+		t.Fatalf("agent.Run called %d times, want >= 1", len(agent.runs))
+	}
+}
+
+// Regression: with Watcher.Once=false, a non-nil runOnce error must
+// surface immediately from Watch without invoking runOnce again.
+func TestWatchStopsOnFirstPassError(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "proj")
+	mkRepoWithChange(t, repo, "task-1")
+	boom := errors.New("boom")
+	agent := &fakeAgent{err: boom}
+	w := Watcher{agent: agent, RetyCount: 1, Once: false}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err := w.Watch(ctx, root)
+	if err == nil {
+		t.Fatal("Watch returned nil, want error")
+	}
+	if len(agent.runs) != 1 {
+		t.Fatalf("agent.Run called %d times, want 1", len(agent.runs))
+	}
+}
+
+// mkRepoWithChange bootstraps a one-commit git repo on branch main with
+// the given active change and an archive/ sibling. Shared by the
+// Watcher.Watch tests that need a real repo for the watcher to find.
+func mkRepoWithChange(t *testing.T, repo, change string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "t@e")
+	run("config", "user.name", "t")
+	run("commit", "--allow-empty", "-q", "-m", "init")
+	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/main").Run(); err != nil {
+		run("switch", "-c", "main")
+	}
+	if err := os.MkdirAll(filepath.Join(repo, "openspec", "changes", change), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, "openspec", "changes", "archive"), 0o755); err != nil {
+		t.Fatal(err)
 	}
 }
