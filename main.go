@@ -11,6 +11,10 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"golang.org/x/term"
+
+	"github.com/twistedogic/see/tui"
 )
 
 type Agent interface {
@@ -337,18 +341,77 @@ func (w Watcher) Watch(ctx context.Context, wd string) error {
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	var (
-		pi    = flag.String("pi", "pi", "path to the pi binary")
-		retry = flag.Int("retry", 3, "retries per repo on failure")
+		pi      = flag.String("pi", "pi", "path to the pi binary")
+		retry   = flag.Int("retry", 3, "retries per repo on failure")
+		tuiFlag = flag.Bool("tui", false, "render a live status grid (requires a TTY)")
 	)
 	flag.Parse()
 	w := NewWatcher(*pi, *retry)
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
-	defer cancel()
 	path, err := os.Getwd()
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	if *tuiFlag && !term.IsTerminal(int(os.Stdout.Fd())) {
+		fmt.Fprintln(os.Stderr, "see: --tui requires a TTY; falling back to log mode")
+	} else if *tuiFlag {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if err := runTUI(ctx, &w, *pi, path); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
+	defer cancel()
 	if err := w.Watch(ctx, path); err != nil {
 		log.Fatal(err)
+	}
+}
+
+// runTUI runs the watcher with a TUI observer wired in. The bubbletea
+// program owns signal handling; when it exits we cancel the watcher's
+// context so the tight poll loop returns.
+func runTUI(ctx context.Context, w *Watcher, binary, wd string) error {
+	w.agent = PiAgent{Binary: binary, RedirectOutput: true}
+	prog, obs := tui.New()
+	w.observer = tuiObserver{obs: obs}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	watchErr := make(chan error, 1)
+	go func() { watchErr <- w.Watch(ctx, wd) }()
+	_, runErr := prog.Run()
+	// Program.Run() returned; cancel to break the watcher out of its
+	// poll loop if it's still running, then wait for it.
+	cancel()
+	if werr := <-watchErr; werr != nil && runErr == nil {
+		runErr = werr
+	}
+	if runErr != nil {
+		fmt.Fprintln(os.Stderr, "see:", runErr)
+	}
+	return runErr
+}
+
+// tuiObserver implements main.Observer by translating each Event into
+// a typed method call on tui.ChanObserver, which sends a bubbletea
+// message to the running Program. The type-switch lives here (not in
+// the tui package) so the tui package has no dependency on main's
+// Event types.
+type tuiObserver struct{ obs *tui.ChanObserver }
+
+func (o tuiObserver) Observe(e Event) {
+	switch e := e.(type) {
+	case RepoSeen:
+		o.obs.RepoSeen(e.Path, e.HasOpenspec)
+	case ChangeStarted:
+		o.obs.ChangeStarted(e.Path, e.Change)
+	case RetryAttempt:
+		o.obs.RetryAttempt(e.Path, e.Change, e.N, e.Max, e.Err)
+	case ChangeDone:
+		o.obs.ChangeDone(e.Path, e.Change)
+	case ChangeFailed:
+		o.obs.ChangeFailed(e.Path, e.Change, e.Err)
 	}
 }

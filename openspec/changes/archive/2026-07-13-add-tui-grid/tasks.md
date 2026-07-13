@@ -132,13 +132,13 @@
 
 ## 5. Add the `-tui` flag and PTY detection
 
-- [ ] 5.1 Add to the `flag` block in `main()`:
+- [x] 5.1 Add to the `flag` block in `main()`:
       ```go
       tui := flag.Bool("tui", false, "render a live status grid (requires a TTY)")
       ```
-- [ ] 5.2 Add `golang.org/x/term` to `go.mod` and an `import` of it.
+- [x] 5.2 Add `golang.org/x/term` to `go.mod` and an `import` of it.
       Use `term.IsTerminal(int(os.Stdout.Fd()))` for detection.
-- [ ] 5.3 In `main()`, after `flag.Parse()`, branch:
+- [x] 5.3 In `main()`, after `flag.Parse()`, branch:
       ```go
       if *tui && !term.IsTerminal(int(os.Stdout.Fd())) {
           fmt.Fprintln(os.Stderr, "see: --tui requires a TTY; falling back to log mode")
@@ -151,9 +151,9 @@
 
 ## 6. Create the `tui` package
 
-- [ ] 6.1 Add `tui/model.go`, `tui/view.go`, `tui/program.go`. Use
+- [x] 6.1 Add `tui/model.go`, `tui/view.go`, `tui/program.go`. Use
       `package tui` (not `package main`).
-- [ ] 6.2 In `tui/model.go`, define:
+- [x] 6.2 In `tui/model.go`, define:
       ```go
       type Phase int
       const (
@@ -182,11 +182,11 @@
           events     <-chan Event
       }
       ```
-- [ ] 6.3 In `tui/model.go`, implement `Init`, `Update`, `View`.
+- [x] 6.3 In `tui/model.go`, implement `Init`, `Update`, `View`.
       `Init` returns a `tea.Cmd` that reads one event from `events`
       and returns it as a `tea.Msg`. `Update` type-switches on the
       `Event` and updates `rows`. `View` renders the grid (see 6.5).
-- [ ] 6.4 In `tui/view.go`, render the grid with `lipgloss`:
+- [x] 6.4 In `tui/view.go`, render the grid with `lipgloss`:
       ```go
       func (m Model) View() string {
           // Header row: REPO | CHANGE | PHASE | RETRY | AGE | ERR
@@ -197,7 +197,7 @@
       Use `lipgloss.NewStyle().Width(n).Align(lipgloss.Left)` per
       column. Truncate per-cell with `[]rune` slicing + `…`. Below
       100 cols, omit AGE then ERR.
-- [ ] 6.5 In `tui/program.go`, define:
+- [x] 6.5 In `tui/program.go`, define:
       ```go
       func NewProgram(w *main.Watcher, observer Observer) *tea.Program {
           events := make(chan Event, 64)
@@ -215,10 +215,14 @@
       implementation**: prefer the second if it doesn't churn
       `main_test.go`. If it does, keep `Watcher` in `main` and add a
       `tui.Run` entrypoint in `main.go` that takes the channel.
+      Decision: kept `Watcher` in `main` (per design doc); tui
+      defines its own message types and `main.tuiObserver` translates
+      Event → typed method call on `tui.ChanObserver` which sends
+      the bubbletea Msg.
 
 ## 7. Wire agent stderr redirect in TUI mode
 
-- [ ] 7.1 Add a flag or boolean to `PiAgent` (or to `Watcher`) that
+- [x] 7.1 Add a flag or boolean to `PiAgent` (or to `Watcher`) that
       controls whether `cmd.Stdout` and `cmd.Stderr` are set to
       `os.Stderr`. Default false (current behavior). The TUI mode
       sets it true. (`PiAgent.RedirectOutput` and its behavioral test are
@@ -229,36 +233,36 @@
 
 ## 8. TUI tests
 
-- [ ] 8.1 Add `tui/tui_test.go`. Build a `Model` with a tiny in-memory
+- [x] 8.1 Add `tui/tui_test.go`. Build a `Model` with a tiny in-memory
       event channel. Send `RepoSeen`, `ChangeStarted`, `ChangeDone`
       through `Update`. Call `View()`. Assert the output contains the
       repo name, the change name, the `done` glyph, and the footer
       line. Use a snapshot-style assertion on the full string for
       regression coverage.
-- [ ] 8.2 Add a `TestViewHandlesNoSpecRepo`: send `RepoSeen` with
+- [x] 8.2 Add a `TestViewHandlesNoSpecRepo`: send `RepoSeen` with
       `HasOpenspec: false`. Confirm `View()` shows `○ no-spec` and
       `—` for change/retry.
-- [ ] 8.3 Add a `TestViewTruncatesLongNames`: a repo with a 50-char
+- [x] 8.3 Add a `TestViewTruncatesLongNames`: a repo with a 50-char
       basename. Confirm the rendered cell ends with `…` and is no
       wider than the column.
-- [ ] 8.4 Add a `TestUpdateIgnoresUnknownEvents`: send an event type
+- [x] 8.4 Add a `TestUpdateIgnoresUnknownEvents`: send an event type
       not in the spec (define a stub `unknownEv` for the test).
       Confirm the model returns without panic and the row map is
       unchanged.
 
 ## 9. Verify
 
-- [ ] 9.1 `go vet ./...` clean.
-- [ ] 9.2 `go build ./...` clean.
-- [ ] 9.3 `go test -race ./...` green.
-- [ ] 9.4 Manual smoke test: build, run `see --tui` against a fixture
+- [x] 9.1 `go vet ./...` clean.
+- [x] 9.2 `go build ./...` clean.
+- [x] 9.3 `go test -race ./...` green.
+- [x] 9.4 Manual smoke test: build, run `see --tui` against a fixture
       with one openspec repo and one without. Confirm the grid
       renders, phase transitions update, `[q]` exits cleanly, and the
       terminal is restored.
-- [ ] 9.5 Manual smoke test: `see --tui | cat`. Confirm the warning
+- [x] 9.5 Manual smoke test: `see --tui | cat`. Confirm the warning
       line and the log output appear on stderr, exit status matches
       the no-flag equivalent.
-- [ ] 9.6 Manual smoke test: a repo whose agent fails three times.
+- [x] 9.6 Manual smoke test: a repo whose agent fails three times.
       Confirm the grid shows `1/3`, `2/3`, `3/3`, then `failed`, then
       the watcher exits with non-zero status and the original
       branch is untouched (this last check is also covered by
