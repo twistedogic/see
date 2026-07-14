@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -40,61 +39,43 @@ func selectRunMode(mode string, isTTY bool) (runMode, string) {
 	}
 }
 
-// Agent.Run returns the log path (empty when capture was unavailable)
-// so the caller can surface it via the LogPath event.
+// Agent.Run returns the log path (empty only when capture failed
+// before the agent was invoked) so the caller can surface it via
+// the LogPath event. After the silent-tui change, a non-empty
+// logPath is the rule rather than the exception — the log directory
+// is validated up front by ensureLogDir.
 type Agent interface {
 	Run(ctx context.Context, path, change, prompt string) (string, error)
 }
 
 type PiAgent struct {
 	Binary string
+	LogDir string
 }
 
-// logPathFor returns the full file path for a (repo, change) agent
-// invocation and ensures the log directory exists. Reads SEE_LOG_DIR
-// on each call; falls back to os.UserCacheDir()/see/logs/. Returns a
-// wrapped error on MkdirAll failure.
-func logPathFor(repo, change string) (string, error) {
-	dir := os.Getenv("SEE_LOG_DIR")
-	if dir == "" {
-		base, err := os.UserCacheDir()
-		if err != nil {
-			return "", fmt.Errorf("log dir: %w", err)
-		}
-		dir = filepath.Join(base, "see", "logs")
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("log dir: %w", err)
-	}
-	filename := fmt.Sprintf("%s--%s--%s--%d.jsonl",
+// pathFor builds the per-invocation JSONL filename. Pure: no I/O,
+// no environment lookup, no fallback. The caller is responsible for
+// ensuring LogDir exists.
+func pathFor(repo, change string) string {
+	return fmt.Sprintf("%s--%s--%s--%d.jsonl",
 		filepath.Base(repo),
 		change,
 		time.Now().UTC().Format("20060102T150405"),
 		os.Getpid(),
 	)
-	return filepath.Join(dir, filename), nil
 }
 
 func (p PiAgent) Run(ctx context.Context, path, change, prompt string) (string, error) {
 	cmd := exec.CommandContext(ctx, p.Binary, "--mode", "json", "--no-session", prompt)
 	cmd.Dir = path
-	logPath, logErr := logPathFor(path, change)
-	captured := false
-	if logErr == nil {
-		if f, err := os.Create(logPath); err != nil {
-			log.Printf("see: log file create failed (%v); running without capture", err)
-		} else {
-			cmd.Stdout = f
-			cmd.Stderr = f
-			defer f.Close()
-			captured = true
-		}
-	} else {
-		log.Printf("see: log dir unavailable (%v); running without capture", logErr)
+	logPath := filepath.Join(p.LogDir, pathFor(path, change))
+	f, err := os.Create(logPath)
+	if err != nil {
+		return "", fmt.Errorf("see: log file create failed: %w", err)
 	}
-	if !captured {
-		logPath = ""
-	}
+	defer f.Close()
+	cmd.Stdout = f
+	cmd.Stderr = f
 	return logPath, cmd.Run()
 }
 
@@ -226,6 +207,29 @@ type LogPath struct {
 
 func (LogPath) isEvent() {}
 
+// Warning reports a per-repo cleanup or pre-run check step that
+// failed but is not itself the reason Watcher.work returns an error.
+// The Msg field carries the human-readable detail; the JSONL is the
+// source of truth for the message text.
+type Warning struct {
+	Path   string
+	Change string
+	Msg    string
+}
+
+func (Warning) isEvent() {}
+
+// InfraError reports a process-level failure: the watcher goroutine
+// returned an error (Where == "watcher") or the bubbletea program
+// returned an error from Run (Where == "tui"). It is emitted before
+// the process exits with a non-zero status.
+type InfraError struct {
+	Where string
+	Err   string
+}
+
+func (InfraError) isEvent() {}
+
 type Observer interface{ Observe(Event) }
 
 type Watcher struct {
@@ -243,6 +247,16 @@ func NewWatcher(binary string, n int) Watcher {
 	return Watcher{agent: PiAgent{Binary: binary}, RetyCount: n}
 }
 
+// warn emits a Warning event to the observer when one is wired.
+// Centralised so cleanup-step call sites read as `w.warn(...)` and
+// stay silent in log mode without an observer (mirrors the
+// observer-nil pattern used elsewhere in Watcher.work).
+func (w Watcher) warn(path, change, msg string) {
+	if w.observer != nil {
+		w.observer.Observe(Warning{Path: path, Change: change, Msg: msg})
+	}
+}
+
 func (w Watcher) work(ctx context.Context, path string) error {
 	current, err := GetCurrentCommit(path)
 	if err != nil {
@@ -253,16 +267,14 @@ func (w Watcher) work(ctx context.Context, path string) error {
 		return err
 	}
 	if ref == "" {
-		log.Printf("detached HEAD on %s; switch to a branch first", path)
+		w.warn(path, "", "detached HEAD; switch to a branch first")
 		return fmt.Errorf("detached HEAD on %s", path)
 	}
 	changes := ListActiveOpenSpecChanges(path)
 	if len(changes) == 0 {
-		log.Printf("no active change on %s", path)
 		return nil
 	}
 	change := changes[0]
-	log.Printf("working %q on %s", change, path)
 	branch := "see/" + change
 	if w.observer != nil {
 		w.observer.Observe(ChangeStarted{Path: path, Change: change})
@@ -271,24 +283,19 @@ func (w Watcher) work(ctx context.Context, path string) error {
 		return err
 	}
 	logPath, runErr := w.agent.Run(ctx, path, change, applyPrompt(change))
-	if logPath != "" {
-		if w.observer != nil {
-			w.observer.Observe(LogPath{Path: logPath, Change: change})
-		} else {
-			log.Printf("see: log → %s", logPath)
-		}
+	if logPath != "" && w.observer != nil {
+		w.observer.Observe(LogPath{Path: logPath, Change: change})
 	}
 	if runErr != nil {
-		log.Printf("failed %q on %s: %v", change, path, runErr)
 		// ponytail: rollback runs every cleanup step regardless of the previous failure so a partial undo doesn't strand the branch.
 		if out, rerr := exec.Command("git", "-C", path, "switch", ref).CombinedOutput(); rerr != nil {
-			log.Printf("switch back to %q failed: %v\n%s", ref, rerr, out)
+			w.warn(path, change, fmt.Sprintf("switch back to %q failed: %v\n%s", ref, rerr, out))
 		}
 		if out, rerr := exec.Command("git", "-C", path, "reset", "--hard", current).CombinedOutput(); rerr != nil {
-			log.Printf("reset --hard %s failed: %v\n%s", current, rerr, out)
+			w.warn(path, change, fmt.Sprintf("reset --hard %s failed: %v\n%s", current, rerr, out))
 		}
 		if out, rerr := exec.Command("git", "-C", path, "branch", "-D", branch).CombinedOutput(); rerr != nil {
-			log.Printf("branch -D %s failed: %v\n%s", branch, rerr, out)
+			w.warn(path, change, fmt.Sprintf("branch -D %s failed: %v\n%s", branch, rerr, out))
 		}
 		return runErr
 	}
@@ -296,15 +303,14 @@ func (w Watcher) work(ctx context.Context, path string) error {
 	if !done {
 		return nil
 	}
-	log.Printf("completed %q on %s", change, path)
 	// ponytail: same inline commit pattern as before — runs even when archive or commit fails so partial progress isn't lost.
 	add := exec.Command("git", "-C", path, "add", "-A")
 	if err := add.Run(); err != nil {
-		log.Printf("git add failed %q on %s: %v", change, path, err)
+		w.warn(path, change, fmt.Sprintf("git add failed: %v", err))
 	}
 	msg := fmt.Sprintf("see: apply openspec change %s", change)
 	if err := exec.Command("git", "-C", path, "commit", "-m", msg).Run(); err != nil {
-		log.Printf("git commit failed %q on %s: %v", change, path, err)
+		w.warn(path, change, fmt.Sprintf("git commit failed: %v", err))
 	}
 	if w.observer != nil {
 		w.observer.Observe(ChangeDone{Path: path, Change: change})
@@ -315,20 +321,20 @@ func (w Watcher) work(ctx context.Context, path string) error {
 	}
 	mergeMsg := fmt.Sprintf("see: merge openspec change %s", change)
 	if out, err := exec.Command("git", "-C", path, "merge", "--no-ff", branch, "-m", mergeMsg).CombinedOutput(); err != nil {
-		log.Printf("merge --no-ff %s failed: %v\n%s", branch, err, out)
+		w.warn(path, change, fmt.Sprintf("merge --no-ff %s failed: %v\n%s", branch, err, out))
 		if aout, aerr := exec.Command("git", "-C", path, "merge", "--abort").CombinedOutput(); aerr != nil {
-			log.Printf("merge --abort failed: %v\n%s", aerr, aout)
+			w.warn(path, change, fmt.Sprintf("merge --abort failed: %v\n%s", aerr, aout))
 		}
 		if rout, rerr := exec.Command("git", "-C", path, "reset", "--hard", current).CombinedOutput(); rerr != nil {
-			log.Printf("reset --hard %s failed: %v\n%s", current, rerr, rout)
+			w.warn(path, change, fmt.Sprintf("reset --hard %s failed: %v\n%s", current, rerr, rout))
 		}
 		if dout, derr := exec.Command("git", "-C", path, "branch", "-D", branch).CombinedOutput(); derr != nil {
-			log.Printf("branch -D %s failed: %v\n%s", branch, derr, dout)
+			w.warn(path, change, fmt.Sprintf("branch -D %s failed: %v\n%s", branch, derr, dout))
 		}
 		return fmt.Errorf("merge %s: %w", branch, err)
 	}
 	if out, err := exec.Command("git", "-C", path, "branch", "-d", branch).CombinedOutput(); err != nil {
-		log.Printf("branch -d %s failed: %v\n%s", branch, err, out)
+		w.warn(path, change, fmt.Sprintf("branch -d %s failed: %v\n%s", branch, err, out))
 	}
 	return nil
 }
@@ -351,7 +357,6 @@ func (w Watcher) runOnce(ctx context.Context, wd string) error {
 				continue
 			}
 			if _, err := GetCurrentCommit(repo); err != nil {
-				log.Printf("skipping %s: no commits", repo)
 				continue
 			}
 			if w.observer != nil {
@@ -425,7 +430,6 @@ func (w Watcher) Watch(ctx context.Context, wd string) error {
 }
 
 func main() {
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	var (
 		pi       = flag.String("pi", "pi", "path to the pi binary")
 		retry    = flag.Int("retry", 3, "retries per repo on failure")
@@ -437,7 +441,8 @@ func main() {
 	w.Once = *once
 	path, err := os.Getwd()
 	if err != nil {
-		log.Fatal(err)
+		fmt.Fprintln(os.Stderr, "see:", err)
+		os.Exit(1)
 	}
 
 	mode, msg := selectRunMode(*modeFlag, term.IsTerminal(int(os.Stdout.Fd())))
@@ -446,29 +451,46 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
+
+	logDir, err := ensureLogDir()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "see:", err)
+		os.Exit(2)
+	}
+	events, err := openEventLogger(logDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "see:", err)
+		os.Exit(2)
+	}
+	defer events.Close()
+
+	w.agent = PiAgent{Binary: *pi, LogDir: logDir}
 	if mode == modeTUI {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		if err := runTUI(ctx, &w, *pi, path); err != nil {
-			log.Fatal(err)
+		if err := runTUI(ctx, &w, events, path); err != nil {
+			os.Exit(1)
 		}
 		return
 	}
 	// mode == modeLog
+	w.observer = events
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
 	defer cancel()
 	if err := w.Watch(ctx, path); err != nil {
-		log.Fatal(err)
+		os.Exit(1)
 	}
 }
 
-// runTUI runs the watcher with a TUI observer wired in. The bubbletea
-// program owns signal handling; when it exits we cancel the watcher's
-// context so the tight poll loop returns.
-func runTUI(ctx context.Context, w *Watcher, binary, wd string) error {
-	w.agent = PiAgent{Binary: binary}
+// runTUI runs the watcher with an eventLogger wired as the
+// Watcher.observer; the eventLogger fans events out to the bubbletea
+// ChanObserver in addition to the batch-level JSONL. The bubbletea
+// program owns signal handling; when it exits we cancel the
+// watcher's context so the tight poll loop returns.
+func runTUI(ctx context.Context, w *Watcher, events *eventLogger, wd string) error {
 	prog, obs := tui.New()
-	w.observer = tuiObserver{obs: obs}
+	events.Attach(tuiObserver{obs: obs})
+	w.observer = events
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	watchErr := make(chan error, 1)
@@ -478,7 +500,7 @@ func runTUI(ctx context.Context, w *Watcher, binary, wd string) error {
 	// returns), so Quit() on an already-exited program is a no-op.
 	go func() {
 		if err := <-watchErr; err != nil {
-			log.Printf("watcher: %v", err)
+			events.Observe(InfraError{Where: "watcher", Err: err.Error()})
 		}
 		prog.Quit()
 	}()
@@ -490,7 +512,7 @@ func runTUI(ctx context.Context, w *Watcher, binary, wd string) error {
 		runErr = werr
 	}
 	if runErr != nil {
-		fmt.Fprintln(os.Stderr, "see:", runErr)
+		events.Observe(InfraError{Where: "tui", Err: runErr.Error()})
 	}
 	return runErr
 }
@@ -516,5 +538,9 @@ func (o tuiObserver) Observe(e Event) {
 		o.obs.ChangeFailed(e.Path, e.Change, e.Err)
 	case LogPath:
 		o.obs.LogPath(e.Path, e.Change)
+	case Warning:
+		o.obs.Warning(e.Path, e.Change, e.Msg)
+	case InfraError:
+		o.obs.InfraError(e.Where, e.Err)
 	}
 }

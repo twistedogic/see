@@ -58,13 +58,15 @@ type RepoRow struct {
 	LastErr     string
 	HasOpenspec bool
 	LogPath     string
+	Warning     bool
 }
 
 type Model struct {
-	rows   map[string]*RepoRow // keyed by repo path
-	order  []string            // scan order, for stable rendering
-	width  int
-	height int
+	rows     map[string]*RepoRow // keyed by repo path
+	order    []string            // scan order, for stable rendering
+	width    int
+	height   int
+	infraErr string
 }
 
 func NewModel() *Model {
@@ -111,6 +113,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		r.LastErr = ""
 		r.RetryN = 0
 		r.RetryMax = 0
+		r.Warning = false
 	case RetryAttemptMsg:
 		r := m.ensureRow(msg.Path)
 		r.Phase = PhaseWorking
@@ -136,6 +139,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if r.Change == "" {
 			r.Change = msg.Change
 		}
+	case WarningMsg:
+		r := m.ensureRow(msg.Path)
+		r.Warning = true
+	case InfraErrorMsg:
+		m.infraErr = msg.Err
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height

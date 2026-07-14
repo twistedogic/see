@@ -131,10 +131,17 @@ case `Watcher.Watch` SHALL return.
   merge) still apply unchanged to that pass
 
 ### Requirement: PiAgent writes agent output to a JSONL file per run
-When `PiAgent.Run` is invoked, it SHALL create a `.jsonl` file in the
-configured log directory and redirect the agent's combined stdout and
-stderr to that file for the duration of the call. The file SHALL be
-closed before `Run` returns.
+When `PiAgent.Run` is invoked, it SHALL create a `.jsonl` file in
+the configured log directory and redirect the agent's combined
+stdout and stderr to that file for the duration of the call. The
+file SHALL be closed before `Run` returns. The log directory is
+guaranteed to exist and be writable by the time `Run` is called
+(`ensureLogDir` in `main()`); `Run` SHALL NOT attempt to create
+the directory and SHALL NOT fall back to running the agent
+without capture. If the per-run file cannot be created,
+`PiAgent.Run` SHALL return a non-empty `logPath` and a non-nil
+error describing the file-creation failure; the watcher SHALL
+surface this as a `ChangeFailed` event for the same invocation.
 
 #### Scenario: Successful run produces a populated file
 - **WHEN** `PiAgent.Run` completes successfully against an agent that
@@ -142,21 +149,16 @@ closed before `Run` returns.
 - **THEN** a `.jsonl` file exists at the computed path
 - **AND** the file contains the agent's combined stdout and stderr
   output, byte-for-byte
+- **AND** `PiAgent.Run` returns a non-empty `logPath` and a nil
+  error
 
-#### Scenario: Run proceeds when log directory cannot be created
-- **WHEN** `os.MkdirAll` of the log directory fails (read-only
-  filesystem, invalid `SEE_LOG_DIR`, etc.)
-- **THEN** `PiAgent.Run` logs a warning to stderr
-- **AND** the agent is invoked without output redirection
-- **AND** `PiAgent.Run` returns based solely on the agent's exit
-  status (capture failure does not affect the run's outcome)
-
-#### Scenario: Run proceeds when log file cannot be opened
+#### Scenario: Per-run file creation failure surfaces as a Run error
 - **WHEN** the log directory exists but the per-run file cannot be
   created (permission denied, disk full)
-- **THEN** `PiAgent.Run` logs a warning to stderr
-- **AND** the agent is invoked without output redirection
-- **AND** the run proceeds normally
+- **THEN** `PiAgent.Run` returns a non-nil error describing the
+  file-creation failure
+- **AND** `PiAgent.Run` does not invoke the agent
+- **AND** the returned `logPath` is empty
 
 ### Requirement: Default log location is the OS cache directory
 When no `SEE_LOG_DIR` environment variable is set, `PiAgent.Run` SHALL
@@ -185,36 +187,73 @@ still produce distinct filenames (the PID is part of the filename).
 - **THEN** two distinct log files exist after both invocations
 - **AND** the files differ by timestamp (or PID + attempt counter)
 
-### Requirement: TUI mode surfaces the log path via LogPath event
-When `Watcher.work` invokes `agent.Run` and capture succeeds, and an
-observer is wired (TUI mode), `Watcher.work` SHALL emit a `LogPath`
-event with the file path before returning.
+### Requirement: Watcher emits Warning events for cleanup-step failures
+When `Watcher.work` performs a rollback, completion, or pre-run
+check step that fails but is not itself the reason `work` returns
+an error, `Watcher.work` SHALL emit a `Warning` event with the
+repo path, change name, and the step's failure message. The
+warning SHALL be emitted in addition to whatever boundary event
+(`ChangeFailed`, `ChangeDone`, or none for a no-op) the work
+function emits; the warning SHALL NOT replace the boundary event
+or alter the error returned by `work`.
 
-#### Scenario: Successful capture emits LogPath
-- **WHEN** `PiAgent.Run` writes a log file successfully in TUI mode
-- **THEN** the observer receives a `LogPath` event whose `Path` field
-  equals the file path
+The pre-run check that emits a Warning is the detached-HEAD check:
+when `git symbolic-ref --short HEAD` returns empty,
+`Watcher.work` SHALL emit a `Warning` event naming the repo and
+SHALL return a `detached HEAD` error.
 
-#### Scenario: Failed capture emits no LogPath
-- **WHEN** `PiAgent.Run` fails to create the log file
-- **THEN** no `LogPath` event is emitted
-- **AND** no other observer event compensates (capture is observability,
-  not correctness)
+The rollback and completion steps that emit Warning when they fail
+are:
 
-### Requirement: Log mode prints the log path to stderr
-When `Watcher.work` invokes `agent.Run` and capture succeeds in log
-mode (`--mode=log`), `Watcher.work` SHALL print the file path to
-stderr via `log.Printf` so non-interactive runs make the path
-discoverable.
+- `git switch` back to the original branch ref
+- `git reset --hard <captured-SHA>` after the switch
+- `git branch -D <branch>` to clean up the per-change branch
+- `git add -A` after a successful agent run
+- `git commit` after `git add -A`
+- `git merge --no-ff <branch>` to merge the per-change branch back
+- `git merge --abort` when a merge conflict is detected
+- `git branch -d <branch>` after a successful merge
 
-#### Scenario: Successful capture prints the path
-- **WHEN** `PiAgent.Run` writes a log file successfully in log mode
-- **THEN** `log.Printf("see: log → %s", path)` is called with the path
+#### Scenario: Rollback git switch failure emits a Warning
+- **WHEN** the agent errors and the subsequent `git switch` back
+  to the original ref fails
+- **THEN** `Watcher.work` emits a `Warning` event naming the
+  switch failure
+- **AND** `Watcher.work` returns the original agent error
 
-#### Scenario: Failed capture prints nothing
-- **WHEN** `PiAgent.Run` fails to create the log file in log mode
-- **THEN** no path is printed (the warning from the capture-failure
-  scenario already went to stderr)
+#### Scenario: Detached HEAD emits a Warning and returns an error
+- **WHEN** `Watcher.work` is invoked on a repo with HEAD pointing
+  directly at a commit (no current branch)
+- **THEN** `Watcher.work` emits a `Warning` event naming the
+  repo and the detached-HEAD condition
+- **AND** `Watcher.work` returns a `detached HEAD` error before
+  any branch mutation
+
+### Requirement: Watcher surfaces the log path via LogPath event in both modes
+When `Watcher.work` invokes `agent.Run` and `agent.Run` returns a
+non-empty `logPath`, `Watcher.work` SHALL emit a `LogPath` event
+with the file path before returning, regardless of whether an
+observer was wired at construction time. In TUI mode the event is
+forwarded to the bubbletea observer; in log mode it is written to
+the batch-level JSONL. If `agent.Run` returns an empty `logPath`
+(capture failure, which now propagates as a `ChangeFailed`), no
+`LogPath` event is emitted for that invocation.
+
+#### Scenario: Successful capture emits LogPath in both modes
+- **WHEN** `PiAgent.Run` returns a non-empty `logPath` in either
+  mode
+- **THEN** the observer receives a `LogPath` event whose `Path`
+  field equals the file path
+- **AND** in log mode the event is written to the JSONL even
+  though no TUI observer is wired
+
+#### Scenario: Capture failure emits no LogPath and propagates as ChangeFailed
+- **WHEN** `PiAgent.Run` returns an empty `logPath` and a non-nil
+  error
+- **THEN** `Watcher.work` does not emit a `LogPath` event for
+  that invocation
+- **AND** `Watcher.work` emits a `ChangeFailed` event carrying
+  the file-creation error
 
 ### Requirement: Log filenames encode repo, change, timestamp, and PID
 Each log file SHALL be named

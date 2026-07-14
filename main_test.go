@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -116,13 +117,15 @@ func TestApplyPromptMentionsChange(t *testing.T) {
 func TestPiAgentCapturesOutputToLogFile(t *testing.T) {
 	dir := t.TempDir()
 	logDir := filepath.Join(dir, "logs")
-	t.Setenv("SEE_LOG_DIR", logDir)
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	script := filepath.Join(dir, "agent")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf stdout-line\nprintf stderr-line >&2\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	logPath, err := (PiAgent{Binary: script}).Run(context.Background(), dir, "task-1", "prompt")
+	logPath, err := (PiAgent{Binary: script, LogDir: logDir}).Run(context.Background(), dir, "task-1", "prompt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,36 +142,17 @@ func TestPiAgentCapturesOutputToLogFile(t *testing.T) {
 	}
 }
 
-func TestPiAgentProceedsWhenLogDirCannotBeCreated(t *testing.T) {
-	dir := t.TempDir()
-	// SEE_LOG_DIR points at a path under a regular file -> MkdirAll fails.
-	rogue := filepath.Join(dir, "file")
-	if err := os.WriteFile(rogue, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("SEE_LOG_DIR", filepath.Join(rogue, "logs"))
-	script := filepath.Join(dir, "agent")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf hello\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	logPath, err := (PiAgent{Binary: script}).Run(context.Background(), dir, "task-1", "prompt")
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	if logPath != "" {
-		t.Fatalf("logPath = %q, want empty on capture failure", logPath)
-	}
-}
-
 func TestPiAgentRespectsSeeLogDir(t *testing.T) {
 	dir := t.TempDir()
 	logDir := filepath.Join(dir, "custom")
-	t.Setenv("SEE_LOG_DIR", logDir)
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	script := filepath.Join(dir, "agent")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf hello\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	logPath, err := (PiAgent{Binary: script}).Run(context.Background(), dir, "task-1", "prompt")
+	logPath, err := (PiAgent{Binary: script, LogDir: logDir}).Run(context.Background(), dir, "task-1", "prompt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,10 +170,139 @@ func TestPiAgentPreservesExitCodeByDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := (PiAgent{Binary: script}).Run(context.Background(), t.TempDir(), "task-1", "prompt")
+	_, err := (PiAgent{Binary: script, LogDir: t.TempDir()}).Run(context.Background(), t.TempDir(), "task-1", "prompt")
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
 		t.Fatalf("Run() error = %v, want exit code 7", err)
+	}
+}
+
+// Regression: PiAgent.Run must surface a per-run file creation failure
+// as a non-nil error and an empty logPath, without invoking the agent.
+// The agent must not run with stderr/stdout unredirected.
+func TestPiAgentRunSurfacesFileCreateError(t *testing.T) {
+	dir := t.TempDir()
+	// SEE_LOG_DIR points at a path under a regular file -> MkdirAll
+	// fails, so any os.Create at that location fails with ENOTDIR.
+	// EnsureLogDir is intentionally NOT called: this pins the
+	// PiAgent-level contract that capture failure propagates without
+	// any silent fallback to running the agent unredirected.
+	rogue := filepath.Join(dir, "file")
+	if err := os.WriteFile(rogue, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logDir := filepath.Join(rogue, "logs")
+
+	// Agent that records whether it was invoked. A flag file the
+	// script would write proves whether Run let it through.
+	marker := filepath.Join(dir, "agent-ran")
+	script := filepath.Join(dir, "agent")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ntouch "+marker+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	logPath, err := (PiAgent{Binary: script, LogDir: logDir}).Run(context.Background(), dir, "task-1", "prompt")
+	if err == nil {
+		t.Fatal("Run returned nil error, want non-nil on capture failure")
+	}
+	if logPath != "" {
+		t.Fatalf("logPath = %q, want empty on capture failure", logPath)
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Fatal("agent was invoked despite capture failure")
+	}
+}
+
+func TestEnsureLogDirFailsWhenPathBlocked(t *testing.T) {
+	dir := t.TempDir()
+	// SEE_LOG_DIR points at a path under a regular file -> MkdirAll
+	// of the leaf directory fails. ensureLogDir returns a wrapped
+	// error; main() turns that into exit-2 with a stderr line.
+	rogue := filepath.Join(dir, "file")
+	if err := os.WriteFile(rogue, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SEE_LOG_DIR", filepath.Join(rogue, "logs"))
+
+	_, err := ensureLogDir()
+	if err == nil {
+		t.Fatal("ensureLogDir returned nil, want error")
+	}
+	if !strings.Contains(err.Error(), "log dir") {
+		t.Fatalf("error = %v, want wrapped 'log dir' marker", err)
+	}
+}
+
+func TestEventLoggerWritesJSONL(t *testing.T) {
+	dir := t.TempDir()
+	events, err := openEventLogger(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer events.Close()
+
+	events.Observe(RepoSeen{Path: "/some/repo", HasOpenspec: true})
+	events.Observe(ChangeStarted{Path: "/some/repo", Change: "task-1"})
+	events.Observe(Warning{Path: "/some/repo", Change: "task-1", Msg: "rollback hiccup"})
+	events.Observe(InfraError{Where: "watcher", Err: "boom"})
+
+	files, err := filepath.Glob(filepath.Join(dir, "see--*.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("got %d files, want 1: %v", len(files), files)
+	}
+	body, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("got %d lines, want 4:\n%s", len(lines), body)
+	}
+	// Each line is valid JSON; spot-check the first and last to
+	// confirm fields round-trip through the default JSON encoder.
+	var first, last map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
+		t.Fatalf("line[0] is not valid JSON: %v", err)
+	}
+	if first["Path"] != "/some/repo" {
+		t.Fatalf("line[0] Path = %v, want /some/repo", first["Path"])
+	}
+	if first["HasOpenspec"] != true {
+		t.Fatalf("line[0] HasOpenspec = %v, want true", first["HasOpenspec"])
+	}
+	if err := json.Unmarshal([]byte(lines[3]), &last); err != nil {
+		t.Fatalf("line[3] is not valid JSON: %v", err)
+	}
+	if last["Where"] != "watcher" || last["Err"] != "boom" {
+		t.Fatalf("line[3] = %v, want InfraError watcher/boom", last)
+	}
+}
+
+func TestEventLoggerFansOutToSecondary(t *testing.T) {
+	dir := t.TempDir()
+	events, err := openEventLogger(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer events.Close()
+
+	obs := &recordingObserver{}
+	events.Attach(obs)
+
+	events.Observe(ChangeStarted{Path: "/some/repo", Change: "task-1"})
+	events.Observe(Warning{Path: "/some/repo", Change: "task-1", Msg: "test"})
+
+	if got := len(obs.events); got != 2 {
+		t.Fatalf("secondary observer got %d events, want 2", got)
+	}
+	if _, ok := obs.events[0].(ChangeStarted); !ok {
+		t.Fatalf("event[0] = %T, want ChangeStarted", obs.events[0])
+	}
+	if _, ok := obs.events[1].(Warning); !ok {
+		t.Fatalf("event[1] = %T, want Warning", obs.events[1])
 	}
 }
 
@@ -312,6 +425,12 @@ func TestRunOnceEmitsEventSequenceOnSuccess(t *testing.T) {
 	}
 	agent := &fakeAgent{
 		onRun: func() error {
+			// Write a file so git add/commit in work() have something
+			// to stage; otherwise the trailing commit fails and emits
+			// a Warning event that disrupts the pinned sequence.
+			if err := os.WriteFile(filepath.Join(repo, "applied.txt"), []byte("done"), 0o644); err != nil {
+				return err
+			}
 			return os.Rename(
 				filepath.Join(repo, "openspec", "changes", "task-1"),
 				filepath.Join(repo, "openspec", "changes", "archive", "task-1"),
@@ -780,6 +899,12 @@ func TestObserverReceivesRetrySequence(t *testing.T) {
 			calls++
 			if calls < 3 {
 				return errors.New("flake")
+			}
+			// Write a file so the trailing git commit has something to
+			// stage; otherwise the retry-success path emits a Warning
+			// event that disrupts the pinned sequence.
+			if err := os.WriteFile(filepath.Join(repo, "applied.txt"), []byte("done"), 0o644); err != nil {
+				return err
 			}
 			return os.Rename(
 				filepath.Join(repo, "openspec", "changes", "task-1"),

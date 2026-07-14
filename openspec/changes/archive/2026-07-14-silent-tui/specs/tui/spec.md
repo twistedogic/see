@@ -1,19 +1,4 @@
-# tui
-
-## Purpose
-
-Define the live status grid that `see` renders under the `--tui` flag
-and the events the watcher emits to drive it. When stdout is a
-terminal, `see` SHALL render a bubbletea grid showing every scanned
-repo's phase, change, retry count, age, and an optional warning glyph
-in the repository column; the underlying event stream is also written
-to a batch-level JavaScript Object Notation Lines (JSONL) file (see
-the `event-log` capability). When stdout is not a terminal and the
-operator has asked for `--mode=tui`, `see` SHALL refuse to run and exit
-with a clear stderr message; `see` SHALL NOT silently fall back to log
-mode.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: `see` exposes a `--mode` flag selecting the output mode
 `see` SHALL accept a `-mode` string flag. The flag SHALL accept the
@@ -46,24 +31,7 @@ semantics.
   identical to a pre-TUI invocation
 - **THEN** TTY state has no effect on `--mode=log` behavior
 
-### Requirement: `--mode=tui` requires a TTY
-When `-mode` is `tui`, `see` SHALL require stdout to be a terminal.
-When stdout is not a terminal (piped output, redirected to a file,
-run inside a non-interactive CI step), `see` SHALL exit with status
-`2`, SHALL write a single-line message to stderr of the form
-`see: --mode=tui requires a TTY; rerun with --mode=log`, and SHALL
-NOT proceed with any watcher work. `see` SHALL NOT silently fall
-back to log mode; the operator MUST opt in to log mode explicitly
-with `--mode=log`.
-
-#### Scenario: Piped `--mode=tui` exits non-zero with a hint
-- **WHEN** `see --mode=tui | cat` runs against any fixture
-- **THEN** stderr contains the TTY-required message
-- **THEN** no `log.Printf` lines are emitted
-- **THEN** no TUI is rendered
-- **THEN** exit status is `2`
-
-### Requirement: `Watcher` emits events through an `Observer` at phase boundaries
+### Requirement: Watcher emits events through an `Observer` at phase boundaries
 `Watcher` SHALL expose an `Observer` interface. When the observer is
 non-nil, `Watcher.work` SHALL emit the following events at the named
 boundaries:
@@ -200,82 +168,6 @@ terminal.
   log-mode invocation (non-zero if a repo failure was in flight,
   zero otherwise)
 
-### Requirement: Watcher semantics are unchanged under `--mode=tui`
-`-mode=tui` SHALL NOT alter watcher semantics. Under `-mode=tui`,
-`see` SHALL:
-
-- Process repos sequentially in the order `os.ReadDir` returns them.
-- Halt the watcher on the first repo whose `Watcher.work` exhausts
-  `retryN` attempts. The TUI SHALL NOT auto-skip or auto-retry failed
-  repos on the operator's behalf.
-- Honor `-retry` exactly as in log mode.
-- Honor `-pi` exactly as in log mode.
-- Emit the same `git` commands in the same order as in log mode.
-
-#### Scenario: First-repo failure halts the watcher under `--mode=tui`
-- **WHEN** the first repo in scan order fails all retry attempts
-- **THEN** the TUI exits with a non-zero status
-- **THEN** the error message from `ChangeFailed` is preserved (shown
-  on the final TUI frame before exit)
-
-#### Scenario: Retry policy is honored under `--mode=tui`
-- **WHEN** `--mode=tui -retry=5` is set and a repo fails on
-  attempts 1-3 before succeeding on attempt 4
-- **THEN** the agent is invoked four times for that repo
-- **THEN** the TUI shows `RETRY` values `1/5`, `2/5`, `3/5`, then
-  transitions to `done`
-
-### Requirement: `see` rejects unknown `--mode` values
-`see` SHALL reject any `-mode` value other than `tui` or `log`,
-including the empty string. On rejection, `see` SHALL exit with
-status `2`, SHALL write a message to stderr of the form
-`see: unknown --mode="<value>" (want: tui, log)`, and SHALL print
-`flag.Usage()` so the operator sees the registered flags and their
-valid values.
-
-#### Scenario: `--mode=foo` exits non-zero with usage
-- **WHEN** `see --mode=foo` is invoked
-- **THEN** stderr contains the unknown-mode message naming `foo`
-- **THEN** stderr contains `flag.Usage()` output listing the
-  registered flags
-- **THEN** exit status is `2`
-
-#### Scenario: `--mode=` (empty string) is rejected
-- **WHEN** `see --mode=` is invoked
-- **THEN** stderr contains the unknown-mode message naming an empty
-  value
-- **THEN** exit status is `2`
-
-### Requirement: `see` extracts a testable `selectRunMode` dispatcher
-The flag-to-mode resolution in `main()` SHALL live in a pure function
-named `selectRunMode(mode string, isTTY bool) (runMode, string)`.
-The function SHALL be free of side effects (no I/O, no exit calls,
-no flag-package interaction) so it can be unit-tested directly. The
-function SHALL return `modeUnknown` plus a stderr message for both
-unknown values and missing-TTY cases; the caller (`main()`) prints
-the message, calls `flag.Usage()`, and exits with status `2`.
-
-#### Scenario: `selectRunMode` resolves the valid matrix
-- **WHEN** `selectRunMode("log", true)` is called
-- **THEN** it returns `modeLog` and an empty message
-
-- **WHEN** `selectRunMode("log", false)` is called
-- **THEN** it returns `modeLog` and an empty message
-
-- **WHEN** `selectRunMode("tui", true)` is called
-- **THEN** it returns `modeTUI` and an empty message
-
-- **WHEN** `selectRunMode("tui", false)` is called
-- **THEN** it returns `modeUnknown` and the TTY-required message
-
-- **WHEN** `selectRunMode("foo", true)` is called
-- **THEN** it returns `modeUnknown` and the unknown-mode message
-  naming `foo`
-
-- **WHEN** `selectRunMode("", true)` is called
-- **THEN** it returns `modeUnknown` and the unknown-mode message
-  naming an empty value
-
 ### Requirement: Agent output does not corrupt the TUI
 In both `--mode=tui` and `--mode=log`, `PiAgent.Run` SHALL direct
 the agent's stdout and stderr to the per-invocation JSONL file in
@@ -294,3 +186,14 @@ modes.
   screen
 - **THEN** those lines do not appear on the `see` process's
   stdout or stderr
+
+## REMOVED Requirements
+
+### Requirement: Log mode prints the log path to stderr
+**Reason**: Log mode is now silent. The `log.Printf("see: log →
+%s", path)` line in `Watcher.work` is removed; the log path is
+discoverable via the `LogPath` event in the batch-level JSONL.
+
+**Migration**: Operators who scripted against this stderr line
+must switch to parsing the JSONL for `LogPath` events. No code
+path in `see` itself depends on the line.

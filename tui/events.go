@@ -38,3 +38,22 @@ type LogPathMsg struct {
 	Path   string
 	Change string
 }
+
+// WarningMsg reports a per-repo cleanup or pre-run check step that
+// failed. The TUI renders a ⚠ glyph next to the repo's row and
+// counts the row in the footer's warning counter until the next
+// ChangeStartedMsg for the same repo clears it.
+type WarningMsg struct {
+	Path   string
+	Change string
+	Msg    string
+}
+
+// InfraErrorMsg reports a process-level failure surfaced by runTUI
+// (Watcher.Watch returned an error, or bubbletea Program.Run
+// returned an error). The TUI renders it as a banner between the
+// grid body and the footer; latest event wins.
+type InfraErrorMsg struct {
+	Where string
+	Err   string
+}

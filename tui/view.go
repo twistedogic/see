@@ -14,7 +14,6 @@ var (
 	colPhase  = lipgloss.NewStyle().Width(10).Align(lipgloss.Left)
 	colRetry  = lipgloss.NewStyle().Width(8).Align(lipgloss.Left)
 	colAge    = lipgloss.NewStyle().Width(8).Align(lipgloss.Right)
-	colErr    = lipgloss.NewStyle().Align(lipgloss.Left)
 
 	glyphIdle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("○ idle")
 	glyphWorking = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("● working")
@@ -38,27 +37,31 @@ func truncate(s string, n int) string {
 }
 
 func (m *Model) View() string {
-	// Column visibility by terminal width: at >=100 cols show all six,
-	// at <100 drop ERR, at <80 drop AGE then ERR (REPO and PHASE only).
+	// Column visibility by terminal width: at >=80 cols show AGE,
+	// below that REPO/CHANGE/PHASE/RETRY only.
 	showAge := m.width >= 80
-	showErr := m.width >= 100
 
-	header := m.renderHeader(showAge, showErr)
+	header := m.renderHeader(showAge)
 	rows := make([]string, 0, len(m.order))
 	for _, p := range m.order {
-		rows = append(rows, m.renderRow(m.rows[p], showAge, showErr))
+		rows = append(rows, m.renderRow(m.rows[p], showAge))
 	}
 
 	body := strings.Join(rows, "\n")
-	footer := m.renderFooter()
-
+	parts := []string{header}
 	if body == "" {
-		body = "(no repos scanned yet)"
+		parts = append(parts, "(no repos scanned yet)")
+	} else {
+		parts = append(parts, body)
 	}
-	return strings.Join([]string{header, body, footer}, "\n")
+	if m.infraErr != "" {
+		parts = append(parts, "! "+m.infraErr)
+	}
+	parts = append(parts, m.renderFooter())
+	return strings.Join(parts, "\n")
 }
 
-func (m *Model) renderHeader(showAge, showErr bool) string {
+func (m *Model) renderHeader(showAge bool) string {
 	parts := []string{
 		colRepo.Render("REPO"),
 		colChange.Render("CHANGE"),
@@ -68,13 +71,10 @@ func (m *Model) renderHeader(showAge, showErr bool) string {
 	if showAge {
 		parts = append(parts, colAge.Render("AGE"))
 	}
-	if showErr {
-		parts = append(parts, colErr.Render("ERR"))
-	}
 	return lipgloss.JoinHorizontal(lipgloss.Left, parts...)
 }
 
-func (m *Model) renderRow(r *RepoRow, showAge, showErr bool) string {
+func (m *Model) renderRow(r *RepoRow, showAge bool) string {
 	phaseStr := phaseString(r)
 	retry := "—"
 	if r.RetryMax > 0 {
@@ -84,27 +84,28 @@ func (m *Model) renderRow(r *RepoRow, showAge, showErr bool) string {
 	if !r.StartedAt.IsZero() {
 		age = time.Since(r.StartedAt).Round(time.Second).String()
 	}
-	errStr := r.LastErr
-	if errStr == "" {
-		errStr = ""
+
+	// ponytail: ⚠ glyph lives in the REPO cell so a fast scan lights
+	// up the row immediately; the message itself lives in the JSONL
+	// (the operator can jq for it). Trailing space keeps the column
+	// visually aligned when no warning is set.
+	name := r.Name
+	if r.Warning {
+		name = name + " ⚠"
 	}
 
 	// Column widths are anchored to the styles above; truncate change
-	// and err by the column width to avoid overflow on narrow terminals.
+	// by the column width to avoid overflow on narrow terminals.
 	change := truncate(r.Change, 30)
-	errCol := truncate(errStr, 40)
 
 	parts := []string{
-		colRepo.Render(truncate(r.Name, 24)),
+		colRepo.Render(truncate(name, 24)),
 		colChange.Render(change),
 		colPhase.Render(phaseStr),
 		colRetry.Render(retry),
 	}
 	if showAge {
 		parts = append(parts, colAge.Render(age))
-	}
-	if showErr {
-		parts = append(parts, colErr.Render(errCol))
 	}
 	row := lipgloss.JoinHorizontal(lipgloss.Left, parts...)
 	if r.LogPath != "" {
@@ -130,7 +131,7 @@ func phaseString(r *RepoRow) string {
 }
 
 func (m *Model) renderFooter() string {
-	var done, working, idle, failed, nospec int
+	var done, working, idle, failed, nospec, warnings int
 	for _, p := range m.order {
 		switch m.rows[p].Phase {
 		case PhaseDone:
@@ -143,6 +144,9 @@ func (m *Model) renderFooter() string {
 			failed++
 		case PhaseNoSpec:
 			nospec++
+		}
+		if m.rows[p].Warning {
+			warnings++
 		}
 	}
 	parts := []string{}
@@ -160,6 +164,9 @@ func (m *Model) renderFooter() string {
 	}
 	if nospec > 0 {
 		parts = append(parts, fmt.Sprintf("%d no-spec", nospec))
+	}
+	if warnings > 0 {
+		parts = append(parts, fmt.Sprintf("%d warning", warnings))
 	}
 	summary := strings.Join(parts, " · ")
 	if summary == "" {

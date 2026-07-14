@@ -58,3 +58,11 @@ func (c *ChanObserver) ChangeFailed(path, change, errMsg string) {
 func (c *ChanObserver) LogPath(path, change string) {
 	c.push(LogPathMsg{Path: path, Change: change})
 }
+
+func (c *ChanObserver) Warning(path, change, msg string) {
+	c.push(WarningMsg{Path: path, Change: change, Msg: msg})
+}
+
+func (c *ChanObserver) InfraError(where, errMsg string) {
+	c.push(InfraErrorMsg{Where: where, Err: errMsg})
+}
