@@ -4,10 +4,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// ChanObserver owns a bubbletea Program and exposes typed methods for
-// each event kind. main.go's adapter (tuiObserver) calls those methods
-// from its Observer.Observe(Event). The type-switch lives in main,
-// not here, so this package has no dependency on main's Event types.
+// ChanObserver owns a bubbletea Program and forwards any tea.Msg to it
+// via Send. main.go's adapter (tuiObserver) builds a `*Msg` literal
+// directly and sends it through Send without per-event-type methods;
+// the type-switch lives in main so this package has no dependency on
+// main's Event types.
 type ChanObserver struct {
 	p *tea.Program
 }
@@ -27,42 +28,10 @@ func New() (*tea.Program, *ChanObserver) {
 // for it to exit (Done channel) and so the observer can Send messages.
 func (c *ChanObserver) Program() *tea.Program { return c.p }
 
-// push sends a tea.Msg to the running program, swallowing send errors
-// that occur after the program has already exited (the watcher may
-// emit a final event after the user quits).
-func (c *ChanObserver) push(msg tea.Msg) {
+// Send forwards a tea.Msg to the running program, swallowing send
+// errors and panics that occur after the program has already exited
+// (the watcher may emit a final event after the user quits).
+func (c *ChanObserver) Send(msg tea.Msg) {
 	defer func() { _ = recover() }()
 	c.p.Send(msg)
-}
-
-func (c *ChanObserver) RepoSeen(path string, hasOpenspec bool) {
-	c.push(RepoSeenMsg{Path: path, HasOpenspec: hasOpenspec})
-}
-
-func (c *ChanObserver) ChangeStarted(path, change string) {
-	c.push(ChangeStartedMsg{Path: path, Change: change})
-}
-
-func (c *ChanObserver) RetryAttempt(path, change string, n, max int, errMsg string) {
-	c.push(RetryAttemptMsg{Path: path, Change: change, N: n, Max: max, Err: errMsg})
-}
-
-func (c *ChanObserver) ChangeDone(path, change string) {
-	c.push(ChangeDoneMsg{Path: path, Change: change})
-}
-
-func (c *ChanObserver) ChangeFailed(path, change, errMsg string) {
-	c.push(ChangeFailedMsg{Path: path, Change: change, Err: errMsg})
-}
-
-func (c *ChanObserver) LogPath(path, change string) {
-	c.push(LogPathMsg{Path: path, Change: change})
-}
-
-func (c *ChanObserver) Warning(path, change, msg string) {
-	c.push(WarningMsg{Path: path, Change: change, Msg: msg})
-}
-
-func (c *ChanObserver) InfraError(where, errMsg string) {
-	c.push(InfraErrorMsg{Where: where, Err: errMsg})
 }

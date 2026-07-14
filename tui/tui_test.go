@@ -52,8 +52,8 @@ func TestViewHandlesNoSpecRepo(t *testing.T) {
 		RepoSeenMsg{Path: repo, HasOpenspec: false},
 	)
 	view := m.View()
-	if !strings.Contains(view, "no-spec") {
-		t.Fatalf("view missing no-spec phase:\n%s", view)
+	if !strings.Contains(view, "idle") {
+		t.Fatalf("view missing idle phase for repo without openspec:\n%s", view)
 	}
 	// The change column should show the em-dash placeholder, not
 	// the repo path or anything else.
@@ -174,7 +174,6 @@ func TestPhaseString(t *testing.T) {
 		{PhaseWorking, "working"},
 		{PhaseDone, "done"},
 		{PhaseFailed, "failed"},
-		{PhaseNoSpec, "no-spec"},
 	}
 	for _, c := range cases {
 		if got := c.p.String(); got != c.want {
@@ -221,7 +220,9 @@ func TestViewFooterCountsByPhase(t *testing.T) {
 		RepoSeenMsg{Path: "/wd/nospec-repo", HasOpenspec: false},
 	)
 	view := m.View()
-	for _, want := range []string{"1 done", "1 working", "1 idle", "1 failed", "1 no-spec"} {
+	// The repo without openspec/ also renders at PhaseIdle, so the
+	// footer carries "2 idle" (one real idle + the no-spec row).
+	for _, want := range []string{"1 done", "1 working", "2 idle", "1 failed"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("footer missing %q:\n%s", want, view)
 		}

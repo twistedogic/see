@@ -1,88 +1,6 @@
-# tui
+# tui delta — apply-ponytail-audit
 
-## Purpose
-
-Define the live status grid that `see` renders under the `--tui` flag
-and the events the watcher emits to drive it. When stdout is a
-terminal, `see` SHALL render a bubbletea grid showing every scanned
-repo's phase, change, retry count, age, and an optional warning glyph
-in the repository column; the underlying event stream is also written
-to a batch-level JavaScript Object Notation Lines (JSONL) file (see
-the `event-log` capability). When stdout is not a terminal and the
-operator has asked for `--mode=tui`, `see` SHALL refuse to run and exit
-with a clear stderr message; `see` SHALL NOT silently fall back to log
-mode.
-## Requirements
-### Requirement: `see` exposes a `--mode` flag selecting the output mode
-`see` SHALL accept a `-mode` string flag. The flag SHALL accept the
-values `tui` and `log`. The flag SHALL default to `tui`. When
-`-mode` is `tui`, `see` SHALL render the live status grid via the
-`tui` package and SHALL wire the `Watcher.observer` to an
-`eventLogger` that fans events out to both the JSONL file and the
-TUI's `ChanObserver`. When `-mode` is `log`, `see` SHALL wire the
-`Watcher.observer` to an `eventLogger` with no secondary observer;
-the JSONL file SHALL be the primary sink, and `see` SHALL also
-mirror the JSONL line-for-line onto stdout when stdout is not a
-terminal (a pipe or a redirect). When stdout IS a terminal,
-`--mode=log` SHALL stay silent — the on-disk JSONL remains the
-operator's only view in that case. The mirror SHALL receive the
-same encoded bytes the JSONL file receives (one event per line,
-in emission order) so `see --mode=log | jq` parses identically
-to `cat <jsonl-file>`. The flag SHALL have no effect on agent
-invocation, retry policy, or git rollback semantics.
-
-#### Scenario: Default invocation renders the TUI
-- **WHEN** `see` is invoked with no flags
-- **THEN** mode resolves to `tui`
-- **THEN** an observer IS wired to the `Watcher`
-- **THEN** the live status grid renders via the TUI package
-- **AND** a batch-level JSONL file is created under the log
-  directory
-
-#### Scenario: `--mode=log` is silent and writes only to JSONL
-- **WHEN** `see --mode=log` is invoked and stdout IS a terminal
-- **THEN** an observer IS wired to the `Watcher`
-- **THEN** no `log.Printf` output is written to stderr
-- **THEN** stdout is empty for the lifetime of the process
-- **THEN** every watcher event lands in the JSONL file in
-  emission order
-- **THEN** the exit status on first-repo failure is non-zero,
-  identical to a pre-TUI invocation
-
-#### Scenario: `--mode=log` mirrors JSONL to stdout when stdout is not a TTY
-- **WHEN** `see --mode=log` is invoked and stdout IS NOT a terminal
-  (piped output, redirected to a file, captured by a CI runner)
-- **THEN** an observer IS wired to the `Watcher`
-- **THEN** every watcher event lands in the JSONL file in
-  emission order
-- **THEN** every watcher event ALSO lands on stdout, encoded as
-  one line per event, byte-identical to the on-disk JSONL
-- **THEN** no `log.Printf` output is written to stderr
-- **THEN** the exit status on first-repo failure is non-zero,
-  identical to a pre-TUI invocation
-
-#### Scenario: `--mode=log` JSONL stream is pipe-parsable as line-delimited JSON
-- **WHEN** `see --mode=log | jq` runs against any fixture
-- **THEN** `jq` decodes one record per line on stdout
-- **AND** each decoded record's fields match the underlying
-  `Event` payload (e.g., `RepoSeen.Path`, `ChangeStarted.Change`)
-
-### Requirement: `--mode=tui` requires a TTY
-When `-mode` is `tui`, `see` SHALL require stdout to be a terminal.
-When stdout is not a terminal (piped output, redirected to a file,
-run inside a non-interactive CI step), `see` SHALL exit with status
-`2`, SHALL write a single-line message to stderr of the form
-`see: --mode=tui requires a TTY; rerun with --mode=log`, and SHALL
-NOT proceed with any watcher work. `see` SHALL NOT silently fall
-back to log mode; the operator MUST opt in to log mode explicitly
-with `--mode=log`.
-
-#### Scenario: Piped `--mode=tui` exits non-zero with a hint
-- **WHEN** `see --mode=tui | cat` runs against any fixture
-- **THEN** stderr contains the TTY-required message
-- **THEN** no `log.Printf` lines are emitted
-- **THEN** no TUI is rendered
-- **THEN** exit status is `2`
+## MODIFIED Requirements
 
 ### Requirement: `Watcher` emits events through an `Observer` at phase boundaries
 `Watcher` SHALL expose an `Observer` interface. When the observer is
@@ -249,27 +167,6 @@ terminal.
 - **THEN** the TUI shows `RETRY` values `1/5`, `2/5`, `3/5`, then
   transitions to `done`
 
-### Requirement: `see` rejects unknown `--mode` values
-`see` SHALL reject any `-mode` value other than `tui` or `log`,
-including the empty string. On rejection, `see` SHALL exit with
-status `2`, SHALL write a message to stderr of the form
-`see: unknown --mode="<value>" (want: tui, log)`, and SHALL print
-`flag.Usage()` so the operator sees the registered flags and their
-valid values.
-
-#### Scenario: `--mode=foo` exits non-zero with usage
-- **WHEN** `see --mode=foo` is invoked
-- **THEN** stderr contains the unknown-mode message naming `foo`
-- **THEN** stderr contains `flag.Usage()` output listing the
-  registered flags
-- **THEN** exit status is `2`
-
-#### Scenario: `--mode=` (empty string) is rejected
-- **WHEN** `see --mode=` is invoked
-- **THEN** stderr contains the unknown-mode message naming an empty
-  value
-- **THEN** exit status is `2`
-
 ### Requirement: `see` extracts a testable `selectRunMode` dispatcher
 The flag-to-mode resolution in `main()` SHALL live in a pure function
 named `selectRunMode(mode string, isTTY bool) (runMode, error)`.
@@ -301,23 +198,3 @@ exits with status `2`.
 - **WHEN** `selectRunMode("", true)` is called
 - **THEN** it returns `modeUnknown` and an error whose message
   equals `see: unknown --mode="" (want: tui, log)`
-
-### Requirement: Agent output does not corrupt the TUI
-In both `--mode=tui` and `--mode=log`, `PiAgent.Run` SHALL direct
-the agent's stdout and stderr to the per-invocation JSONL file in
-the log directory. The agent's bytes SHALL NOT reach stdout or
-stderr of the `see` process under any mode. Per-invocation JSONL
-files are guaranteed to exist for every successful `PiAgent.Run`
-call; the file path is reported via the `LogPath` event in both
-modes.
-
-#### Scenario: Agent output reaches the per-invocation JSONL
-- **WHEN** `--tui` is set and the agent writes lines to its stdout
-  and stderr
-- **THEN** those lines appear in the per-invocation JSONL file
-  whose path was emitted via the `LogPath` event
-- **THEN** those lines do not appear inside the TUI's alternate
-  screen
-- **THEN** those lines do not appear on the `see` process's
-  stdout or stderr
-

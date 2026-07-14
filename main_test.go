@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -61,7 +62,7 @@ func TestSelectRunMode(t *testing.T) {
 		mode    string
 		isTTY   bool
 		want    runMode
-		wantMsg string
+		wantErr string
 	}{
 		{"log with TTY", "log", true, modeLog, ""},
 		{"log without TTY", "log", false, modeLog, ""},
@@ -72,12 +73,16 @@ func TestSelectRunMode(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			gotMode, gotMsg := selectRunMode(tc.mode, tc.isTTY)
+			gotMode, gotErr := selectRunMode(tc.mode, tc.isTTY)
 			if gotMode != tc.want {
 				t.Fatalf("mode = %v, want %v", gotMode, tc.want)
 			}
-			if gotMsg != tc.wantMsg {
-				t.Fatalf("msg = %q, want %q", gotMsg, tc.wantMsg)
+			gotMsg := ""
+			if gotErr != nil {
+				gotMsg = "see: " + gotErr.Error()
+			}
+			if gotMsg != tc.wantErr {
+				t.Fatalf("err = %q, want %q", gotMsg, tc.wantErr)
 			}
 		})
 	}
@@ -125,7 +130,7 @@ func TestPiAgentCapturesOutputToLogFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	logPath, err := (PiAgent{Binary: script, LogDir: logDir}).Run(context.Background(), dir, "task-1", "prompt")
+	logPath, err := (PiAgent{binary: script, logDir: logDir}).Run(context.Background(), dir, "task-1", "prompt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +157,7 @@ func TestPiAgentRespectsSeeLogDir(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf hello\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	logPath, err := (PiAgent{Binary: script, LogDir: logDir}).Run(context.Background(), dir, "task-1", "prompt")
+	logPath, err := (PiAgent{binary: script, logDir: logDir}).Run(context.Background(), dir, "task-1", "prompt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +175,7 @@ func TestPiAgentPreservesExitCodeByDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := (PiAgent{Binary: script, LogDir: t.TempDir()}).Run(context.Background(), t.TempDir(), "task-1", "prompt")
+	_, err := (PiAgent{binary: script, logDir: t.TempDir()}).Run(context.Background(), t.TempDir(), "task-1", "prompt")
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
 		t.Fatalf("Run() error = %v, want exit code 7", err)
@@ -201,7 +206,7 @@ func TestPiAgentRunSurfacesFileCreateError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	logPath, err := (PiAgent{Binary: script, LogDir: logDir}).Run(context.Background(), dir, "task-1", "prompt")
+	logPath, err := (PiAgent{binary: script, logDir: logDir}).Run(context.Background(), dir, "task-1", "prompt")
 	if err == nil {
 		t.Fatal("Run returned nil error, want non-nil on capture failure")
 	}
@@ -263,21 +268,123 @@ func TestEventLoggerWritesJSONL(t *testing.T) {
 	}
 	// Each line is valid JSON; spot-check the first and last to
 	// confirm fields round-trip through the default JSON encoder.
-	var first, last map[string]any
+	var first, last struct {
+		Event map[string]any `json:"event"`
+	}
 	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
 		t.Fatalf("line[0] is not valid JSON: %v", err)
 	}
-	if first["Path"] != "/some/repo" {
-		t.Fatalf("line[0] Path = %v, want /some/repo", first["Path"])
+	if first.Event["Path"] != "/some/repo" {
+		t.Fatalf("line[0] event.Path = %v, want /some/repo", first.Event["Path"])
 	}
-	if first["HasOpenspec"] != true {
-		t.Fatalf("line[0] HasOpenspec = %v, want true", first["HasOpenspec"])
+	if first.Event["HasOpenspec"] != true {
+		t.Fatalf("line[0] event.HasOpenspec = %v, want true", first.Event["HasOpenspec"])
 	}
 	if err := json.Unmarshal([]byte(lines[3]), &last); err != nil {
 		t.Fatalf("line[3] is not valid JSON: %v", err)
 	}
-	if last["Where"] != "watcher" || last["Err"] != "boom" {
-		t.Fatalf("line[3] = %v, want InfraError watcher/boom", last)
+	if last.Event["Where"] != "watcher" || last.Event["Err"] != "boom" {
+		t.Fatalf("line[3] event = %v, want InfraError watcher/boom", last.Event)
+	}
+}
+
+// Contract: an eventLogger can mirror encoded events to a side
+// sink (typically os.Stdout in --mode=log when stdout is not a
+// TTY, so `see --mode=log | jq` works). The mirror receives valid
+// JSONL in the same order as the file sink — one line per event.
+// Used to fail in the same shape as TestEventLoggerWritesJSONL:
+// the mirror was missing entirely and events only landed on disk.
+func TestEventLoggerMirrorsEncodedEvents(t *testing.T) {
+	dir := t.TempDir()
+	events, err := openEventLogger(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer events.Close()
+
+	var buf bytes.Buffer
+	events.SetMirror(&buf)
+
+	events.Observe(RepoSeen{Path: "/some/repo", HasOpenspec: true})
+	events.Observe(ChangeStarted{Path: "/some/repo", Change: "task-1"})
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("mirror got %d lines, want 2:\n%s", len(lines), buf.String())
+	}
+	var first, second struct {
+		Event map[string]any `json:"event"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
+		t.Fatalf("mirror line[0] is not valid JSON: %v", err)
+	}
+	if first.Event["Path"] != "/some/repo" || first.Event["HasOpenspec"] != true {
+		t.Fatalf("mirror line[0] event = %v, want RepoSeen /some/repo", first.Event)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &second); err != nil {
+		t.Fatalf("mirror line[1] is not valid JSON: %v", err)
+	}
+	if second.Event["Change"] != "task-1" {
+		t.Fatalf("mirror line[1] event = %v, want ChangeStarted task-1", second.Event)
+	}
+}
+
+// Contract: each JSONL line carries the observed-at timestamp under
+// field `ts` (RFC3339Nano in UTC) wrapping an `event` field with the
+// underlying event payload. Without the envelope, downstream
+// consumers have no time-correlation information beyond the file
+// name's UTC second — once two events share the same second they
+// lose ordering. The wrapper is the only line format; mixing wrapped
+// and unwrapped lines is invalid.
+func TestEventLoggerStampsObservedAtOnEachEntry(t *testing.T) {
+	dir := t.TempDir()
+	events, err := openEventLogger(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer events.Close()
+
+	before := time.Now().UTC().Add(-time.Second)
+	events.Observe(RepoSeen{Path: "/some/repo", HasOpenspec: true})
+	events.Observe(ChangeStarted{Path: "/some/repo", Change: "task-1"})
+	after := time.Now().UTC().Add(time.Second)
+
+	files, err := filepath.Glob(filepath.Join(dir, "see--*.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2:\n%s", len(lines), body)
+	}
+	for i, line := range lines {
+		var entry struct {
+			Ts    string          `json:"ts"`
+			Event json.RawMessage `json:"event"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("line[%d] is not valid JSON: %v\n%s", i, err, line)
+		}
+		if entry.Ts == "" {
+			t.Fatalf("line[%d] missing ts field:\n%s", i, line)
+		}
+		got, err := time.Parse(time.RFC3339Nano, entry.Ts)
+		if err != nil {
+			t.Fatalf("line[%d] ts = %q is not RFC3339Nano: %v", i, entry.Ts, err)
+		}
+		// Tolerance: clock moves slightly between sample and the
+		// observed-at capture; ±1s window keeps the test honest
+		// without being flaky under load.
+		if got.Before(before) || got.After(after) {
+			t.Fatalf("line[%d] ts = %v outside [%v, %v]", i, got, before, after)
+		}
+		if len(entry.Event) == 0 {
+			t.Fatalf("line[%d] event field empty:\n%s", i, line)
+		}
 	}
 }
 
@@ -306,16 +413,39 @@ func TestEventLoggerFansOutToSecondary(t *testing.T) {
 	}
 }
 
-// Contract: when every attempt errors, retryN returns the LAST error,
-// not nil and not the first error. This pins the post-refactor
-// contract that the silent-failure scenario (a later attempt returning
-// nil while a prior attempt errored) is unreachable.
-func TestRetryNReturnsLastErrorWhenAllAttemptsFail(t *testing.T) {
-	a := errors.New("a")
-	b := errors.New("b")
-	c := errors.New("c")
-	var calls int
-	got := retryN(3, func() error {
+// Contract: when every attempt errors, Watcher.runOnce's inlined retry
+// loop returns the LAST error, not nil and not the first error. This
+// pins the post-refactor contract that the silent-failure scenario (a
+// later attempt returning nil while a prior attempt errored) is
+// unreachable.
+func TestRunOnceRetryLoopReturnsLastErrorWhenAllAttemptsFail(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "p")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "t@e")
+	run("config", "user.name", "t")
+	run("commit", "--allow-empty", "-q", "-m", "init")
+	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/main").Run(); err != nil {
+		run("switch", "-c", "main")
+	}
+	// An active change is the trigger for work() to invoke the agent.
+	if err := os.MkdirAll(filepath.Join(repo, "openspec", "changes", "dummy"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a, b, c := errors.New("a"), errors.New("b"), errors.New("c")
+	calls := 0
+	agent := &fakeAgent{onRun: func() error {
 		calls++
 		switch calls {
 		case 1:
@@ -325,9 +455,14 @@ func TestRetryNReturnsLastErrorWhenAllAttemptsFail(t *testing.T) {
 		default:
 			return c
 		}
-	})
-	if got != c {
-		t.Fatalf("expected last error (%v), got %v", c, got)
+	}}
+	w := Watcher{agent: agent, RetryCount: 3}
+	err := w.runOnce(context.Background(), root)
+	if !errors.Is(err, c) {
+		t.Fatalf("runOnce err = %v, want %v", err, c)
+	}
+	if calls != 3 {
+		t.Fatalf("agent Run called %d times, want 3", calls)
 	}
 }
 
@@ -374,9 +509,8 @@ func TestWorkCommitsOnSuccess(t *testing.T) {
 			)
 		},
 	}
-	w := Watcher{agent: agent, RetyCount: 1}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	w := Watcher{agent: agent, RetryCount: 1}
+	ctx := t.Context()
 	if err := w.work(ctx, repo); err != nil {
 		t.Fatal(err)
 	}
@@ -438,9 +572,8 @@ func TestRunOnceEmitsEventSequenceOnSuccess(t *testing.T) {
 		},
 	}
 	obs := &recordingObserver{}
-	w := Watcher{agent: agent, RetyCount: 1, observer: obs}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	w := Watcher{agent: agent, RetryCount: 1, observer: obs}
+	ctx := t.Context()
 	if err := w.runOnce(ctx, root); err != nil {
 		t.Fatal(err)
 	}
@@ -524,9 +657,8 @@ func TestWorkIsolatesAgentRunOnBranch(t *testing.T) {
 			)
 		},
 	}
-	w := Watcher{agent: agent, RetyCount: 1}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	w := Watcher{agent: agent, RetryCount: 1}
+	ctx := t.Context()
 	if err := w.work(ctx, repo); err != nil {
 		t.Fatal(err)
 	}
@@ -598,9 +730,8 @@ func TestRunOncePassesRepoPathToAgent(t *testing.T) {
 
 	agent := &fakeAgent{err: nil}
 	obs := &recordingObserver{}
-	w := Watcher{agent: agent, RetyCount: 1, observer: obs}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	w := Watcher{agent: agent, RetryCount: 1, observer: obs}
+	ctx := t.Context()
 	if err := w.runOnce(ctx, root); err != nil {
 		t.Fatal(err)
 	}
@@ -674,9 +805,8 @@ func TestWorkRollsBackBranchOnAgentFailure(t *testing.T) {
 			return exec.Command("git", "-C", repo, "commit", "-q", "-m", "halfway").Run()
 		},
 	}
-	w := Watcher{agent: agent, RetyCount: 1}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	w := Watcher{agent: agent, RetryCount: 1}
+	ctx := t.Context()
 	err = w.work(ctx, repo)
 	if !errors.Is(err, agentErr) {
 		t.Fatalf("expected agent error %v, got %v", agentErr, err)
@@ -760,9 +890,8 @@ func TestWorkReusesExistingBranchAndResetsToOriginalSHA(t *testing.T) {
 			return os.WriteFile(filepath.Join(repo, "applied.txt"), []byte("done"), 0o644)
 		},
 	}
-	w := Watcher{agent: agent, RetyCount: 1}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	w := Watcher{agent: agent, RetryCount: 1}
+	ctx := t.Context()
 	if err := w.work(ctx, repo); err != nil {
 		t.Fatal(err)
 	}
@@ -838,9 +967,8 @@ func TestWorkRejectsDetachedHead(t *testing.T) {
 		t.Fatalf("expected HEAD detached, got branch %q", got)
 	}
 	agent := &fakeAgent{err: nil}
-	w := Watcher{agent: agent, RetyCount: 1}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	w := Watcher{agent: agent, RetryCount: 1}
+	ctx := t.Context()
 	err = w.work(ctx, repo)
 	if err == nil {
 		t.Fatal("expected error from work on detached HEAD, got nil")
@@ -913,9 +1041,8 @@ func TestObserverReceivesRetrySequence(t *testing.T) {
 		},
 	}
 	obs := &recordingObserver{}
-	w := Watcher{agent: agent, RetyCount: 3, observer: obs}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	w := Watcher{agent: agent, RetryCount: 3, observer: obs}
+	ctx := t.Context()
 	if err := w.runOnce(ctx, root); err != nil {
 		t.Fatal(err)
 	}
@@ -979,9 +1106,8 @@ func TestObserverReceivesChangeFailedAfterRetriesExhausted(t *testing.T) {
 	agentErr := errors.New("always fails")
 	agent := &fakeAgent{err: agentErr}
 	obs := &recordingObserver{}
-	w := Watcher{agent: agent, RetyCount: 2, observer: obs}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	w := Watcher{agent: agent, RetryCount: 2, observer: obs}
+	ctx := t.Context()
 	if err := w.runOnce(ctx, root); err == nil {
 		t.Fatal("expected runOnce to return error after retries exhausted")
 	}
@@ -1035,9 +1161,8 @@ func TestRepoSeenFiresForRepoWithoutOpenspec(t *testing.T) {
 	run("commit", "--allow-empty", "-q", "-m", "init")
 	obs := &recordingObserver{}
 	agent := &fakeAgent{err: nil}
-	w := Watcher{agent: agent, RetyCount: 1, observer: obs}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	w := Watcher{agent: agent, RetryCount: 1, observer: obs}
+	ctx := t.Context()
 	if err := w.runOnce(ctx, root); err != nil {
 		t.Fatal(err)
 	}
@@ -1097,9 +1222,8 @@ func TestNilObserverIsSafe(t *testing.T) {
 		},
 	}
 	// No observer set; the watcher should still run end-to-end.
-	w := Watcher{agent: agent, RetyCount: 1}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	w := Watcher{agent: agent, RetryCount: 1}
+	ctx := t.Context()
 	if err := w.runOnce(ctx, root); err != nil {
 		t.Fatal(err)
 	}
@@ -1126,9 +1250,8 @@ func TestWorkEmitsLogPathOnSuccessfulCapture(t *testing.T) {
 		},
 	}
 	obs := &recordingObserver{}
-	w := Watcher{agent: agent, RetyCount: 1, observer: obs}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	w := Watcher{agent: agent, RetryCount: 1, observer: obs}
+	ctx := t.Context()
 	if err := w.work(ctx, repo); err != nil {
 		t.Fatal(err)
 	}
@@ -1167,9 +1290,8 @@ func TestWorkDoesNotEmitLogPathOnCaptureFailure(t *testing.T) {
 		},
 	}
 	obs := &recordingObserver{}
-	w := Watcher{agent: agent, RetyCount: 1, observer: obs}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	w := Watcher{agent: agent, RetryCount: 1, observer: obs}
+	ctx := t.Context()
 	if err := w.work(ctx, repo); err != nil {
 		t.Fatal(err)
 	}
@@ -1194,9 +1316,8 @@ func TestWatchReturnsAfterOnePassWhenOnce(t *testing.T) {
 			)
 		},
 	}
-	w := Watcher{agent: agent, RetyCount: 1, Once: true}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	w := Watcher{agent: agent, RetryCount: 1, Once: true}
+	ctx := t.Context()
 	if err := w.Watch(ctx, root); err != nil {
 		t.Fatalf("Watch returned %v, want nil", err)
 	}
@@ -1213,7 +1334,7 @@ func TestWatchLoopsUntilCtxCancelWhenNotOnce(t *testing.T) {
 	repo := filepath.Join(root, "proj")
 	mkRepoWithChange(t, repo, "task-1")
 	agent := &fakeAgent{err: nil} // no onRun → change stays active → loop continues
-	w := Watcher{agent: agent, RetyCount: 1, Once: false}
+	w := Watcher{agent: agent, RetryCount: 1, Once: false}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
@@ -1236,9 +1357,8 @@ func TestWatchStopsOnFirstPassError(t *testing.T) {
 	mkRepoWithChange(t, repo, "task-1")
 	boom := errors.New("boom")
 	agent := &fakeAgent{err: boom}
-	w := Watcher{agent: agent, RetyCount: 1, Once: false}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	w := Watcher{agent: agent, RetryCount: 1, Once: false}
+	ctx := t.Context()
 	err := w.Watch(ctx, root)
 	if err == nil {
 		t.Fatal("Watch returned nil, want error")

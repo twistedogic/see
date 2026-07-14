@@ -19,14 +19,10 @@ var (
 	glyphWorking = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("● working")
 	glyphDone    = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render("✓ done")
 	glyphFailed  = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render("✗ failed")
-	glyphNoSpec  = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("○ no-spec")
 )
 
 func truncate(s string, n int) string {
-	if n <= 1 {
-		if n == 1 {
-			return "…"
-		}
+	if n <= 0 {
 		return ""
 	}
 	rs := []rune(s)
@@ -96,7 +92,13 @@ func (m *Model) renderRow(r *RepoRow, showAge bool) string {
 
 	// Column widths are anchored to the styles above; truncate change
 	// by the column width to avoid overflow on narrow terminals.
-	change := truncate(r.Change, 30)
+	// Repos without an openspec/ get an em-dash change column so the
+	// grid stays readable without a dedicated phase.
+	change := r.Change
+	if !r.HasOpenspec {
+		change = "—"
+	}
+	change = truncate(change, 30)
 
 	parts := []string{
 		colRepo.Render(truncate(name, 24)),
@@ -124,14 +126,12 @@ func phaseString(r *RepoRow) string {
 		return glyphDone
 	case PhaseFailed:
 		return glyphFailed
-	case PhaseNoSpec:
-		return glyphNoSpec
 	}
 	return "?"
 }
 
 func (m *Model) renderFooter() string {
-	var done, working, idle, failed, nospec, warnings int
+	var done, working, idle, failed, warnings int
 	for _, p := range m.order {
 		switch m.rows[p].Phase {
 		case PhaseDone:
@@ -142,8 +142,6 @@ func (m *Model) renderFooter() string {
 			idle++
 		case PhaseFailed:
 			failed++
-		case PhaseNoSpec:
-			nospec++
 		}
 		if m.rows[p].Warning {
 			warnings++
@@ -161,9 +159,6 @@ func (m *Model) renderFooter() string {
 	}
 	if failed > 0 {
 		parts = append(parts, fmt.Sprintf("%d failed", failed))
-	}
-	if nospec > 0 {
-		parts = append(parts, fmt.Sprintf("%d no-spec", nospec))
 	}
 	if warnings > 0 {
 		parts = append(parts, fmt.Sprintf("%d warning", warnings))

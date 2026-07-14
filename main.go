@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -10,7 +11,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"time"
 
 	"golang.org/x/term"
 
@@ -25,17 +25,17 @@ const (
 	modeTUI
 )
 
-func selectRunMode(mode string, isTTY bool) (runMode, string) {
+func selectRunMode(mode string, isTTY bool) (runMode, error) {
 	switch mode {
 	case "log":
-		return modeLog, ""
+		return modeLog, nil
 	case "tui":
 		if !isTTY {
-			return modeUnknown, "see: --mode=tui requires a TTY; rerun with --mode=log"
+			return modeUnknown, errors.New("--mode=tui requires a TTY; rerun with --mode=log")
 		}
-		return modeTUI, ""
+		return modeTUI, nil
 	default:
-		return modeUnknown, fmt.Sprintf("see: unknown --mode=%q (want: tui, log)", mode)
+		return modeUnknown, fmt.Errorf("unknown --mode=%q (want: tui, log)", mode)
 	}
 }
 
@@ -49,26 +49,21 @@ type Agent interface {
 }
 
 type PiAgent struct {
-	Binary string
-	LogDir string
+	binary string
+	logDir string
 }
 
 // pathFor builds the per-invocation JSONL filename. Pure: no I/O,
 // no environment lookup, no fallback. The caller is responsible for
 // ensuring LogDir exists.
 func pathFor(repo, change string) string {
-	return fmt.Sprintf("%s--%s--%s--%d.jsonl",
-		filepath.Base(repo),
-		change,
-		time.Now().UTC().Format("20060102T150405"),
-		os.Getpid(),
-	)
+	return logFilename(filepath.Base(repo) + "--" + change)
 }
 
 func (p PiAgent) Run(ctx context.Context, path, change, prompt string) (string, error) {
-	cmd := exec.CommandContext(ctx, p.Binary, "--mode", "json", "--no-session", prompt)
+	cmd := exec.CommandContext(ctx, p.binary, "--mode", "json", "--no-session", prompt)
 	cmd.Dir = path
-	logPath := filepath.Join(p.LogDir, pathFor(path, change))
+	logPath := filepath.Join(p.logDir, pathFor(path, change))
 	f, err := os.Create(logPath)
 	if err != nil {
 		return "", fmt.Errorf("see: log file create failed: %w", err)
@@ -127,12 +122,10 @@ func originalRef(path string) (string, error) {
 // its tip to sha via reset --hard. Idempotent: a leftover branch from a
 // prior partial run is reused, and the reset wipes whatever state it had.
 func ensureBranch(path, sha, name string) error {
-	list, err := exec.Command("git", "-C", path, "branch", "--list", name).CombinedOutput()
-	if err != nil {
-		return err
-	}
+	showRef := exec.Command("git", "-C", path, "show-ref", "--verify", "--quiet", "refs/heads/"+name)
+	exists := showRef.Run() == nil
 	args := []string{"switch", name}
-	if !strings.Contains(string(list), name) {
+	if !exists {
 		args = []string{"switch", "-c", name}
 	}
 	if out, err := exec.Command("git", append([]string{"-C", path}, args...)...).CombinedOutput(); err != nil {
@@ -144,22 +137,41 @@ func ensureBranch(path, sha, name string) error {
 	return nil
 }
 
-// ponytail: previously took (bool, error); the (false, nil) state could
-// clobber a prior error and report silent success. Contract collapsed to
-// func() error so the bug class is unreachable.
-func retryN(n int, f func() error) error {
-	var err error
-	for range n {
-		if err = f(); err == nil {
-			return nil
+// runWithRetry invokes work up to w.RetryCount times on repo, emitting
+// RetryAttempt events between attempts, and returns the name of the
+// change that was being worked (or "" when no active change existed
+// before the first attempt) plus the final error from the last attempt.
+// A nil error short-circuits the loop; exhausting all attempts returns
+// the last attempt's error.
+func (w Watcher) runWithRetry(ctx context.Context, repo string) (string, error) {
+	lastChange := ""
+	var prevErr error
+	for attempt := 1; attempt <= w.RetryCount; attempt++ {
+		changeName := ""
+		if cs := ListActiveOpenSpecChanges(repo); len(cs) > 0 {
+			changeName = cs[0]
+			lastChange = changeName
 		}
+		if prevErr != nil && w.observer != nil {
+			w.observer.Observe(RetryAttempt{
+				Path: repo, Change: changeName, N: attempt, Max: w.RetryCount,
+				Err: prevErr.Error(),
+			})
+		}
+		err := w.work(ctx, repo)
+		if err == nil {
+			return lastChange, nil
+		}
+		prevErr = err
 	}
-	return err
+	return lastChange, prevErr
 }
 
-// Event is a sealed interface; only the five concrete types below may
-// implement it. The watcher emits one of these at each phase boundary
-// and the tui package type-switches in Update.
+// Event is the watcher→observer interface. Concrete types are below;
+// the marker-method pattern is a soft convention, not a hard
+// guarantee (Go interfaces are not sealed). The watcher emits one of
+// these at each phase boundary and the tui package type-switches on
+// the concrete shape.
 type Event interface{ isEvent() }
 
 type RepoSeen struct {
@@ -237,14 +249,22 @@ type Watcher struct {
 
 	observer Observer
 
-	RetyCount int
-	// ponytail: Once mirrors RetyCount — zero-default knob on the watcher,
+	RetryCount int
+	// ponytail: Once mirrors RetryCount — zero-default knob on the watcher,
 	// read inside Watch. Once=true makes Watch run a single pass and return.
 	Once bool
 }
 
-func NewWatcher(binary string, n int) Watcher {
-	return Watcher{agent: PiAgent{Binary: binary}, RetyCount: n}
+// NewWatcher constructs a fully-populated Watcher. PiAgent fields are
+// unexported (lowercase) to keep construction hermetic; this is the
+// blessed path for building one. Tests that need an Agent without a
+// Watcher can reach in via w.agent.
+func NewWatcher(binary, logDir string, retry int, once bool) Watcher {
+	return Watcher{
+		agent:      PiAgent{binary: binary, logDir: logDir},
+		RetryCount: retry,
+		Once:       once,
+	}
 }
 
 // warn emits a Warning event to the observer when one is wired.
@@ -360,28 +380,9 @@ func (w Watcher) runOnce(ctx context.Context, wd string) error {
 				continue
 			}
 			if w.observer != nil {
-				w.observer.Observe(RepoSeen{Path: repo, HasOpenspec: repoHasOpenspec(repo)})
+				w.observer.Observe(RepoSeen{Path: repo, HasOpenspec: len(ListActiveOpenSpecChanges(repo)) > 0})
 			}
-			var prevErr error
-			attempt := 0
-			var lastChange string
-			err := retryN(w.RetyCount, func() error {
-				attempt++
-				var changeName string
-				if cs := ListActiveOpenSpecChanges(repo); len(cs) > 0 {
-					changeName = cs[0]
-					lastChange = changeName
-				}
-				if prevErr != nil && w.observer != nil {
-					w.observer.Observe(RetryAttempt{
-						Path: repo, Change: changeName, N: attempt, Max: w.RetyCount,
-						Err: prevErr.Error(),
-					})
-				}
-				workErr := w.work(ctx, repo)
-				prevErr = workErr
-				return workErr
-			})
+			lastChange, err := w.runWithRetry(ctx, repo)
 			if err != nil {
 				if w.observer != nil {
 					w.observer.Observe(ChangeFailed{Path: repo, Change: lastChange, Err: err.Error()})
@@ -391,22 +392,6 @@ func (w Watcher) runOnce(ctx context.Context, wd string) error {
 		}
 	}
 	return nil
-}
-
-// ponytail: lives here so the observer wiring in runOnce doesn't pull
-// repoHasOpenspec through an extra hop. Same logic as ListActiveOpenSpecChanges
-// minus the name list — boolean only so the RepoSeen payload stays small.
-func repoHasOpenspec(path string) bool {
-	entries, err := os.ReadDir(filepath.Join(path, "openspec", "changes"))
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if e.IsDir() && e.Name() != "archive" {
-			return true
-		}
-	}
-	return false
 }
 
 func (w Watcher) Watch(ctx context.Context, wd string) error {
@@ -437,17 +422,15 @@ func main() {
 		once     = flag.Bool("once", false, "run one scan and exit")
 	)
 	flag.Parse()
-	w := NewWatcher(*pi, *retry)
-	w.Once = *once
 	path, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "see:", err)
 		os.Exit(1)
 	}
 
-	mode, msg := selectRunMode(*modeFlag, term.IsTerminal(int(os.Stdout.Fd())))
-	if mode == modeUnknown {
-		fmt.Fprintln(os.Stderr, msg)
+	mode, err := selectRunMode(*modeFlag, term.IsTerminal(int(os.Stdout.Fd())))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "see:", err)
 		flag.Usage()
 		os.Exit(2)
 	}
@@ -462,9 +445,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, "see:", err)
 		os.Exit(2)
 	}
+	w := NewWatcher(*pi, logDir, *retry, *once)
 	defer events.Close()
 
-	w.agent = PiAgent{Binary: *pi, LogDir: logDir}
 	if mode == modeTUI {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -475,6 +458,13 @@ func main() {
 	}
 	// mode == modeLog
 	w.observer = events
+	// ponytail: mirror JSONL to stdout only when stdout is not a TTY
+	// — `see --mode=log | jq` and `see --mode=log > log.jsonl` get the
+	// stream; an interactive terminal stays silent (the JSONL file under
+	// SEE_LOG_DIR is the source of truth in that case).
+	if !term.IsTerminal(int(os.Stdout.Fd())) {
+		events.SetMirror(os.Stdout)
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
 	defer cancel()
 	if err := w.Watch(ctx, path); err != nil {
@@ -522,25 +512,29 @@ func runTUI(ctx context.Context, w *Watcher, events *eventLogger, wd string) err
 // message to the running Program. The type-switch lives here (not in
 // the tui package) so the tui package has no dependency on main's
 // Event types.
+// tuiObserver implements main.Observer by translating each Event into
+// a tui Msg literal and forwarding it through ChanObserver.Send. The
+// type-switch lives here (not in the tui package) so the tui package
+// has no dependency on main's Event types.
 type tuiObserver struct{ obs *tui.ChanObserver }
 
 func (o tuiObserver) Observe(e Event) {
 	switch e := e.(type) {
 	case RepoSeen:
-		o.obs.RepoSeen(e.Path, e.HasOpenspec)
+		o.obs.Send(tui.RepoSeenMsg{Path: e.Path, HasOpenspec: e.HasOpenspec})
 	case ChangeStarted:
-		o.obs.ChangeStarted(e.Path, e.Change)
+		o.obs.Send(tui.ChangeStartedMsg{Path: e.Path, Change: e.Change})
 	case RetryAttempt:
-		o.obs.RetryAttempt(e.Path, e.Change, e.N, e.Max, e.Err)
+		o.obs.Send(tui.RetryAttemptMsg{Path: e.Path, Change: e.Change, N: e.N, Max: e.Max, Err: e.Err})
 	case ChangeDone:
-		o.obs.ChangeDone(e.Path, e.Change)
+		o.obs.Send(tui.ChangeDoneMsg{Path: e.Path, Change: e.Change})
 	case ChangeFailed:
-		o.obs.ChangeFailed(e.Path, e.Change, e.Err)
+		o.obs.Send(tui.ChangeFailedMsg{Path: e.Path, Change: e.Change, Err: e.Err})
 	case LogPath:
-		o.obs.LogPath(e.Path, e.Change)
+		o.obs.Send(tui.LogPathMsg{Path: e.Path, Change: e.Change})
 	case Warning:
-		o.obs.Warning(e.Path, e.Change, e.Msg)
+		o.obs.Send(tui.WarningMsg{Path: e.Path, Change: e.Change, Msg: e.Msg})
 	case InfraError:
-		o.obs.InfraError(e.Where, e.Err)
+		o.obs.Send(tui.InfraErrorMsg{Where: e.Where, Err: e.Err})
 	}
 }

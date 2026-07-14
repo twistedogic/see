@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"path/filepath"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -13,7 +14,6 @@ const (
 	PhaseWorking
 	PhaseDone
 	PhaseFailed
-	PhaseNoSpec
 )
 
 func (p Phase) String() string {
@@ -26,8 +26,6 @@ func (p Phase) String() string {
 		return "done"
 	case PhaseFailed:
 		return "failed"
-	case PhaseNoSpec:
-		return "no-spec"
 	}
 	return "?"
 }
@@ -42,8 +40,6 @@ func (p Phase) Glyph() string {
 		return "✓"
 	case PhaseFailed:
 		return "✗"
-	case PhaseNoSpec:
-		return "○"
 	}
 	return "?"
 }
@@ -77,19 +73,10 @@ func (m *Model) ensureRow(path string) *RepoRow {
 	if r, ok := m.rows[path]; ok {
 		return r
 	}
-	r := &RepoRow{Name: basename(path), Phase: PhaseIdle, HasOpenspec: true}
+	r := &RepoRow{Name: filepath.Base(path), Phase: PhaseIdle, HasOpenspec: true}
 	m.rows[path] = r
 	m.order = append(m.order, path)
 	return r
-}
-
-func basename(p string) string {
-	for i := len(p) - 1; i >= 0; i-- {
-		if p[i] == '/' {
-			return p[i+1:]
-		}
-	}
-	return p
 }
 
 func (m *Model) Init() tea.Cmd {
@@ -102,7 +89,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		r := m.ensureRow(msg.Path)
 		r.HasOpenspec = msg.HasOpenspec
 		if !msg.HasOpenspec {
-			r.Phase = PhaseNoSpec
+			r.Phase = PhaseIdle
 			r.Change = "—"
 		}
 	case ChangeStartedMsg:
