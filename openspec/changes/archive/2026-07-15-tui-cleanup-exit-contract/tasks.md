@@ -1,6 +1,6 @@
 ## 1. Apply the spec delta to the tui capability
 
-- [ ] 1.1 Apply the `## MODIFIED Requirements` block to
+- [x] 1.1 Apply the `## MODIFIED Requirements` block to
   `openspec/specs/tui/spec.md`: replace the two existing
   scenarios (`Pressing q exits the TUI cleanly` and
   `SIGINT exits the TUI cleanly`) under the
@@ -8,7 +8,7 @@
   requirement with the unified
   `q and SIGINT share the same exit-status rule` scenario.
 
-- [ ] 1.2 Apply the `## ADDED Requirements` block to
+- [x] 1.2 Apply the `## ADDED Requirements` block to
   `openspec/specs/tui/spec.md`: insert the new
   `--tui drains the watcher goroutine and closes the JSONL
   event logger before exit` requirement with its matching
@@ -20,13 +20,13 @@
 
 ## 2. Validate
 
-- [ ] 2.1 Run `openspec validate --change
+- [x] 2.1 Run `openspec validate --change
   tui-cleanup-exit-contract --json` and confirm zero
   diagnostics.
 
 ## 3. Confirm the implementation already matches
 
-- [ ] 3.1 `git diff` against the previous commit on
+- [x] 3.1 `git diff` against the previous commit on
   `main.go`, `tui/model.go`, `tui/program.go`,
   `eventlog.go`, and any test file is empty. The
   implementation already satisfies the new contract;

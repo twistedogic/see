@@ -212,17 +212,38 @@ terminal.
 - **THEN** the `⚠` glyph SHALL be removed from the REPO cell
 - **AND** the footer's `warning` counter SHALL decrement by one
 
-#### Scenario: Pressing `q` exits the TUI cleanly
-- **WHEN** the user presses `q` while the TUI is running
-- **THEN** the program exits with status 0
+#### Scenario: `q` and SIGINT share the same exit-status rule
+- **WHEN** the user presses `q` while the TUI is running, OR
+  SIGINT is delivered to a running `see --tui` process
+- **THEN** the program SHALL exit
+  - with a non-zero status if and only if `Watcher.Watch` returned
+    a non-nil error before the watcher's context was cancelled, OR
+    `tea.Program.Run` returned an error
+  - with status 0 otherwise
 - **THEN** the terminal's cursor is restored
 - **THEN** the alternate screen is released
 
-#### Scenario: SIGINT exits the TUI cleanly
-- **WHEN** SIGINT is delivered to a running `see --tui` process
-- **THEN** the program exits with the same status as the equivalent
-  log-mode invocation (non-zero if a repo failure was in flight,
-  zero otherwise)
+### Requirement: `--tui` drains the watcher goroutine and closes the JSONL event logger before exit
+When `-mode=tui` is in effect, `see` SHALL, before the process exits
+in response to either `q` or SIGINT:
+
+- cancel the watcher context, killing any in-flight agent
+  subprocess via `exec.CommandContext`
+- drain the watcher goroutine via the `watchErr` channel
+- close the JavaScript Object Notation Lines (JSONL) event logger
+  so any buffered bytes reach the file system
+
+The `defer events.Close()` registered in `main()` before `runTUI`
+runs, and the explicit `cancel()` plus `<-watchErr` wait inside
+`runTUI`, are the ordered runtime hooks that satisfy this
+requirement.
+
+#### Scenario: Cleanup chain runs before exit on `q` or SIGINT
+- **WHEN** the user presses `q` while the TUI is running, OR
+  SIGINT is delivered to a running `see --tui` process
+- **THEN** the watcher goroutine has returned before `main` exits
+- **THEN** the JSONL event logger's writer has been closed before
+  `main` exits
 
 ### Requirement: Watcher semantics are unchanged under `--mode=tui`
 `-mode=tui` SHALL NOT alter watcher semantics. Under `-mode=tui`,
