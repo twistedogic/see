@@ -335,27 +335,6 @@ func (w Watcher) work(ctx context.Context, path string) error {
 	if w.observer != nil {
 		w.observer.Observe(ChangeDone{Path: path, Change: change})
 	}
-	// ponytail: merge --no-ff so the watcher's involvement shows up as a graph node even on a single-commit see/<change>.
-	if out, err := exec.Command("git", "-C", path, "switch", ref).CombinedOutput(); err != nil {
-		return fmt.Errorf("switch to %s: %w\n%s", ref, err, out)
-	}
-	mergeMsg := fmt.Sprintf("see: merge openspec change %s", change)
-	if out, err := exec.Command("git", "-C", path, "merge", "--no-ff", branch, "-m", mergeMsg).CombinedOutput(); err != nil {
-		w.warn(path, change, fmt.Sprintf("merge --no-ff %s failed: %v\n%s", branch, err, out))
-		if aout, aerr := exec.Command("git", "-C", path, "merge", "--abort").CombinedOutput(); aerr != nil {
-			w.warn(path, change, fmt.Sprintf("merge --abort failed: %v\n%s", aerr, aout))
-		}
-		if rout, rerr := exec.Command("git", "-C", path, "reset", "--hard", current).CombinedOutput(); rerr != nil {
-			w.warn(path, change, fmt.Sprintf("reset --hard %s failed: %v\n%s", current, rerr, rout))
-		}
-		if dout, derr := exec.Command("git", "-C", path, "branch", "-D", branch).CombinedOutput(); derr != nil {
-			w.warn(path, change, fmt.Sprintf("branch -D %s failed: %v\n%s", branch, derr, dout))
-		}
-		return fmt.Errorf("merge %s: %w", branch, err)
-	}
-	if out, err := exec.Command("git", "-C", path, "branch", "-d", branch).CombinedOutput(); err != nil {
-		w.warn(path, change, fmt.Sprintf("branch -d %s failed: %v\n%s", branch, err, out))
-	}
 	return nil
 }
 

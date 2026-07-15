@@ -514,8 +514,9 @@ func TestWorkCommitsOnSuccess(t *testing.T) {
 	if err := w.work(ctx, repo); err != nil {
 		t.Fatal(err)
 	}
-	// After the merge-back, main's tip is the merge commit; the apply commit
-	// survives as the merge's second parent and is reachable only via --all.
+	// After the catch-up commit, see/<change>'s tip carries the apply commit.
+	// The apply commit is the only `see`-owned commit on the workspace branch;
+	// the user's starting branch (main) is unchanged.
 	out, err := exec.Command("git", "-C", repo, "log", "--all", "--oneline").CombinedOutput()
 	if err != nil {
 		t.Fatal(err)
@@ -615,8 +616,9 @@ func TestRunOnceEmitsEventSequenceOnSuccess(t *testing.T) {
 }
 
 // Regression: agent runs must not pollute the original branch directly. They
-// run on a dedicated see/<change> branch and the original branch receives a
-// --no-ff merge commit afterwards. Pins the post-refactor contract.
+// run on a dedicated see/<change> branch; on success the user's starting
+// branch is left untouched and HEAD stays on the workspace branch. Pins
+// the post-remove-merge-step contract.
 func TestWorkIsolatesAgentRunOnBranch(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "proj")
@@ -639,6 +641,10 @@ func TestWorkIsolatesAgentRunOnBranch(t *testing.T) {
 	// one on first commit; only seed when the init/config didn't.
 	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/main").Run(); err != nil {
 		run("switch", "-c", "main")
+	}
+	originalSHA, err := GetCurrentCommit(repo)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(repo, "openspec", "changes", "task-1"), 0o755); err != nil {
 		t.Fatal(err)
@@ -663,41 +669,65 @@ func TestWorkIsolatesAgentRunOnBranch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// (a) HEAD on main has a merge commit with the expected subject.
+	// (a) main is unchanged: still at the pre-run SHA, with no merge commit.
+	postMainSHA, err := GetCurrentCommit(repo)
+	if postMainSHA != originalSHA {
+		// HEAD may not be on main anymore; follow main explicitly.
+		mainSHA, err := exec.Command("git", "-C", repo, "rev-parse", "main").CombinedOutput()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimSpace(string(mainSHA)) != originalSHA {
+			t.Fatalf("main moved: pre=%s post=%s", originalSHA, strings.TrimSpace(string(mainSHA)))
+		}
+	}
+	// Avoid "declared and not used" if the inline branch fires.
+	_ = postMainSHA
+	// (a-extra) The captured sha pre-run must still resolve to main's tip.
+	mainSHAOut, err := exec.Command("git", "-C", repo, "rev-parse", "main").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(mainSHAOut)) != originalSHA {
+		t.Fatalf("main advanced; pre=%s post=%s", originalSHA, strings.TrimSpace(string(mainSHAOut)))
+	}
 	logMain, err := exec.Command("git", "-C", repo, "log", "--oneline", "main").CombinedOutput()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(logMain), "see: merge openspec change task-1") {
-		t.Fatalf("expected merge commit on main, got:\n%s", logMain)
+	if strings.Contains(string(logMain), "see: merge openspec change task-1") {
+		t.Fatalf("expected NO merge commit on main, got:\n%s", logMain)
 	}
 
-	// (b) see/<change> deleted after merge-back.
+	// (b) see/<change> exists at run end.
 	branches, err := exec.Command("git", "-C", repo, "branch", "--list", "see/task-1").CombinedOutput()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(branches)) != "" {
-		t.Fatalf("expected see/task-1 to be deleted, got:\n%s", branches)
+	if strings.TrimSpace(string(branches)) == "" {
+		t.Fatalf("expected see/task-1 to exist, got:\n%s", branches)
 	}
 
-	// (c) working tree on main.
+	// (c) working tree on see/<change>, not on main.
 	branch, err := exec.Command("git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD").CombinedOutput()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.TrimSpace(string(branch)); got != "main" {
-		t.Fatalf("working tree on %q, want main", got)
+	if got := strings.TrimSpace(string(branch)); got != "see/task-1" {
+		t.Fatalf("working tree on %q, want see/task-1", got)
 	}
 
-	// (d) agent's apply commit reachable from main (the merge commit's second
-	// parent kept it alive after see/<change> was deleted).
+	// (d) agent's apply commit reachable from see/task-1 but NOT from main.
 	logAll, err := exec.Command("git", "-C", repo, "log", "--all", "--oneline").CombinedOutput()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(logAll), "see: apply openspec change task-1") {
 		t.Fatalf("expected apply commit in log --all, got:\n%s", logAll)
+	}
+	reachable, err := exec.Command("git", "-C", repo, "merge-base", "--is-ancestor", "HEAD", "main").CombinedOutput()
+	if err == nil {
+		t.Fatalf("apply commit reachable from main, expected NOT reachable:\n%s", reachable)
 	}
 }
 
@@ -839,7 +869,8 @@ func TestWorkRollsBackBranchOnAgentFailure(t *testing.T) {
 
 // Regression: a drifted see/<change> branch from a prior partial run must be
 // reset to the captured SHA before the agent runs, so old commits don't
-// leak into the merge-back.
+// leak into the run. After a successful run the workspace branch is left
+// in place on the user's working tree.
 func TestWorkReusesExistingBranchAndResetsToOriginalSHA(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "proj")
@@ -899,37 +930,43 @@ func TestWorkReusesExistingBranchAndResetsToOriginalSHA(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(repo, "sentinel.txt")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected sentinel.txt gone after reset, stat err = %v", err)
 	}
-	// Merge commit on main must not carry the sentinel file.
-	out, err := exec.Command("git", "-C", repo, "log", "--oneline", "main").CombinedOutput()
+	// Main is unchanged: tip equals the pre-run SHA.
+	mainSHAOut, err := exec.Command("git", "-C", repo, "rev-parse", "main").CombinedOutput()
 	if err != nil {
 		t.Fatal(err)
 	}
-	mergeLine := strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]
-	mergeSHA := strings.Fields(mergeLine)[0]
-	statOut, err := exec.Command("git", "-C", repo, "show", "--stat", mergeSHA).CombinedOutput()
+	if strings.TrimSpace(string(mainSHAOut)) != originalSHA {
+		t.Fatalf("main advanced: pre=%s post=%s", originalSHA, strings.TrimSpace(string(mainSHAOut)))
+	}
+	// No merge commit on main (the success path no longer merges).
+	logMain, err := exec.Command("git", "-C", repo, "log", "--oneline", "main").CombinedOutput()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(statOut), "sentinel.txt") {
-		t.Fatalf("merge commit %s contains sentinel.txt:\n%s", mergeSHA, statOut)
+	if strings.Contains(string(logMain), "see: merge openspec change task-1") {
+		t.Fatalf("expected no merge commit on main, got:\n%s", logMain)
 	}
+	// The workspace branch is left in place at run end.
 	branches, err := exec.Command("git", "-C", repo, "branch", "--list", "see/task-1").CombinedOutput()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(branches)) != "" {
-		t.Fatalf("expected see/task-1 to be deleted, got:\n%s", branches)
+	if strings.TrimSpace(string(branches)) == "" {
+		t.Fatalf("expected see/task-1 to exist at run end, got:\n%s", branches)
 	}
-	showMain, err := exec.Command("git", "-C", repo, "log", "--pretty=%H %P", "main", "-1").CombinedOutput()
+	// workspace branch tip is the catch-up commit whose only parent is the
+	// pre-run SHA. (Single-commit agent run, no merge.) The catch-up
+	// commit's parent must be the captured pre-run SHA.
+	showWS, err := exec.Command("git", "-C", repo, "log", "--pretty=%H %P", "see/task-1", "-1").CombinedOutput()
 	if err != nil {
 		t.Fatal(err)
 	}
-	fields := strings.Fields(strings.TrimSpace(string(showMain)))
-	if len(fields) < 3 {
-		t.Fatalf("expected merge commit with 2 parents, got %q", showMain)
+	fields := strings.Fields(strings.TrimSpace(string(showWS)))
+	if len(fields) < 2 {
+		t.Fatalf("expected workspace tip with 1 parent, got %q", showWS)
 	}
 	if fields[1] != originalSHA {
-		t.Fatalf("merge commit's first parent = %s, want %s", fields[1], originalSHA)
+		t.Fatalf("workspace tip's parent = %s, want %s", fields[1], originalSHA)
 	}
 }
 

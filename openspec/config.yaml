@@ -38,6 +38,7 @@ shape_choices: # known, not flagged as bugs by tests
   - only the first listed active change per repo is worked this round
   - git reset --hard on failure wipes any pre-existing dirty tree
   - git add -A on success can swallow untracked files the user did not intend to commit
+  - no merge back to ref; successful runs leave HEAD on see/<change> at run end and the user's starting branch untouched
 
 test:
   prefer: unit

@@ -4,9 +4,9 @@
 
 Define how `Watcher` runs an agent against an active openspec change without
 disturbing the original branch. The watcher pins every agent run to a
-`see/<change>` branch, rolls back on agent failure, and merges the result
-back via a `--no-ff` merge commit so the audit trail reflects the watcher's
-role.
+`see/<change>` branch, rolls back on agent failure, and leaves the working
+tree on `see/<change>` at the end of a successful run so promotion to the
+user's branch of choice is an explicit operator step.
 ## Requirements
 ### Requirement: Watcher creates a per-change branch before running the agent
 When `Watcher.work` begins processing an active change, it SHALL capture
@@ -40,6 +40,37 @@ branch may have been in.
   captured SHA, and proceeds as if the branch had been created fresh
   from that SHA
 
+### Requirement: Watcher leaves HEAD on the per-change branch after a successful run
+When the agent returns nil and the change is archived, `Watcher.work`
+SHALL run `git add -A` and `git commit -m "see: apply openspec change
+<change>"` on `see/<change>` so that any files the agent left dirty are
+absorbed into a single `see`-owned commit. `Watcher.work` SHALL then emit
+`ChangeDone` and return nil. `Watcher.work` SHALL NOT switch back to the
+original branch ref, SHALL NOT run `git merge --no-ff see/<change>`, and
+SHALL NOT delete `see/<change>` via `git branch -d` on this code path.
+The original branch ref captured at the start of `work` is not modified
+by this success path. The rollback path on agent failure is unaffected
+and is governed by the existing "Watcher rolls back the branch on agent
+failure" Requirement.
+
+#### Scenario: Successful run leaves HEAD on the workspace branch
+- **WHEN** `Watcher.work` started on `main` with SHA `A`, the agent
+  succeeded, and the change is archived
+- **THEN** the working tree is checked out on `see/<change>` when
+  `Watcher.work` returns
+- **THEN** `see/<change>` is not deleted by `work`
+- **THEN** the catch-up commit's subject
+  `see: apply openspec change <change>` is reachable from
+  `see/<change>`'s tip
+
+#### Scenario: Original branch tip is unchanged on success
+- **WHEN** `Watcher.work` started on `main` with SHA `A`, the agent
+  succeeded, and the change is archived
+- **THEN** `main` is at SHA `A` after `work` returns (no merge, no
+  commit on `main`)
+- **THEN** the agent's commits are reachable from `see/<change>` but
+  not from `main`
+
 ### Requirement: Watcher rolls back the branch on agent failure
 When the agent returns a non-nil error, `Watcher.work` SHALL restore the
 repo to its pre-run state: switch back to the original branch ref, reset
@@ -60,30 +91,6 @@ use `git switch --detach <sha>` instead of switching to a branch.
 - **THEN** `Watcher.work` returns an error before any branch mutation
 - **THEN** no `see/<change>` branch is created
 - **THEN** the working tree is unchanged
-
-### Requirement: Watcher merges the agent's commit back on success
-When the agent returns nil and the change is archived, `Watcher.work`
-SHALL run `git add -A` and `git commit` on `see/<change>`, then switch
-back to the original branch ref and merge `see/<change>` back with
-`git merge --no-ff -m "see: merge openspec change <change>"`. After the
-merge, `Watcher.work` SHALL delete `see/<change>` via `git branch -d`
-(safe-delete; the reflog keeps the branch recoverable if the merge was
-not fully completed for any reason).
-
-#### Scenario: Successful run produces a merge commit on the original branch
-- **WHEN** `Watcher.work` started on `main`, the agent succeeded, and the
-  change is archived
-- **THEN** `main` contains a new merge commit with subject
-  `see: merge openspec change <change>`
-- **THEN** `see/<change>` is deleted
-- **THEN** the working tree is checked out on `main`
-
-#### Scenario: Merge conflict is treated as failure
-- **WHEN** the original branch has moved such that `git merge --no-ff
-  see/<change>` reports a conflict
-- **THEN** `Watcher.work` aborts the merge (`git merge --abort`),
-  switches back to the original branch, resets hard to the captured SHA,
-  deletes `see/<change>`, and returns the merge error
 
 ### Requirement: Watcher refuses detached HEAD at run start
 `Watcher.work` SHALL treat a detached HEAD as an unsupported configuration
@@ -127,8 +134,9 @@ case `Watcher.Watch` SHALL return.
 #### Scenario: Once mode preserves the per-pass contract
 - **WHEN** `Watcher.Once` is true and the first pass runs against a repo
   with an active change
-- **THEN** the existing per-pass requirements (branch creation, rollback,
-  merge) still apply unchanged to that pass
+- **THEN** the existing per-pass requirements (branch creation,
+  rollback, leave-HEAD-on-workspace-branch) still apply unchanged to
+  that pass
 
 ### Requirement: PiAgent writes agent output to a JSONL file per run
 When `PiAgent.Run` is invoked, it SHALL create a `.jsonl` file in
@@ -210,9 +218,6 @@ are:
 - `git branch -D <branch>` to clean up the per-change branch
 - `git add -A` after a successful agent run
 - `git commit` after `git add -A`
-- `git merge --no-ff <branch>` to merge the per-change branch back
-- `git merge --abort` when a merge conflict is detected
-- `git branch -d <branch>` after a successful merge
 
 #### Scenario: Rollback git switch failure emits a Warning
 - **WHEN** the agent errors and the subsequent `git switch` back
