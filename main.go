@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"flag"
 	"fmt"
@@ -16,6 +17,24 @@ import (
 
 	"github.com/twistedogic/see/tui"
 )
+
+// defaultPromptTemplate is the per-change prompt `see` hands to `pi`.
+// Kept as a checked-in Markdown file so editors reviewing the prompt
+// see prose in PRs and the prompt is editable without touching Go.
+// `//go:embed` fails the build if prompt.md is missing at the repo
+// root alongside main.go, so a deleted default becomes a compile
+// error rather than a silent regression.
+//
+//go:embed prompt.md
+var defaultPromptTemplate string
+
+// renderPrompt substitutes the literal token `{change}` in template
+// with the active change name. One substitution, no escape syntax,
+// no other tokens — see openspec/changes/extract-apply-prompt-flag
+// for the design rationale.
+func renderPrompt(template, change string) string {
+	return strings.ReplaceAll(template, "{change}", change)
+}
 
 type runMode int
 
@@ -74,12 +93,7 @@ func (p PiAgent) Run(ctx context.Context, path, change, prompt string) (string, 
 	return logPath, cmd.Run()
 }
 
-func applyPrompt(change string) string {
-	return fmt.Sprintf(
-		"Apply the openspec change %q: read its proposal and tasks, implement them, run the tests, verify, then archive the change. Sync specs if needed.",
-		change,
-	)
-}
+
 
 func ListActiveOpenSpecChanges(cwd string) []string {
 	entries, err := os.ReadDir(filepath.Join(cwd, "openspec", "changes"))
@@ -253,6 +267,22 @@ type Watcher struct {
 	// ponytail: Once mirrors RetryCount — zero-default knob on the watcher,
 	// read inside Watch. Once=true makes Watch run a single pass and return.
 	Once bool
+	// PromptTemplate overrides the default prompt body passed to the
+	// agent. Empty / whitespace-only is treated as "use the embedded
+	// default"; use SetPromptTemplate to apply the normalization
+	// rule rather than assigning directly.
+	PromptTemplate string
+}
+
+// SetPromptTemplate stores s as the effective prompt template,
+// trimming surrounding whitespace and substituting the embedded
+// default when the trimmed result is empty.
+func (w *Watcher) SetPromptTemplate(s string) {
+	if strings.TrimSpace(s) == "" {
+		w.PromptTemplate = defaultPromptTemplate
+		return
+	}
+	w.PromptTemplate = s
 }
 
 // NewWatcher constructs a fully-populated Watcher. PiAgent fields are
@@ -302,7 +332,11 @@ func (w Watcher) work(ctx context.Context, path string) error {
 	if err := ensureBranch(path, current, branch); err != nil {
 		return err
 	}
-	logPath, runErr := w.agent.Run(ctx, path, change, applyPrompt(change))
+	template := w.PromptTemplate
+	if template == "" {
+		template = defaultPromptTemplate
+	}
+	logPath, runErr := w.agent.Run(ctx, path, change, renderPrompt(template, change))
 	if logPath != "" && w.observer != nil {
 		w.observer.Observe(LogPath{Path: logPath, Change: change})
 	}
@@ -392,6 +426,7 @@ func main() {
 		modeFlag     = flag.String("mode", "tui", "output mode (default \"tui\"); one of: tui, log")
 		once         = flag.Bool("once", false, "run one scan and exit")
 		ignoreConfig = flag.Bool("ignore-config", false, "skip the $XDG_CONFIG_HOME/see/watches config file")
+		promptFlag   = flag.String("prompt", "", "override the agent prompt template; {change} is replaced with the active change name")
 		watchFlag    multiFlag
 	)
 	flag.Var(&watchFlag, "watch", "watch path or shell-glob (path, ~/path, or shell-glob with *, ?, [abc]; '**' is rejected). Repeatable.")
@@ -415,6 +450,7 @@ func main() {
 		os.Exit(2)
 	}
 	w := NewWatcher(*pi, logDir, *retry, *once)
+	w.SetPromptTemplate(*promptFlag)
 	defer events.Close()
 	w.observer = events
 	// ponytail: mirror JSONL to stdout only when stdout is not a TTY

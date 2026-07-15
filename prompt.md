@@ -1,0 +1,1 @@
+Apply the openspec change "{change}": read its proposal and tasks, implement them, run the tests, verify, then archive the change. Sync specs if needed.

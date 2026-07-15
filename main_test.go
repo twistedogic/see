@@ -18,15 +18,19 @@ import (
 // non-nil, overrides the default success-path return so a test can
 // exercise the capture-failure path (logPath pointing at "" means
 // capture was unavailable; nil preserves the default non-empty path).
+// prompts records the 4th Run argument (the rendered prompt) on every
+// call so tests can assert what `pi` would receive.
 type fakeAgent struct {
 	runs    []string
+	prompts []string
 	err     error
 	logPath *string
 	onRun   func() error
 }
 
-func (f *fakeAgent) Run(_ context.Context, path, _, _ string) (string, error) {
+func (f *fakeAgent) Run(_ context.Context, path, _, prompt string) (string, error) {
 	f.runs = append(f.runs, path)
+	f.prompts = append(f.prompts, prompt)
 	if f.onRun != nil {
 		if err := f.onRun(); err != nil {
 			return "", err
@@ -112,11 +116,84 @@ func TestListActiveOpenSpecChanges(t *testing.T) {
 	}
 }
 
-func TestApplyPromptMentionsChange(t *testing.T) {
-	p := applyPrompt("add-foo")
-	if !strings.Contains(p, "add-foo") {
-		t.Fatalf("prompt should mention change name: %q", p)
+func TestRenderPromptSubstitutesChange(t *testing.T) {
+	if got, want := renderPrompt("Apply {change}", "add-foo"), "Apply add-foo"; got != want {
+		t.Fatalf("renderPrompt(substitute) = %q, want %q", got, want)
 	}
+	// Empty change name still produces a single space where the token was.
+	if got, want := renderPrompt("Apply {change}", ""), "Apply "; got != want {
+		t.Fatalf("renderPrompt(empty change) = %q, want %q", got, want)
+	}
+}
+
+func TestDefaultTemplateMentionsChange(t *testing.T) {
+	if !strings.Contains(renderPrompt(defaultPromptTemplate, "add-foo"), "add-foo") {
+		t.Fatalf("default template should mention change name after substitution; got %q",
+			renderPrompt(defaultPromptTemplate, "add-foo"))
+	}
+}
+
+func TestWatcherRendersUserPrompt(t *testing.T) {
+	dir := bootstrapPromptRepo(t, "add-foo")
+	agent := &fakeAgent{}
+	w := Watcher{agent: agent, RetryCount: 1}
+	w.SetPromptTemplate("Apply {change} now")
+	if err := w.work(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	if len(agent.prompts) != 1 {
+		t.Fatalf("agent Run called %d times, want 1", len(agent.prompts))
+	}
+	if got, want := agent.prompts[0], "Apply add-foo now"; got != want {
+		t.Fatalf("rendered prompt = %q, want %q", got, want)
+	}
+}
+
+func TestWatcherFallsBackToEmbeddedDefault(t *testing.T) {
+	dir := bootstrapPromptRepo(t, "add-foo")
+	agent := &fakeAgent{}
+	w := Watcher{agent: agent, RetryCount: 1}
+	w.SetPromptTemplate("   ")
+	if got, want := w.PromptTemplate, defaultPromptTemplate; got != want {
+		t.Fatalf("PromptTemplate after whitespace setter = %q, want embedded default", got)
+	}
+	if err := w.work(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	if len(agent.prompts) != 1 {
+		t.Fatalf("agent Run called %d times, want 1", len(agent.prompts))
+	}
+	if got, want := agent.prompts[0], renderPrompt(defaultPromptTemplate, "add-foo"); got != want {
+		t.Fatalf("rendered prompt = %q, want %q (default substituted with add-foo)", got, want)
+	}
+}
+
+// bootstrapPromptRepo creates a temp git repository with a single
+// active openspec change and HEAD on main. The prompt-template tests
+// only need a working git tree + one active change to drive
+// Watcher.work down to the Agent.Run call.
+func bootstrapPromptRepo(t *testing.T, change string) string {
+	t.Helper()
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "t@e")
+	run("config", "user.name", "t")
+	run("commit", "--allow-empty", "-q", "-m", "init")
+	if err := exec.Command("git", "-C", dir, "show-ref", "--verify", "--quiet", "refs/heads/main").Run(); err != nil {
+		run("switch", "-c", "main")
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "openspec", "changes", change), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func TestPiAgentCapturesOutputToLogFile(t *testing.T) {
