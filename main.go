@@ -338,20 +338,12 @@ func (w Watcher) work(ctx context.Context, path string) error {
 	return nil
 }
 
-func (w Watcher) runOnce(ctx context.Context, wd string) error {
-	entries, err := os.ReadDir(wd)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
+func (w Watcher) runOnce(ctx context.Context, repos []string) error {
+	for _, repo := range repos {
 		select {
 		case <-ctx.Done():
 			return nil
 		default:
-			if !entry.IsDir() {
-				continue
-			}
-			repo := filepath.Join(wd, entry.Name())
 			if _, err := os.Stat(filepath.Join(repo, ".git")); err != nil {
 				continue
 			}
@@ -373,10 +365,10 @@ func (w Watcher) runOnce(ctx context.Context, wd string) error {
 	return nil
 }
 
-func (w Watcher) Watch(ctx context.Context, wd string) error {
+func (w Watcher) Watch(ctx context.Context, repos []string) error {
 	// ponytail: tight poll loop, add a backoff sleep when watching large trees.
 	if w.Once {
-		if err := w.runOnce(ctx, wd); err != nil {
+		if err := w.runOnce(ctx, repos); err != nil {
 			return err
 		}
 		return nil
@@ -386,7 +378,7 @@ func (w Watcher) Watch(ctx context.Context, wd string) error {
 		case <-ctx.Done():
 			return nil
 		default:
-			if err := w.runOnce(ctx, wd); err != nil {
+			if err := w.runOnce(ctx, repos); err != nil {
 				return err
 			}
 		}
@@ -395,17 +387,15 @@ func (w Watcher) Watch(ctx context.Context, wd string) error {
 
 func main() {
 	var (
-		pi       = flag.String("pi", "pi", "path to the pi binary")
-		retry    = flag.Int("retry", 3, "retries per repo on failure")
-		modeFlag = flag.String("mode", "tui", "output mode (default \"tui\"); one of: tui, log")
-		once     = flag.Bool("once", false, "run one scan and exit")
+		pi           = flag.String("pi", "pi", "path to the pi binary")
+		retry        = flag.Int("retry", 3, "retries per repo on failure")
+		modeFlag     = flag.String("mode", "tui", "output mode (default \"tui\"); one of: tui, log")
+		once         = flag.Bool("once", false, "run one scan and exit")
+		ignoreConfig = flag.Bool("ignore-config", false, "skip the $XDG_CONFIG_HOME/see/watches config file")
+		watchFlag    multiFlag
 	)
+	flag.Var(&watchFlag, "watch", "watch path or shell-glob (path, ~/path, or shell-glob with *, ?, [abc]; '**' is rejected). Repeatable.")
 	flag.Parse()
-	path, err := os.Getwd()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "see:", err)
-		os.Exit(1)
-	}
 
 	mode, err := selectRunMode(*modeFlag, term.IsTerminal(int(os.Stdout.Fd())))
 	if err != nil {
@@ -426,29 +416,82 @@ func main() {
 	}
 	w := NewWatcher(*pi, logDir, *retry, *once)
 	defer events.Close()
-
-	if mode == modeTUI {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		if err := runTUI(ctx, &w, events, path); err != nil {
-			os.Exit(1)
-		}
-		return
-	}
-	// mode == modeLog
 	w.observer = events
 	// ponytail: mirror JSONL to stdout only when stdout is not a TTY
 	// — `see --mode=log | jq` and `see --mode=log > log.jsonl` get the
 	// stream; an interactive terminal stays silent (the JSONL file under
 	// SEE_LOG_DIR is the source of truth in that case).
+	// Set the mirror before resolving the watch list so the
+	// resolution-layer warnings land in both the file and stdout when
+	// stdout is piped.
 	if !term.IsTerminal(int(os.Stdout.Fd())) {
 		events.SetMirror(os.Stdout)
 	}
+
+	repos, warnings, err := resolveWatchList(watchFlag, *ignoreConfig)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "see:", err)
+		os.Exit(2)
+	}
+	for _, warn := range warnings {
+		events.Observe(warn)
+	}
+
+	if mode == modeTUI {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if err := runTUI(ctx, &w, events, repos); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+	// mode == modeLog
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
 	defer cancel()
-	if err := w.Watch(ctx, path); err != nil {
+	if err := w.Watch(ctx, repos); err != nil {
 		os.Exit(1)
 	}
+}
+
+// resolveWatchList assembles the watch list from --watch entries,
+// the optional config file, and the cwd fallback. It is a tiny
+// coordinator over loadWatchConfig + resolveTargets so main() reads
+// as one pipeline: gather, classify, return.
+func resolveWatchList(watchEntries []string, ignoreConfig bool) ([]string, []Warning, error) {
+	var patterns []string
+	patterns = append(patterns, watchEntries...)
+	if !ignoreConfig {
+		configPath, err := watchConfigPath()
+		if err != nil {
+			return nil, nil, err
+		}
+		configEntries, err := loadWatchConfig(configPath)
+		if err != nil {
+			return nil, nil, err
+		}
+		patterns = append(patterns, configEntries...)
+	}
+	if len(patterns) == 0 {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return nil, nil, err
+		}
+		patterns = []string{cwd}
+	}
+	return resolveTargets(patterns)
+}
+
+// multiFlag accumulates repeated --flag values into a slice.
+// Implements flag.Value so the standard flag package accepts
+// `--watch a --watch b` and `--watch=a,b` (the latter via a custom
+// split is out of scope; one --watch per pattern keeps the surface
+// simple).
+type multiFlag []string
+
+func (m *multiFlag) String() string { return strings.Join(*m, ",") }
+func (m *multiFlag) Set(v string) error {
+	*m = append(*m, v)
+	return nil
 }
 
 // runTUI runs the watcher with an eventLogger wired as the
@@ -456,14 +499,14 @@ func main() {
 // ChanObserver in addition to the batch-level JSONL. The bubbletea
 // program owns signal handling; when it exits we cancel the
 // watcher's context so the tight poll loop returns.
-func runTUI(ctx context.Context, w *Watcher, events *eventLogger, wd string) error {
+func runTUI(ctx context.Context, w *Watcher, events *eventLogger, repos []string) error {
 	prog, obs := tui.New()
 	events.Attach(tuiObserver{obs: obs})
 	w.observer = events
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	watchErr := make(chan error, 1)
-	go func() { watchErr <- w.Watch(ctx, wd) }()
+	go func() { watchErr <- w.Watch(ctx, repos) }()
 	// ponytail: watcher-exit → prog.Quit() wiring for --once. In loop mode the
 	// watcher only exits after cancel() runs (which fires after prog.Run()
 	// returns), so Quit() on an already-exited program is a no-op.

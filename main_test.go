@@ -457,7 +457,7 @@ func TestRunOnceRetryLoopReturnsLastErrorWhenAllAttemptsFail(t *testing.T) {
 		}
 	}}
 	w := Watcher{agent: agent, RetryCount: 3}
-	err := w.runOnce(context.Background(), root)
+	err := w.runOnce(context.Background(), []string{repo})
 	if !errors.Is(err, c) {
 		t.Fatalf("runOnce err = %v, want %v", err, c)
 	}
@@ -575,7 +575,7 @@ func TestRunOnceEmitsEventSequenceOnSuccess(t *testing.T) {
 	obs := &recordingObserver{}
 	w := Watcher{agent: agent, RetryCount: 1, observer: obs}
 	ctx := t.Context()
-	if err := w.runOnce(ctx, root); err != nil {
+	if err := w.runOnce(ctx, []string{repo}); err != nil {
 		t.Fatal(err)
 	}
 	got := obs.eventTypes()
@@ -762,7 +762,7 @@ func TestRunOncePassesRepoPathToAgent(t *testing.T) {
 	obs := &recordingObserver{}
 	w := Watcher{agent: agent, RetryCount: 1, observer: obs}
 	ctx := t.Context()
-	if err := w.runOnce(ctx, root); err != nil {
+	if err := w.runOnce(ctx, []string{repo}); err != nil {
 		t.Fatal(err)
 	}
 	if len(agent.runs) != 1 || agent.runs[0] != repo {
@@ -1080,7 +1080,7 @@ func TestObserverReceivesRetrySequence(t *testing.T) {
 	obs := &recordingObserver{}
 	w := Watcher{agent: agent, RetryCount: 3, observer: obs}
 	ctx := t.Context()
-	if err := w.runOnce(ctx, root); err != nil {
+	if err := w.runOnce(ctx, []string{repo}); err != nil {
 		t.Fatal(err)
 	}
 	got := obs.eventTypes()
@@ -1145,7 +1145,7 @@ func TestObserverReceivesChangeFailedAfterRetriesExhausted(t *testing.T) {
 	obs := &recordingObserver{}
 	w := Watcher{agent: agent, RetryCount: 2, observer: obs}
 	ctx := t.Context()
-	if err := w.runOnce(ctx, root); err == nil {
+	if err := w.runOnce(ctx, []string{repo}); err == nil {
 		t.Fatal("expected runOnce to return error after retries exhausted")
 	}
 	got := obs.eventTypes()
@@ -1200,7 +1200,7 @@ func TestRepoSeenFiresForRepoWithoutOpenspec(t *testing.T) {
 	agent := &fakeAgent{err: nil}
 	w := Watcher{agent: agent, RetryCount: 1, observer: obs}
 	ctx := t.Context()
-	if err := w.runOnce(ctx, root); err != nil {
+	if err := w.runOnce(ctx, []string{repo}); err != nil {
 		t.Fatal(err)
 	}
 	got := obs.eventTypes()
@@ -1261,7 +1261,7 @@ func TestNilObserverIsSafe(t *testing.T) {
 	// No observer set; the watcher should still run end-to-end.
 	w := Watcher{agent: agent, RetryCount: 1}
 	ctx := t.Context()
-	if err := w.runOnce(ctx, root); err != nil {
+	if err := w.runOnce(ctx, []string{repo}); err != nil {
 		t.Fatal(err)
 	}
 	if len(agent.runs) != 1 {
@@ -1355,7 +1355,7 @@ func TestWatchReturnsAfterOnePassWhenOnce(t *testing.T) {
 	}
 	w := Watcher{agent: agent, RetryCount: 1, Once: true}
 	ctx := t.Context()
-	if err := w.Watch(ctx, root); err != nil {
+	if err := w.Watch(ctx, []string{repo}); err != nil {
 		t.Fatalf("Watch returned %v, want nil", err)
 	}
 	if len(agent.runs) != 1 {
@@ -1378,7 +1378,7 @@ func TestWatchLoopsUntilCtxCancelWhenNotOnce(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		cancel()
 	}()
-	if err := w.Watch(ctx, root); err != nil {
+	if err := w.Watch(ctx, []string{repo}); err != nil {
 		t.Fatalf("Watch returned %v, want nil after cancel", err)
 	}
 	if len(agent.runs) < 1 {
@@ -1396,7 +1396,7 @@ func TestWatchStopsOnFirstPassError(t *testing.T) {
 	agent := &fakeAgent{err: boom}
 	w := Watcher{agent: agent, RetryCount: 1, Once: false}
 	ctx := t.Context()
-	err := w.Watch(ctx, root)
+	err := w.Watch(ctx, []string{repo})
 	if err == nil {
 		t.Fatal("Watch returned nil, want error")
 	}
