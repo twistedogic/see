@@ -38,3 +38,23 @@ shape_choices: # known, not flagged as bugs by tests
   - only the first listed active change per repo is worked this round
   - git reset --hard on failure wipes any pre-existing dirty tree
   - git add -A on success can swallow untracked files the user did not intend to commit
+
+test:
+  prefer: unit
+  reason: >
+    Watcher.Watch polls runOnce in a tight loop until SIGINT/SIGTERM
+    (see loop.discover above); main() does not exit on its own.
+    Spawning the binary in a test hangs the runner, so end-to-end
+    tests against the compiled binary are not the default.
+  style: >
+    Drive Watcher.work (or a single runOnce pass) directly with a
+    fakeAgent that records the 4th Run argument and a
+    recordingObserver that captures the event sequence; assert on
+    the observed events, not on exit codes or stdout. Always invoke
+    tests with an explicit `go test -timeout 30s` so a wedged loop
+    fails fast.
+  e2e_exceptions: >
+    Manual smoke checks and one-shot `see --once` runs against a
+    fixture repo with a hard wall-clock deadline are acceptable;
+    anything that needs to spawn the binary for longer must run
+    outside `go test`.

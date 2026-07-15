@@ -14,6 +14,24 @@ Guidelines for AI agents and contributors working on this project.
 
 - When doing a bug fix, always start by reproducing the bug and add a failing test case before changing production code. The failing test must demonstrate the bug, and the fix must turn it green. Never merge a bug fix without a regression test.
 
+## Testing
+
+- `main` is a watch loop: `Watcher.Watch` (`main.go`) polls `runOnce` in
+  a tight loop and only exits on `SIGINT` or `SIGTERM`. Tests that spawn
+  the binary hang the test runner, so:
+  - Prefer unit tests that drive `Watcher.work` (or a single `runOnce`
+    pass) directly with a `fakeAgent` and a `recordingObserver`
+    (see `main_test.go`). Assert on the observed event sequence and
+    the captured `Run` arguments — never on process exit codes or
+    stdout.
+  - Always run `go test -timeout 30s ./...` (or shorter). A wedged
+    poll loop or goroutine should fail fast at 30 seconds rather than
+    hitting the runner's default 10-minute ceiling and masking the
+    real bug under a generic timeout.
+  - Reserve spawning the binary for manual smoke checks and one-shot
+    `see --once` runs against a fixture repo, never inside an
+    automated test.
+
 ## Technical Decisions
 
 - When making a technical decision, do not give much weight to development cost and time. Instead, prefer correctness, readability, simplicity, and long-term maintainability. Short-term effort is a secondary concern; the chosen approach should be one we are willing to live with for years.
