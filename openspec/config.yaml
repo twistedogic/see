@@ -8,9 +8,12 @@ purpose: >
 
 loop:
   discover: >
-    Watcher.Watch polls runOnce in a tight loop until SIGINT or SIGTERM.
-    runOnce walks wd/ and keeps immediate subdirs that have .git/ and at
-    least one commit (verified via `git rev-parse HEAD`).
+    Watcher.Watch runs one runOnce pass immediately, then waits
+    PollInterval (DefaultPollInterval = 5m, configurable via
+    --interval; 0 disables the wait) after every successful pass
+    until SIGINT or SIGTERM cancels the context. runOnce walks wd/
+    and keeps immediate subdirs that have .git/ and at least one
+    commit (verified via `git rev-parse HEAD`).
   pick: >
     For each repo, read `openspec/changes/`, drop `archive/`, drop files.
     Work the first entry (changes[0]); the rest are ignored this round.
@@ -31,10 +34,11 @@ loop:
 flags:
   -pi: path to the pi binary (default "pi")
   -retry: max attempts per repo (default 3)
+  -interval: completion-relative delay between continuous passes (default 5m0s; 0 disables)
 
 shape_choices: # known, not flagged as bugs by tests
   - abort-on-first-failure: one exhausted repo halts Watcher.Watch
-  - tight poll loop with no backoff (ponytail-acknowledged in main.go)
+  - completion-relative polling delay (DefaultPollInterval = 5m) with --interval=0 escape hatch
   - only the first listed active change per repo is worked this round
   - git reset --hard on failure wipes any pre-existing dirty tree
   - git add -A on success can swallow untracked files the user did not intend to commit
@@ -43,10 +47,13 @@ shape_choices: # known, not flagged as bugs by tests
 test:
   prefer: unit
   reason: >
-    Watcher.Watch polls runOnce in a tight loop until SIGINT/SIGTERM
-    (see loop.discover above); main() does not exit on its own.
-    Spawning the binary in a test hangs the runner, so end-to-end
-    tests against the compiled binary are not the default.
+    Watcher.Watch runs one runOnce pass immediately then waits
+    PollInterval after every successful pass until SIGINT/SIGTERM
+    cancels the context (see loop.discover above); main() does not
+    exit on its own. Spawning the binary in a test hangs the runner,
+    so end-to-end tests against the compiled binary are not the
+    default. Unit tests must set a short PollInterval or zero to keep
+    the loop bounded; literals default to zero.
   style: >
     Drive Watcher.work (or a single runOnce pass) directly with a
     fakeAgent that records the 4th Run argument and a

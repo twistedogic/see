@@ -16,14 +16,21 @@ Guidelines for AI agents and contributors working on this project.
 
 ## Testing
 
-- `main` is a watch loop: `Watcher.Watch` (`main.go`) polls `runOnce` in
-  a tight loop and only exits on `SIGINT` or `SIGTERM`. Tests that spawn
-  the binary hang the test runner, so:
+- `main` is a watch loop: `Watcher.Watch` (`main.go`) runs one
+  `runOnce` pass immediately, then waits `Watcher.PollInterval`
+  (`DefaultPollInterval` = five minutes via `NewWatcher`) after every
+  successful pass until `SIGINT` or `SIGTERM` cancels the context.
+  `--interval=0` restores the pre-default tight-poll loop; negative
+  intervals are rejected at startup. Tests that spawn the binary hang
+  the test runner, so:
   - Prefer unit tests that drive `Watcher.work` (or a single `runOnce`
     pass) directly with a `fakeAgent` and a `recordingObserver`
     (see `main_test.go`). Assert on the observed event sequence and
     the captured `Run` arguments — never on process exit codes or
     stdout.
+  - Set `Watcher.PollInterval` to a short duration or zero in unit
+    tests so the loop returns within a bounded deadline. A literal
+    `Watcher{}` defaults to zero interval for this reason.
   - Always run `go test -timeout 30s ./...` (or shorter). A wedged
     poll loop or goroutine should fail fast at 30 seconds rather than
     hitting the runner's default 10-minute ceiling and masking the

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"golang.org/x/term"
 
@@ -267,12 +268,25 @@ type Watcher struct {
 	// ponytail: Once mirrors RetryCount — zero-default knob on the watcher,
 	// read inside Watch. Once=true makes Watch run a single pass and return.
 	Once bool
+	// PollInterval is the completion-relative delay Watch waits
+	// between successful continuous-mode passes. The first pass is
+	// always immediate; a zero value restores the pre-change
+	// tight-poll behavior; negative values are rejected at startup
+	// before construction. Production callers go through NewWatcher
+	// to inherit DefaultPollInterval.
+	PollInterval time.Duration
 	// PromptTemplate overrides the default prompt body passed to the
 	// agent. Empty / whitespace-only is treated as "use the embedded
 	// default"; use SetPromptTemplate to apply the normalization
 	// rule rather than assigning directly.
 	PromptTemplate string
 }
+
+// DefaultPollInterval is the post-success-pass delay Watch applies in
+// continuous mode when constructed via NewWatcher. Exported so tests
+// and operators can reference the canonical default without
+// hard-coding the literal.
+const DefaultPollInterval = 5 * time.Minute
 
 // SetPromptTemplate stores s as the effective prompt template,
 // trimming surrounding whitespace and substituting the embedded
@@ -288,12 +302,14 @@ func (w *Watcher) SetPromptTemplate(s string) {
 // NewWatcher constructs a fully-populated Watcher. PiAgent fields are
 // unexported (lowercase) to keep construction hermetic; this is the
 // blessed path for building one. Tests that need an Agent without a
-// Watcher can reach in via w.agent.
+// Watcher can reach in via w.agent. The Watcher is seeded with
+// DefaultPollInterval so production callers do not busy-poll.
 func NewWatcher(binary, logDir string, retry int, once bool) Watcher {
 	return Watcher{
-		agent:      PiAgent{binary: binary, logDir: logDir},
-		RetryCount: retry,
-		Once:       once,
+		agent:        PiAgent{binary: binary, logDir: logDir},
+		RetryCount:   retry,
+		Once:         once,
+		PollInterval: DefaultPollInterval,
 	}
 }
 
@@ -400,7 +416,6 @@ func (w Watcher) runOnce(ctx context.Context, repos []string) error {
 }
 
 func (w Watcher) Watch(ctx context.Context, repos []string) error {
-	// ponytail: tight poll loop, add a backoff sleep when watching large trees.
 	if w.Once {
 		if err := w.runOnce(ctx, repos); err != nil {
 			return err
@@ -412,9 +427,19 @@ func (w Watcher) Watch(ctx context.Context, repos []string) error {
 		case <-ctx.Done():
 			return nil
 		default:
-			if err := w.runOnce(ctx, repos); err != nil {
-				return err
-			}
+		}
+		if err := w.runOnce(ctx, repos); err != nil {
+			return err
+		}
+		if w.PollInterval <= 0 {
+			continue
+		}
+		timer := time.NewTimer(w.PollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
 		}
 	}
 }
@@ -427,10 +452,16 @@ func main() {
 		once         = flag.Bool("once", false, "run one scan and exit")
 		ignoreConfig = flag.Bool("ignore-config", false, "skip the $XDG_CONFIG_HOME/see/watches config file")
 		promptFlag   = flag.String("prompt", "", "override the agent prompt template; {change} is replaced with the active change name")
+		interval     = flag.Duration("interval", DefaultPollInterval, "delay between completed scans in continuous mode; 0 disables the delay, negative values are rejected")
 		watchFlag    multiFlag
 	)
 	flag.Var(&watchFlag, "watch", "watch path or shell-glob (path, ~/path, or shell-glob with *, ?, [abc]; '**' is rejected). Repeatable.")
 	flag.Parse()
+
+	if *interval < 0 {
+		fmt.Fprintf(os.Stderr, "see: --interval must be >= 0 (got %s); pass 0 for immediate polling\n", *interval)
+		os.Exit(2)
+	}
 
 	mode, err := selectRunMode(*modeFlag, term.IsTerminal(int(os.Stdout.Fd())))
 	if err != nil {
@@ -450,6 +481,7 @@ func main() {
 		os.Exit(2)
 	}
 	w := NewWatcher(*pi, logDir, *retry, *once)
+	w.PollInterval = *interval
 	w.SetPromptTemplate(*promptFlag)
 	defer events.Close()
 	w.observer = events

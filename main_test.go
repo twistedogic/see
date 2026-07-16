@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -1479,6 +1480,158 @@ func TestWatchStopsOnFirstPassError(t *testing.T) {
 	}
 	if len(agent.runs) != 1 {
 		t.Fatalf("agent.Run called %d times, want 1", len(agent.runs))
+	}
+}
+
+// newIntervalTestRepo bootstraps a one-commit git repo on branch main
+// with one active change that the agent archive on Run, so each
+// pass-through of the watcher is immediately ready to run again.
+func newIntervalTestRepo(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	repo := filepath.Join(root, "proj")
+	mkRepoWithChange(t, repo, "task-1")
+	return repo
+}
+
+// runClock records the wall-clock offset (relative to the first
+// observation) of each agent invocation so the test can assert the
+// spacing between consecutive passes.
+type runClock struct {
+	mu      sync.Mutex
+	first   time.Time
+	offsets []time.Duration
+}
+
+func (r *runClock) record(t time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.first.IsZero() {
+		r.first = t
+	}
+	r.offsets = append(r.offsets, t.Sub(r.first))
+}
+
+func (r *runClock) snapshot() []time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]time.Duration, len(r.offsets))
+	copy(out, r.offsets)
+	return out
+}
+
+// Regression: with Watcher.Once=false and a configured PollInterval,
+// the first pass is immediate and the next pass does not start until
+// at least the interval has elapsed since the previous pass.
+func TestWatchDelaysNextPassByPollInterval(t *testing.T) {
+	repo := newIntervalTestRepo(t)
+	clock := &runClock{}
+	agent := &fakeAgent{
+		onRun: func() error {
+			clock.record(time.Now())
+			return nil
+		},
+	}
+	interval := 80 * time.Millisecond
+	w := Watcher{agent: agent, RetryCount: 1, Once: false, PollInterval: interval}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		// Give the loop room for two passes plus the interval.
+		time.Sleep(3 * interval)
+		cancel()
+	}()
+	if err := w.Watch(ctx, []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want nil", err)
+	}
+	offsets := clock.snapshot()
+	if len(offsets) < 2 {
+		t.Fatalf("agent.Run called %d times, want >= 2; offsets=%v", len(offsets), offsets)
+	}
+	if offsets[0] > 20*time.Millisecond {
+		t.Fatalf("first pass took %v, want < 20ms (immediate)", offsets[0])
+	}
+	if offsets[1] < interval {
+		t.Fatalf("second pass at %v, want >= %v (interval)", offsets[1], interval)
+	}
+}
+
+// Regression: cancellation during a long configured interval wakes
+// Watch promptly without starting another pass.
+func TestWatchCancellationInterruptsPollInterval(t *testing.T) {
+	repo := newIntervalTestRepo(t)
+	agent := &fakeAgent{err: nil}
+	// Long interval so the test only completes when ctx cancels.
+	w := Watcher{agent: agent, RetryCount: 1, Once: false, PollInterval: time.Hour}
+	ctx, cancel := context.WithCancel(context.Background())
+	start := time.Now()
+	go func() {
+		// Wait for the first pass to complete (one Run), then cancel.
+		for len(agent.runs) == 0 {
+			time.Sleep(5 * time.Millisecond)
+		}
+		cancel()
+	}()
+	if err := w.Watch(ctx, []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want nil", err)
+	}
+	elapsed := time.Since(start)
+	if elapsed > 2*time.Second {
+		t.Fatalf("Watch took %v to return after cancel, want < 2s", elapsed)
+	}
+	if len(agent.runs) != 1 {
+		t.Fatalf("agent.Run called %d times, want exactly 1 (cancel before next pass)", len(agent.runs))
+	}
+}
+
+// Regression: PollInterval=0 preserves the immediate-polling behavior
+// — the next pass runs as soon as the previous one completes.
+func TestWatchZeroIntervalPollsImmediately(t *testing.T) {
+	repo := newIntervalTestRepo(t)
+	clock := &runClock{}
+	agent := &fakeAgent{
+		onRun: func() error {
+			clock.record(time.Now())
+			return nil
+		},
+	}
+	w := Watcher{agent: agent, RetryCount: 1, Once: false, PollInterval: 0}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		for len(agent.runs) < 3 {
+			time.Sleep(5 * time.Millisecond)
+		}
+		cancel()
+	}()
+	if err := w.Watch(ctx, []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want nil", err)
+	}
+	offsets := clock.snapshot()
+	if len(offsets) < 3 {
+		t.Fatalf("agent.Run called %d times, want >= 3 (immediate polling); offsets=%v", len(offsets), offsets)
+	}
+	if offsets[2] > 200*time.Millisecond {
+		t.Fatalf("third pass at %v, want < 200ms (zero interval should not wait)", offsets[2])
+	}
+}
+
+// Regression: NewWatcher carries the 5-minute default interval so
+// production callers do not busy-poll. Direct Watcher literals still
+// observe the zero-value zero-delay default — tests stay explicit.
+func TestNewWatcherDefaultPollInterval(t *testing.T) {
+	w := NewWatcher("pi", "/tmp/logs", 3, false)
+	if got, want := w.PollInterval, 5*time.Minute; got != want {
+		t.Fatalf("NewWatcher PollInterval = %v, want %v (5-minute default)", got, want)
+	}
+}
+
+// Regression: a literal Watcher{} has PollInterval=0 so direct
+// construction is explicit and matches the pre-change tight-poll loop.
+func TestWatcherLiteralZeroPollInterval(t *testing.T) {
+	var w Watcher
+	if w.PollInterval != 0 {
+		t.Fatalf("Watcher{}.PollInterval = %v, want 0", w.PollInterval)
 	}
 }
 
