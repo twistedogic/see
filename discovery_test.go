@@ -219,11 +219,13 @@ func TestDedupeAndSortEmptyInputReturnsNil(t *testing.T) {
 // --ignore-config decision lives in main() so the coordinator stays
 // trivially testable.
 
-// TestResolveWatchListUnionsCLIAndConfig proves CLI and configured
-// watches are combined into one sorted list (CLI entries first in
-// the raw input, dedupeAndSort sorts the union). A single repo on
-// each side keeps the assertion obvious.
-func TestResolveWatchListUnionsCLIAndConfig(t *testing.T) {
+// TestResolveWatchListCLIReplacesConfig proves CLI watches win
+// outright over configured watches when both are present: the
+// resolved list contains the CLI repo only, with the configured
+// repo ignored. This pins the precedence rule (CLI > config > cwd)
+// that aligns resolveWatchList with selectPromptTemplate's
+// precedence rule for the prompt template.
+func TestResolveWatchListCLIReplacesConfig(t *testing.T) {
 	root := t.TempDir()
 	cliRepo := filepath.Join(root, "cli-repo")
 	cfgRepo := filepath.Join(root, "cfg-repo")
@@ -237,10 +239,8 @@ func TestResolveWatchListUnionsCLIAndConfig(t *testing.T) {
 		t.Fatalf("warnings = %v, want none", warns)
 	}
 	absCli, _ := filepath.Abs(cliRepo)
-	absCfg, _ := filepath.Abs(cfgRepo)
-	want := []string{absCfg, absCli} // sorted
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %v, want %v", got, want)
+	if !reflect.DeepEqual(got, []string{absCli}) {
+		t.Fatalf("got %v, want [%q] (configured repo must be ignored)", got, absCli)
 	}
 }
 
@@ -299,27 +299,6 @@ func TestResolveWatchListFallsBackToCWD(t *testing.T) {
 	}
 	abs, _ := filepath.Abs(root)
 	if !reflect.DeepEqual(got, []string{abs}) {
-		t.Fatalf("got %v, want [%q]", got, abs)
-	}
-}
-
-// TestResolveWatchListOverlappingSourcesDedupe proves duplicate
-// paths across CLI and configured slices collapse into one entry;
-// the coord passes both slices through resolveTargets which already
-// dedupes via dedupeAndSort.
-func TestResolveWatchListOverlappingSourcesDedupe(t *testing.T) {
-	root := t.TempDir()
-	repo := filepath.Join(root, "shared")
-	mkRepo(t, repo)
-	got, warns, err := resolveWatchList([]string{repo}, []string{repo})
-	if err != nil {
-		t.Fatalf("err = %v, want nil", err)
-	}
-	if len(warns) != 0 {
-		t.Fatalf("warnings = %v, want none", warns)
-	}
-	abs, _ := filepath.Abs(repo)
-	if len(got) != 1 || got[0] != abs {
 		t.Fatalf("got %v, want [%q]", got, abs)
 	}
 }

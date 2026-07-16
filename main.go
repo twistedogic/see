@@ -528,16 +528,21 @@ func main() {
 	}
 }
 
-// resolveWatchList assembles the watch list from command-line and
-// configured watch slices and falls back to the current working
-// directory when both are empty. It is a pure coordinator — no
-// configuration file input/output happens here; main() loads the
+// resolveWatchList picks the watch list from layered sources using
+// the same precedence rule as selectPromptTemplate: the first source
+// that contributes at least one entry wins outright, and the next
+// source is not consulted. Order: CLI --watch entries, then the
+// configured `watches` sequence, then the current working directory
+// as the fallback when both are empty. It is a pure coordinator —
+// no configuration file input/output happens here; main() loads the
 // configuration once and threads cfg.Watches through this function
 // alongside the CLI entries so prompt and watches share one config
 // snapshot.
 func resolveWatchList(cliWatches, cfgWatches []string) ([]string, []Warning, error) {
-	patterns := append([]string{}, cliWatches...)
-	patterns = append(patterns, cfgWatches...)
+	patterns := cliWatches
+	if len(patterns) == 0 {
+		patterns = cfgWatches
+	}
 	if len(patterns) == 0 {
 		cwd, err := os.Getwd()
 		if err != nil {
