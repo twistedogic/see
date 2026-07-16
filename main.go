@@ -522,22 +522,18 @@ func main() {
 }
 
 // resolveWatchList assembles the watch list from --watch entries,
-// the optional config file, and the cwd fallback. It is a tiny
-// coordinator over loadWatchConfig + resolveTargets so main() reads
-// as one pipeline: gather, classify, return.
+// the optional config file's `watches` field, and the cwd fallback.
+// It is a thin coordinator over loadStartupConfig + resolveTargets
+// so main() reads as one pipeline: gather, classify, return.
 func resolveWatchList(watchEntries []string, ignoreConfig bool) ([]string, []Warning, error) {
 	var patterns []string
 	patterns = append(patterns, watchEntries...)
 	if !ignoreConfig {
-		configPath, err := watchConfigPath()
+		cfg, err := loadStartupConfig(false)
 		if err != nil {
 			return nil, nil, err
 		}
-		configEntries, err := loadWatchConfig(configPath)
-		if err != nil {
-			return nil, nil, err
-		}
-		patterns = append(patterns, configEntries...)
+		patterns = append(patterns, cfg.Watches...)
 	}
 	if len(patterns) == 0 {
 		cwd, err := os.Getwd()

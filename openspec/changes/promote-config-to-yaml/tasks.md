@@ -8,11 +8,11 @@
 
 ## 2. Promote the configuration loader
 
-- [ ] 2.1 Replace `watchConfigPath` with a path resolver for `os.UserConfigDir()/see/config.yaml`, retaining the injectable `userConfigDir` lookup used by tests.
-- [ ] 2.2 Replace `loadWatchConfig` with a `Config` struct and strict `loadConfig(path) (Config, error)` decoder for `watches` and `prompt`; accept missing or empty files and reject malformed input, extra documents, unknown fields, and wrong field types with path-aware errors.
-- [ ] 2.3 Add the small ignore-aware startup loader that returns a zero-value `Config` without resolving or reading the file when `--ignore-config` is set.
-- [ ] 2.4 Remove the legacy line scanner and all production references to the old `watches` path.
-- [ ] 2.5 Run the focused configuration tests and confirm they pass.
+- [x] 2.1 Replace `watchConfigPath` with a path resolver for `os.UserConfigDir()/see/config.yaml`, retaining the injectable `userConfigDir` lookup used by tests.
+- [x] 2.2 Replace `loadWatchConfig` with a `Config` struct and strict `loadConfig(path) (Config, error)` decoder for `watches` and `prompt`; accept missing or empty files and reject malformed input, extra documents, unknown fields, and wrong field types with path-aware errors.
+- [x] 2.3 Add the small ignore-aware startup loader that returns a zero-value `Config` without resolving or reading the file when `--ignore-config` is set.
+- [x] 2.4 Remove the legacy line scanner and all production references to the old `watches` path.
+- [x] 2.5 Run the focused configuration tests and confirm they pass.
 
 ## 3. Wire watches and prompt precedence
 
