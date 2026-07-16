@@ -58,19 +58,19 @@ The legacy `filepath.Join(os.UserConfigDir(), "see", "watches")` file SHALL NOT 
 
 The flag entries and configured entries SHALL be unioned, not replaced: an operator may pass `--watch` to add one repository to whatever the configuration already lists.
 
-#### Scenario: No flag and no configured watches falls back to current working directory
+#### Scenario: No flag, no config falls back to cwd
 
 - **WHEN** `see` is invoked with no `--watch`, `config.yaml` is absent or has no watch entries, and the working directory contains two git repositories as immediate subdirectories
 - **THEN** the resolved watch list contains both repositories
 - **AND** neither the batch-level JavaScript Object Notation Lines (JSONL) stream nor the Terminal User Interface (TUI) reflects any new source
 
-#### Scenario: Flag adds to configured watches
+#### Scenario: Flag adds to config
 
 - **WHEN** `see --watch /extra/repo` is invoked with `config.yaml` containing `watches: ["~/work/*"]`
 - **THEN** the resolved watch list contains every match of `~/work/*` plus `/extra/repo`
 - **AND** duplicates between the two sources collapse to a single entry
 
-#### Scenario: --ignore-config skips configured watches
+#### Scenario: --ignore-config skips the config layer
 
 - **WHEN** `see --ignore-config --watch ~/only/repo` is invoked with `config.yaml` listing `~/other/repo`
 - **THEN** the resolved watch list contains only `~/only/repo`
@@ -82,7 +82,7 @@ The flag entries and configured entries SHALL be unioned, not replaced: an opera
 - **THEN** resolution proceeds with command-line entries and the current-working-directory fallback as if the file were empty
 - **AND** no error is returned
 
-#### Scenario: Invalid config is fatal at startup
+#### Scenario: Malformed config line is fatal at startup
 
 - **WHEN** `config.yaml` cannot be read or parsed according to the global configuration schema
 - **THEN** `see` prints one actionable error identifying the configuration file and exits with status `2`
