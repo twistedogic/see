@@ -448,7 +448,7 @@ func main() {
 		retry        = flag.Int("retry", 3, "retries per repo on failure")
 		modeFlag     = flag.String("mode", "tui", "output mode (default \"tui\"); one of: tui, log")
 		once         = flag.Bool("once", false, "run one scan and exit")
-		ignoreConfig = flag.Bool("ignore-config", false, "skip the global config.yaml file (watches and prompt fall back to CLI or defaults)")
+		configFlag = flag.String("config", "", "path to config.yaml (default: $XDG_CONFIG_HOME/see/config.yaml); pass \"-\" to skip")
 		promptFlag   = flag.String("prompt", "", "override the agent prompt template; {change} is replaced with the active change name")
 		interval     = flag.Duration("interval", DefaultPollInterval, "delay between completed scans in continuous mode; 0 disables the delay, negative values are rejected")
 		watchFlag    multiFlag
@@ -494,9 +494,9 @@ func main() {
 	}
 
 	// Load configuration once so prompt and watch resolution see the
-	// same snapshot. --ignore-config bypasses both the file read and
-	// the configured-prompt path; the embedded default still applies.
-	cfg, err := loadStartupConfig(*ignoreConfig)
+	// same snapshot. --config=- bypasses both the file read and the
+	// configured-prompt path; the embedded default still applies.
+	cfg, err := loadStartupConfig(*configFlag)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "see:", err)
 		os.Exit(2)

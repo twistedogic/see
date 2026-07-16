@@ -100,19 +100,39 @@ func loadConfig(path string) (Config, error) {
 	return cfg, nil
 }
 
-// loadStartupConfig applies --ignore-config at the loader boundary
-// and delegates to loadConfig for the normal path. When ignored, the
-// configured file is not resolved or read, so a malformed file does
-// not block startup.
-func loadStartupConfig(ignoreConfig bool) (Config, error) {
-	if ignoreConfig {
+// configPathNone is the sentinel value for --config that means "do
+// not load any configuration file". The POSIX "-" convention (tar x
+// -, git log -) keeps it familiar. ponytail: this collides with a
+// literal file named "-"; upgrade path is a separate boolean or an
+// env var if it ever bites.
+const configPathNone = "-"
+
+// loadStartupConfig applies --config at the loader boundary. Three
+// modes:
+//
+//   "-"              → zero-value Config; the file is not resolved or read.
+//   "" (no flag)     → load the default configPath().
+//   "/path/to/foo"   → tilde-expand and load that file.
+//
+// A malformed default returns a zero-value Config (so startup
+// proceeds with command-line inputs); a malformed explicit path
+// returns the loadConfig error so the operator can see what is wrong.
+func loadStartupConfig(configFlag string) (Config, error) {
+	if configFlag == configPathNone {
 		return Config{}, nil
 	}
-	path, err := configPath()
+	if configFlag == "" {
+		path, err := configPath()
+		if err != nil {
+			return Config{}, err
+		}
+		return loadConfig(path)
+	}
+	expanded, err := expandTilde(configFlag)
 	if err != nil {
 		return Config{}, err
 	}
-	return loadConfig(path)
+	return loadConfig(expanded)
 }
 
 // selectPromptTemplate picks the effective prompt: a nonblank

@@ -170,32 +170,102 @@ func TestLoadConfigIgnoresLegacyWatchesFile(t *testing.T) {
 	}
 }
 
-// --- loadStartupConfig / --ignore-config: task 1.3 ------------------------
+// --- loadStartupConfig / --config: task 3.x -------------------------------
 
-// TestLoadStartupConfigIgnoreConfigSkipsMalformedFile proves the
-// ignore-aware startup loader does not read the file at all when
-// --ignore-config is set, even when the file is malformed enough to
-// fail normal loading.
-func TestLoadStartupConfigIgnoreConfigSkipsMalformedFile(t *testing.T) {
+// TestLoadStartupConfigUnsetLoadsDefaultPath proves that an empty
+// configFlag (the common case: no --config passed) loads the file at
+// the resolved default config path.
+func TestLoadStartupConfigUnsetLoadsDefaultPath(t *testing.T) {
 	base := t.TempDir()
-	seeDir := filepath.Join(base, "see")
-	if err := os.MkdirAll(seeDir, 0o755); err != nil {
-		t.Fatal(err)
+	writeConfigYAML(t, base, "watches:\n  - /repos/default\nprompt: from default\n")
+	orig := userConfigDir
+	t.Cleanup(func() { userConfigDir = orig })
+	userConfigDir = func() (string, error) { return base, nil }
+
+	cfg, err := loadStartupConfig("")
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
 	}
-	bad := filepath.Join(seeDir, "config.yaml")
-	if err := os.WriteFile(bad, []byte("not: [valid"), 0o644); err != nil {
+	if !reflect.DeepEqual(cfg.Watches, []string{"/repos/default"}) {
+		t.Fatalf("Watches = %v, want [/repos/default]", cfg.Watches)
+	}
+	if cfg.Prompt != "from default" {
+		t.Fatalf("Prompt = %q, want %q", cfg.Prompt, "from default")
+	}
+}
+
+// TestLoadStartupConfigExplicitPath proves that a non-empty
+// configFlag bypasses the default path and loads the named file
+// instead. A malformed default config.yaml is the witness: if the
+// loader tried the default, it would error.
+func TestLoadStartupConfigExplicitPath(t *testing.T) {
+	base := t.TempDir()
+	// Malformed default — would fail loadConfig if consulted.
+	writeConfigYAML(t, base, "not: [valid\n")
+	// Valid explicit file at a separate path.
+	explicit := filepath.Join(t.TempDir(), "explicit.yaml")
+	if err := os.WriteFile(explicit, []byte("watches:\n  - /repos/explicit\nprompt: from explicit\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	orig := userConfigDir
 	t.Cleanup(func() { userConfigDir = orig })
 	userConfigDir = func() (string, error) { return base, nil }
 
-	cfg, err := loadStartupConfig(true)
+	cfg, err := loadStartupConfig(explicit)
 	if err != nil {
-		t.Fatalf("err = %v, want nil (ignore-config must not read the file)", err)
+		t.Fatalf("err = %v, want nil (default path must be bypassed)", err)
+	}
+	if !reflect.DeepEqual(cfg.Watches, []string{"/repos/explicit"}) {
+		t.Fatalf("Watches = %v, want [/repos/explicit]", cfg.Watches)
+	}
+	if cfg.Prompt != "from explicit" {
+		t.Fatalf("Prompt = %q, want %q", cfg.Prompt, "from explicit")
+	}
+}
+
+// TestLoadStartupConfigSkipSentinel proves that the "-" sentinel
+// returns a zero-value Config without resolving or reading the
+// default file — even when the default file is malformed.
+func TestLoadStartupConfigSkipSentinel(t *testing.T) {
+	base := t.TempDir()
+	writeConfigYAML(t, base, "not: [valid\n")
+	orig := userConfigDir
+	t.Cleanup(func() { userConfigDir = orig })
+	userConfigDir = func() (string, error) { return base, nil }
+
+	cfg, err := loadStartupConfig("-")
+	if err != nil {
+		t.Fatalf("err = %v, want nil (sentinel must not read the file)", err)
 	}
 	if cfg.Watches != nil || cfg.Prompt != "" {
 		t.Fatalf("cfg = %+v, want zero-value Config", cfg)
+	}
+}
+
+// TestLoadStartupConfigTildeExpansion proves that a leading "~/" in
+// the configFlag value is expanded against $HOME, consistent with
+// --watch.
+func TestLoadStartupConfigTildeExpansion(t *testing.T) {
+	home := t.TempDir()
+	explicit := filepath.Join(home, "see.yaml")
+	if err := os.WriteFile(explicit, []byte("watches:\n  - /repos/tilde\nprompt: from tilde\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+	if err := os.Setenv("HOME", home); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadStartupConfig("~/see.yaml")
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if !reflect.DeepEqual(cfg.Watches, []string{"/repos/tilde"}) {
+		t.Fatalf("Watches = %v, want [/repos/tilde]", cfg.Watches)
+	}
+	if cfg.Prompt != "from tilde" {
+		t.Fatalf("Prompt = %q, want %q", cfg.Prompt, "from tilde")
 	}
 }
 

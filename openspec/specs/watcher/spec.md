@@ -313,8 +313,9 @@ return the error from the final attempt. The loop SHALL emit a
 sources, applied in this precedence order:
 
 1. The repeatable `--watch <pattern>` flag, if any flag is present.
-2. The `watches` sequence in `os.UserConfigDir()/see/config.yaml`,
-   unless `--ignore-config` is set.
+2. The `watches` sequence in the configuration file selected by
+   `--config <path>` (default: `os.UserConfigDir()/see/config.yaml`),
+   unless `--config=-` is set.
 3. The current working directory as a fallback when steps 1 and 2
    produce no entries.
 
@@ -323,10 +324,11 @@ only source consulted for the watch list: flag entries replace
 configured entries entirely rather than union with them, mirroring
 the precedence rule already used for the prompt template
 (`--prompt` > configured `prompt` > embedded default). This gives
-every layered configuration knob one consistent rule. `--ignore-config`
-remains the escape hatch for the case the precedence rule does not
+every layered configuration knob one consistent rule. `--config=-`
+is the escape hatch for the case the precedence rule does not
 cover: when the configuration file is malformed and must not be
-read at startup.
+read at startup. An explicit `--config=<path>` selects a non-default
+configuration file.
 
 #### Scenario: No flag, no config falls back to cwd
 
@@ -345,12 +347,20 @@ read at startup.
 - **THEN** the resolved watch list contains only `/extra/repo`
 - **AND** the configured `~/work/*` entries are not consulted
 
-#### Scenario: --ignore-config skips the config layer
+#### Scenario: --config=- skips the config layer
 
-- **WHEN** `see --ignore-config --watch ~/only/repo` is invoked
-  with `config.yaml` listing `~/other/repo`
+- **WHEN** `see --config=- --watch ~/only/repo` is invoked with the
+  default `config.yaml` listing `~/other/repo`
 - **THEN** the resolved watch list contains only `~/only/repo`
 - **AND** the configuration file is not consulted
+
+#### Scenario: --config=<path> loads the named file
+
+- **WHEN** `see --config=~/team/see.yaml` is invoked with the
+  default `config.yaml` listing `~/work/*` and `~/team/see.yaml`
+  listing `~/only/repo`
+- **THEN** the resolved watch list contains only `~/only/repo`
+- **AND** the default `config.yaml` is not consulted
 
 #### Scenario: Missing config file is not an error
 
@@ -361,8 +371,8 @@ read at startup.
 
 #### Scenario: Malformed config line is fatal at startup
 
-- **WHEN** `config.yaml` cannot be read or parsed according to the
-  global configuration schema
+- **WHEN** the configuration file selected by `--config` cannot be
+  read or parsed according to the global configuration schema
 - **THEN** `see` prints one actionable error identifying the
   configuration file and exits with status `2`
 - **AND** the watcher does not start
@@ -531,7 +541,10 @@ SHALL move to the new discovery layer in `main`.
 `see` SHALL select the process-wide agent prompt template in this order:
 
 1. A `--prompt` value containing at least one non-whitespace character.
-2. A `prompt` value from `config.yaml` containing at least one non-whitespace character, unless `--ignore-config` is set.
+2. A `prompt` value from the configuration file selected by
+   `--config <path>` (default: `os.UserConfigDir()/see/config.yaml`)
+   containing at least one non-whitespace character, unless
+   `--config=-` is set.
 3. The default template embedded into the binary from the in-tree file `prompt.md` at the repository root.
 
 `Watcher.work` SHALL derive the prompt passed to `Agent.Run` by substituting the literal token `{change}` in the selected template string with the active change name. `Watcher.PromptTemplate` SHALL hold the selected command-line or configured template; if it is empty or contains only whitespace, the watcher SHALL use the embedded default.
@@ -552,9 +565,9 @@ The renderer SHALL replace every occurrence of `{change}` in the template with t
 - **THEN** the selected template is `"Configured {change}"`
 - **AND** `Agent.Run` receives `"Configured add-foo"` for change `add-foo`
 
-#### Scenario: Ignored configuration cannot supply prompt
+#### Scenario: --config=- cannot supply prompt
 
-- **WHEN** `config.yaml` contains `prompt: "Configured {change}"` and `see` is invoked with `--ignore-config` and no nonblank `--prompt`
+- **WHEN** `config.yaml` contains `prompt: "Configured {change}"` and `see` is invoked with `--config=-` and no nonblank `--prompt`
 - **THEN** the embedded `prompt.md` template is selected
 
 #### Scenario: Empty PromptTemplate uses the embedded default

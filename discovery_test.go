@@ -216,7 +216,7 @@ func TestDedupeAndSortEmptyInputReturnsNil(t *testing.T) {
 // slices in promote-config-to-yaml: it takes CLI and configured
 // watches, unions them, preserves the cwd fallback, and never
 // touches the filesystem to load configuration. The
-// --ignore-config decision lives in main() so the coordinator stays
+// --config=- decision lives in main() so the coordinator stays
 // trivially testable.
 
 // TestResolveWatchListCLIReplacesConfig proves CLI watches win

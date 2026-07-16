@@ -116,15 +116,21 @@ The effective prompt template is selected in this order:
 2. Nonblank `config.yaml` `prompt` value (a user-default).
 3. Embedded `prompt.md` default (the build-time fallback).
 
-"Blank" means whitespace-only. `--ignore-config` skips the global file
+"Blank" means whitespace-only. `--config=-` skips the global file
 entirely: configured watches and the configured prompt both fall through
 to CLI values and the embedded default respectively.
 
-### Configuration loading and `--ignore-config`
+### Configuration loading and `--config`
 
-`main()` calls `loadStartupConfig(ignoreConfig)` once after parsing
-flags. The loader is ignore-aware: when `--ignore-config` is set it returns
-a zero-value `Config` without resolving or reading the file, so a malformed
-configuration never blocks startup when the operator has explicitly opted
-out. When not ignored, the loader applies known-field checking and rejects
-multi-document input.
+`main()` calls `loadStartupConfig(configFlag)` once after parsing flags.
+The flag accepts three values:
+
+- **Unset or empty**: load the default `os.UserConfigDir()/see/config.yaml`.
+- **An explicit path**: tilde-expand and load that file (for example, a
+  project-local or shared dotfiles configuration).
+- **`-`**: skip the configuration entirely — return a zero-value `Config`
+  without resolving or reading the file, so a malformed configuration
+  never blocks startup when the operator has explicitly opted out.
+
+The loader applies known-field checking and rejects multi-document input
+for any file it does read.
