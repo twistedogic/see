@@ -1,10 +1,10 @@
 ## 1. Add the YAML dependency and failing configuration tests
 
 - [x] 1.1 Add `go.yaml.in/yaml/v3` as the single direct YAML Ain't Markup Language (YAML) parser dependency.
-- [ ] 1.2 Replace the legacy plain-text configuration fixtures in `discovery_test.go` with tests for a valid `config.yaml`, multiline prompt preservation, missing and empty files, unknown fields, wrong field types, malformed input, multiple documents, and the ignored legacy `watches` file.
-- [ ] 1.3 Add a test proving `--ignore-config` returns an empty configuration without reading a malformed `config.yaml`.
-- [ ] 1.4 Add tests for prompt precedence: nonblank command-line prompt over configured prompt, blank command-line prompt falling through to configured prompt, and both blank falling through to the embedded default.
-- [ ] 1.5 Run the focused tests before production edits and confirm they fail for the missing YAML loader and prompt-selection behavior.
+- [x] 1.2 Replace the legacy plain-text configuration fixtures in `discovery_test.go` with tests for a valid `config.yaml`, multiline prompt preservation, missing and empty files, unknown fields, wrong field types, malformed input, multiple documents, and the ignored legacy `watches` file.
+- [x] 1.3 Add a test proving `--ignore-config` returns an empty configuration without reading a malformed `config.yaml`.
+- [x] 1.4 Add tests for prompt precedence: nonblank command-line prompt over configured prompt, blank command-line prompt falling through to configured prompt, and both blank falling through to the embedded default.
+- [x] 1.5 Run the focused tests before production edits and confirm they fail for the missing YAML loader and prompt-selection behavior.
 
 ## 2. Promote the configuration loader
 
