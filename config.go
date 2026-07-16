@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	_ "embed"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,27 @@ import (
 
 	"go.yaml.in/yaml/v3"
 )
+
+// defaultConfigTemplate is the commented YAML file `see` writes to
+// the default configuration path on first run when the path is
+// absent and `--config` is unset. It is kept as a checked-in file
+// at the repository root next to `prompt.md` and `main.go` so
+// editors reviewing the file see prose in pull requests and the
+// template is editable without touching Go. `//go:embed` fails the
+// build if `config.example.yaml` is missing at the repository root
+// alongside `config.go`, so a deleted template becomes a compile
+// error rather than a silent regression. The body is pure comments
+// so the strict loader decodes it to a zero-value Config — bootstrap
+// has zero behavioral effect, only a discoverable file on disk.
+//
+//go:embed config.example.yaml
+var defaultConfigTemplate string
+
+// stderrWriter is the destination for one-line startup notices
+// emitted when the bootstrap write fails. Indirected through a var
+// so tests can capture the output without touching the real
+// os.Stderr (which is shared with other goroutines and processes).
+var stderrWriter io.Writer = os.Stderr
 
 // userConfigDir is the lookup used by configPath. Indirected through
 // a var so tests can pin the config dir without juggling environment
@@ -107,12 +129,31 @@ func loadConfig(path string) (Config, error) {
 // env var if it ever bites.
 const configPathNone = "-"
 
+// ensureDefaultConfig materialises a default configuration file at
+// path on first run. The parent directory is created with mode
+// 0o755 if absent, and the file is written with mode 0o644 using
+// the embedded defaultConfigTemplate body. Callers gate on the
+// absent-file case before invoking this function so a no-op write
+// never fires against an existing configuration. A write failure
+// (permission denied, read-only filesystem, parent unwritable)
+// returns the underlying error so the caller can decide whether
+// startup should continue with a zero-value Config.
+func ensureDefaultConfig(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(defaultConfigTemplate), 0o644)
+}
+
 // loadStartupConfig applies --config at the loader boundary. Three
 // modes:
 //
-//   "-"              → zero-value Config; the file is not resolved or read.
-//   "" (no flag)     → load the default configPath().
-//   "/path/to/foo"   → tilde-expand and load that file.
+//	"-"              → zero-value Config; the file is not resolved or read.
+//	"" (no flag)     → load the default configPath(); if the file is
+//	                   absent, bootstrap it with the embedded template
+//	                   (best-effort; bootstrap failure is non-fatal).
+//	"/path/to/foo"   → tilde-expand and load that file; the default
+//	                   path is never written.
 //
 // A malformed default returns a zero-value Config (so startup
 // proceeds with command-line inputs); a malformed explicit path
@@ -125,6 +166,19 @@ func loadStartupConfig(configFlag string) (Config, error) {
 		path, err := configPath()
 		if err != nil {
 			return Config{}, err
+		}
+		// Bootstrap is best-effort: an unwritable home directory
+		// must not block startup. Fall through to loadConfig with
+		// a zero-value Config when the write fails so the
+		// command-line entries and the cwd fallback still produce
+		// a working watch list. The notice to stderr names the
+		// target path and the underlying error.
+		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+			if err := ensureDefaultConfig(path); err != nil {
+				fmt.Fprintf(stderrWriter,
+					"see: bootstrap default config at %s: %v\n",
+					path, err)
+			}
 		}
 		return loadConfig(path)
 	}

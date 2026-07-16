@@ -134,3 +134,25 @@ The flag accepts three values:
 
 The loader applies known-field checking and rejects multi-document input
 for any file it does read.
+
+### First-run bootstrap of the default config file
+
+When the loader runs against the default path (`--config` unset or
+empty) and the path does not exist, `ensureDefaultConfig` writes the
+embedded `config.example.yaml` template to it before `loadConfig`
+reads. The parent directory `os.UserConfigDir()/see/` is created with
+mode `0o755` if absent; the file is created with mode `0o644`. The
+template contains only YAML comments and a header, so `loadConfig`
+decodes it to a zero-value configuration — bootstrap has zero
+behavioral effect, only a discoverable file on disk.
+
+Bootstrap fires only on the default-path branch. `--config=-` and
+`--config=<path>` never write. An existing configuration file is
+never overwritten, regardless of its contents (empty,
+comments-only, valid, or malformed). A bootstrap write failure
+(permission denied, read-only filesystem, parent unwritable) is
+non-fatal: `loadStartupConfig` writes one line to standard error
+(stderr) naming the target path and the underlying error, then
+returns a zero-value `Config` so the command-line entries and the
+current-working-directory fallback still produce a working watch
+list. The watcher starts regardless of bootstrap outcome.

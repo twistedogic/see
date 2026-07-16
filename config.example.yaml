@@ -1,0 +1,13 @@
+# Default configuration for `see`.
+#
+# Both fields are optional. Remove the leading `#` to enable a field.
+# This file is materialised by `see` on first run when no
+# configuration exists at the default path; until you uncomment and
+# edit a field, every value below is treated as "not set" and `see`
+# falls back to the command-line inputs and the embedded defaults.
+
+# watches:
+#   - "~/Dev/*"
+
+# prompt: |-
+#   Apply the OpenSpec change "{change}".

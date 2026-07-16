@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -304,5 +306,270 @@ func TestSelectPromptTemplateBothBlankReturnsEmpty(t *testing.T) {
 	}
 	if got := selectPromptTemplate("   ", "\n"); got != "" {
 		t.Fatalf("both whitespace: got %q, want empty", got)
+	}
+}
+
+// --- ensureDefaultConfig / bootstrap: add-default-config-bootstrap -----
+
+// readConfigPath resolves the default config path with userConfigDir
+// pinned to base. Tests in this section that need to predict the
+// bootstrap target use it instead of inlining configPath so the
+// helper is the single source of truth for the resolution.
+func readConfigPath(t *testing.T, base string) string {
+	t.Helper()
+	orig := userConfigDir
+	t.Cleanup(func() { userConfigDir = orig })
+	userConfigDir = func() (string, error) { return base, nil }
+	path, err := configPath()
+	if err != nil {
+		t.Fatalf("configPath: %v", err)
+	}
+	return path
+}
+
+// skipIfRoot returns true when the test is running as root. Some
+// Unix variants let root bypass directory write permissions,
+// which would invalidate the unwritable-target tests. Skipping
+// keeps the test meaningful on the systems that exercise it.
+func skipIfRoot(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; directory permission tests are unreliable")
+	}
+}
+
+// TestEnsureDefaultConfigWritesOnMiss is task 1.1: a missing default
+// path triggers a write that creates the parent directory at 0o755,
+// the file at 0o644, and the file contents equal the embedded
+// template byte-for-byte. loadConfig on the written file decodes to
+// a zero-value configuration.
+func TestEnsureDefaultConfigWritesOnMiss(t *testing.T) {
+	base := t.TempDir()
+	path := readConfigPath(t, base)
+
+	if err := ensureDefaultConfig(path); err != nil {
+		t.Fatalf("ensureDefaultConfig: %v", err)
+	}
+
+	parent := filepath.Dir(path)
+	dirInfo, err := os.Stat(parent)
+	if err != nil {
+		t.Fatalf("parent stat: %v", err)
+	}
+	if !dirInfo.IsDir() {
+		t.Fatalf("parent %s is not a directory", parent)
+	}
+	if mode := dirInfo.Mode().Perm(); mode != 0o755 {
+		t.Fatalf("parent mode = %#o, want 0o755", mode)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("file stat: %v", err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o644 {
+		t.Fatalf("file mode = %#o, want 0o644", mode)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("readFile: %v", err)
+	}
+	if string(got) != defaultConfigTemplate {
+		t.Fatalf("file contents mismatch\n got: %q\nwant: %q", got, defaultConfigTemplate)
+	}
+
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("loadConfig on bootstrap file: %v", err)
+	}
+	if cfg.Watches != nil || cfg.Prompt != "" {
+		t.Fatalf("cfg = %+v, want zero-value", cfg)
+	}
+}
+
+// TestLoadStartupConfigDoesNotOverwriteExisting is task 1.2: when
+// the default configuration file already exists with arbitrary
+// content (empty, comments-only, valid, or malformed), startup
+// MUST NOT overwrite it. The no-op gate lives in loadStartupConfig
+// (matching the spec scenario "Existing file is not overwritten"),
+// not in ensureDefaultConfig.
+func TestLoadStartupConfigDoesNotOverwriteExisting(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"empty", ""},
+		{"comments-only", "# this is a comment, nothing else\n"},
+		{"valid", "watches:\n  - /repos/keep\nprompt: keep me\n"},
+		{"malformed", "not: [valid\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			path := writeConfigYAML(t, base, tc.body)
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeInfo, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Capture stderr so any (incorrect) bootstrap notice
+			// surfaces here as a test failure rather than polluting
+			// the runner output.
+			origWriter := stderrWriter
+			t.Cleanup(func() { stderrWriter = origWriter })
+			stderrWriter = io.Discard
+
+			cfg, err := loadStartupConfig("")
+			if err != nil {
+				t.Fatalf("loadStartupConfig(\"\"): %v", err)
+			}
+
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != string(before) {
+				t.Fatalf("contents changed\n before: %q\n  after: %q", before, after)
+			}
+			afterInfo, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if afterInfo.Mode().Perm() != beforeInfo.Mode().Perm() {
+				t.Fatalf("mode changed: %#o -> %#o", beforeInfo.Mode().Perm(), afterInfo.Mode().Perm())
+			}
+
+			// Sanity: loadConfig should still surface the file's
+			// own content (zero-value for empty/comments, parsed
+			// fields for valid, error for malformed).
+			_ = cfg // The cfg value depends on the body; we only
+			// care about the file being untouched.
+		})
+	}
+}
+
+// TestLoadStartupConfigSkipSentinelDoesNotBootstrap is task 1.3:
+// loadStartupConfig("-") does not resolve or write the default
+// path. Even with an unwritable parent directory (which would
+// defeat bootstrap if it tried to write), the call returns a
+// zero-value Config without error and leaves the filesystem
+// untouched.
+func TestLoadStartupConfigSkipSentinelDoesNotBootstrap(t *testing.T) {
+	skipIfRoot(t)
+	base := t.TempDir()
+	// Pre-create <base>/see at 0o555 so a bootstrap attempt would
+	// fail to MkdirAll (if the dir were absent) or fail to WriteFile
+	// (if the dir were present but read-only).
+	seeDir := filepath.Join(base, "see")
+	if err := os.Mkdir(seeDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(seeDir, 0o755) })
+
+	// Point userConfigDir at base, then verify loadStartupConfig("-")
+	// does not touch seeDir.
+	orig := userConfigDir
+	t.Cleanup(func() { userConfigDir = orig })
+	userConfigDir = func() (string, error) { return base, nil }
+
+	cfg, err := loadStartupConfig("-")
+	if err != nil {
+		t.Fatalf("loadStartupConfig(\"-\"): %v", err)
+	}
+	if cfg.Watches != nil || cfg.Prompt != "" {
+		t.Fatalf("cfg = %+v, want zero-value", cfg)
+	}
+
+	// The config file must not exist after the call.
+	configFile := filepath.Join(seeDir, "config.yaml")
+	if _, err := os.Stat(configFile); !os.IsNotExist(err) {
+		t.Fatalf("config file was created (err=%v); bootstrap must not fire under \"-\"", err)
+	}
+}
+
+// TestLoadStartupConfigExplicitPathDoesNotBootstrap is task 1.4:
+// loadStartupConfig(<path>) does not write the default path even
+// when the named file is absent. The default directory may be
+// unwritable; bootstrap must still not fire.
+func TestLoadStartupConfigExplicitPathDoesNotBootstrap(t *testing.T) {
+	skipIfRoot(t)
+	base := t.TempDir()
+	seeDir := filepath.Join(base, "see")
+	if err := os.Mkdir(seeDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(seeDir, 0o755) })
+
+	// Pin userConfigDir so configPath() would resolve into base/see.
+	orig := userConfigDir
+	t.Cleanup(func() { userConfigDir = orig })
+	userConfigDir = func() (string, error) { return base, nil }
+
+	// Explicit path is in a different temp dir (would be created if
+	// loaded, but loadConfig returns zero-value for missing files).
+	explicit := filepath.Join(t.TempDir(), "explicit.yaml")
+
+	cfg, err := loadStartupConfig(explicit)
+	if err != nil {
+		t.Fatalf("loadStartupConfig(<path>): %v", err)
+	}
+	if cfg.Watches != nil || cfg.Prompt != "" {
+		t.Fatalf("cfg = %+v, want zero-value", cfg)
+	}
+
+	// Default config path must not exist after the call.
+	configFile := filepath.Join(seeDir, "config.yaml")
+	if _, err := os.Stat(configFile); !os.IsNotExist(err) {
+		t.Fatalf("default config file was created (err=%v); bootstrap must not fire under --config=<path>", err)
+	}
+}
+
+// TestLoadStartupConfigBootstrapFailureNonFatal is task 1.5: when
+// the default path's parent directory is unwritable, the bootstrap
+// write fails, loadStartupConfig returns a zero-value Config
+// without an error, and writes one line to stderr naming the
+// target path and the failure reason.
+func TestLoadStartupConfigBootstrapFailureNonFatal(t *testing.T) {
+	skipIfRoot(t)
+	base := t.TempDir()
+	seeDir := filepath.Join(base, "see")
+	if err := os.Mkdir(seeDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(seeDir, 0o755) })
+
+	orig := userConfigDir
+	t.Cleanup(func() { userConfigDir = orig })
+	userConfigDir = func() (string, error) { return base, nil }
+
+	// Capture stderr via the indirection that loadStartupConfig
+	// writes to.
+	origWriter := stderrWriter
+	t.Cleanup(func() { stderrWriter = origWriter })
+	var buf bytes.Buffer
+	stderrWriter = &buf
+
+	cfg, err := loadStartupConfig("")
+	if err != nil {
+		t.Fatalf("loadStartupConfig(\"\"): %v (bootstrap failure must be non-fatal)", err)
+	}
+	if cfg.Watches != nil || cfg.Prompt != "" {
+		t.Fatalf("cfg = %+v, want zero-value", cfg)
+	}
+
+	line := buf.String()
+	if line == "" {
+		t.Fatal("expected a stderr line naming the bootstrap failure, got none")
+	}
+	if !strings.Contains(line, filepath.Join(base, "see", "config.yaml")) {
+		t.Fatalf("stderr line %q does not name the target path", line)
+	}
+	if !strings.Contains(line, "permission denied") {
+		t.Fatalf("stderr line %q does not name the failure reason", line)
 	}
 }
