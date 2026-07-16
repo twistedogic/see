@@ -94,8 +94,6 @@ func (p PiAgent) Run(ctx context.Context, path, change, prompt string) (string, 
 	return logPath, cmd.Run()
 }
 
-
-
 func ListActiveOpenSpecChanges(cwd string) []string {
 	entries, err := os.ReadDir(filepath.Join(cwd, "openspec", "changes"))
 	if err != nil {
@@ -450,7 +448,7 @@ func main() {
 		retry        = flag.Int("retry", 3, "retries per repo on failure")
 		modeFlag     = flag.String("mode", "tui", "output mode (default \"tui\"); one of: tui, log")
 		once         = flag.Bool("once", false, "run one scan and exit")
-		ignoreConfig = flag.Bool("ignore-config", false, "skip the $XDG_CONFIG_HOME/see/watches config file")
+		ignoreConfig = flag.Bool("ignore-config", false, "skip the global config.yaml file (watches and prompt fall back to CLI or defaults)")
 		promptFlag   = flag.String("prompt", "", "override the agent prompt template; {change} is replaced with the active change name")
 		interval     = flag.Duration("interval", DefaultPollInterval, "delay between completed scans in continuous mode; 0 disables the delay, negative values are rejected")
 		watchFlag    multiFlag
@@ -482,7 +480,6 @@ func main() {
 	}
 	w := NewWatcher(*pi, logDir, *retry, *once)
 	w.PollInterval = *interval
-	w.SetPromptTemplate(*promptFlag)
 	defer events.Close()
 	w.observer = events
 	// ponytail: mirror JSONL to stdout only when stdout is not a TTY
@@ -496,7 +493,17 @@ func main() {
 		events.SetMirror(os.Stdout)
 	}
 
-	repos, warnings, err := resolveWatchList(watchFlag, *ignoreConfig)
+	// Load configuration once so prompt and watch resolution see the
+	// same snapshot. --ignore-config bypasses both the file read and
+	// the configured-prompt path; the embedded default still applies.
+	cfg, err := loadStartupConfig(*ignoreConfig)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "see:", err)
+		os.Exit(2)
+	}
+	w.SetPromptTemplate(selectPromptTemplate(*promptFlag, cfg.Prompt))
+
+	repos, warnings, err := resolveWatchList(watchFlag, cfg.Watches)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "see:", err)
 		os.Exit(2)
@@ -521,20 +528,16 @@ func main() {
 	}
 }
 
-// resolveWatchList assembles the watch list from --watch entries,
-// the optional config file's `watches` field, and the cwd fallback.
-// It is a thin coordinator over loadStartupConfig + resolveTargets
-// so main() reads as one pipeline: gather, classify, return.
-func resolveWatchList(watchEntries []string, ignoreConfig bool) ([]string, []Warning, error) {
-	var patterns []string
-	patterns = append(patterns, watchEntries...)
-	if !ignoreConfig {
-		cfg, err := loadStartupConfig(false)
-		if err != nil {
-			return nil, nil, err
-		}
-		patterns = append(patterns, cfg.Watches...)
-	}
+// resolveWatchList assembles the watch list from command-line and
+// configured watch slices and falls back to the current working
+// directory when both are empty. It is a pure coordinator — no
+// configuration file input/output happens here; main() loads the
+// configuration once and threads cfg.Watches through this function
+// alongside the CLI entries so prompt and watches share one config
+// snapshot.
+func resolveWatchList(cliWatches, cfgWatches []string) ([]string, []Warning, error) {
+	patterns := append([]string{}, cliWatches...)
+	patterns = append(patterns, cfgWatches...)
 	if len(patterns) == 0 {
 		cwd, err := os.Getwd()
 		if err != nil {

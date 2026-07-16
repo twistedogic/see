@@ -52,3 +52,79 @@ Guidelines for AI agents and contributors working on this project.
 ## Maintenance of AGENTS.md
 
 - Keep AGENTS.md up to date on key design decisions and development workflows. When a decision is made or a workflow changes, update this file in the same change so it remains the source of truth for future contributors and agents.
+
+## Configuration
+
+`see` reads one global configuration file at `os.UserConfigDir()/see/config.yaml`
+(Linux/macOS: `$XDG_CONFIG_HOME/see/config.yaml` or `~/.config/see/config.yaml`;
+Windows: `%AppData%/see/config.yaml`). The file is YAML Ain't Markup Language
+(YAML), parsed strictly: unknown fields, wrong field types, malformed input, and
+multi-document input are rejected at startup with an actionable error. A missing
+or empty file is treated as "no configuration" and is not an error.
+
+### Schema
+
+```yaml
+watches:
+  - "~/Dev/*"
+  - "/var/repos"
+
+prompt: |-
+  Apply the OpenSpec change "{change}".
+```
+
+- `watches` is a sequence of strings. Each entry follows the same path,
+  tilde expansion, and shell-glob rules as `--watch` (`~`, `~/path`, `*`,
+  `?`, `[abc]`; `**` is rejected). Tilde is the only expansion performed;
+  environment variables are not expanded.
+- `prompt` is a string. Literal-block scalars (`|`, `|-`, `|+`) preserve
+  interior line breaks; use `|-` to strip the trailing newline. The single
+  token `{change}` is replaced with the active change name at runtime; no
+  other tokens are substituted.
+
+Both fields are optional. Omitting `watches` preserves the
+current-working-directory fallback. Omitting `prompt` falls through to the
+embedded `prompt.md` default.
+
+### Migration from the legacy plain-text `watches` file
+
+`see` no longer reads the old `os.UserConfigDir()/see/watches` plain-text
+file. To migrate, replace each non-comment line with an entry under
+`watches` in `config.yaml`:
+
+```text
+~/Dev/*
+/var/repos
+```
+
+becomes:
+
+```yaml
+watches:
+  - "~/Dev/*"
+  - "/var/repos"
+```
+
+Quote globs so YAML does not parse brackets or asterisks unexpectedly.
+Remove the old file after verifying startup.
+
+### Prompt precedence
+
+The effective prompt template is selected in this order:
+
+1. Nonblank `--prompt` value (a flag overrides everything).
+2. Nonblank `config.yaml` `prompt` value (a user-default).
+3. Embedded `prompt.md` default (the build-time fallback).
+
+"Blank" means whitespace-only. `--ignore-config` skips the global file
+entirely: configured watches and the configured prompt both fall through
+to CLI values and the embedded default respectively.
+
+### Configuration loading and `--ignore-config`
+
+`main()` calls `loadStartupConfig(ignoreConfig)` once after parsing
+flags. The loader is ignore-aware: when `--ignore-config` is set it returns
+a zero-value `Config` without resolving or reading the file, so a malformed
+configuration never blocks startup when the operator has explicitly opted
+out. When not ignored, the loader applies known-field checking and rejects
+multi-document input.

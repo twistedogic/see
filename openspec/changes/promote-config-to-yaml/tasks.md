@@ -16,12 +16,12 @@
 
 ## 3. Wire watches and prompt precedence
 
-- [ ] 3.1 Change `resolveWatchList` to accept command-line and configured watch slices, union them, and preserve the current-working-directory fallback without performing configuration file input/output.
-- [ ] 3.2 Add the minimal pure prompt selector that chooses a nonblank command-line prompt before the configured prompt, leaving embedded fallback normalization to `Watcher.SetPromptTemplate`.
-- [ ] 3.3 Update `main` to load configuration once, pass `Config.Watches` to watch resolution, and set the watcher prompt from the command-line/configuration selection.
-- [ ] 3.4 Update `--ignore-config` help text to describe skipping the whole global `config.yaml` file rather than only a watches file.
-- [ ] 3.5 Update `AGENTS.md` with the global YAML configuration path, schema, clean migration from `watches`, and prompt precedence so the changed workflow remains discoverable.
-- [ ] 3.6 Run the prompt, discovery, and watcher tests and confirm command-line overrides, configured defaults, ignored configuration, watch union, and embedded fallback are green.
+- [x] 3.1 Change `resolveWatchList` to accept command-line and configured watch slices, union them, and preserve the current-working-directory fallback without performing configuration file input/output.
+- [x] 3.2 Add the minimal pure prompt selector that chooses a nonblank command-line prompt before the configured prompt, leaving embedded fallback normalization to `Watcher.SetPromptTemplate`.
+- [x] 3.3 Update `main` to load configuration once, pass `Config.Watches` to watch resolution, and set the watcher prompt from the command-line/configuration selection.
+- [x] 3.4 Update `--ignore-config` help text to describe skipping the whole global `config.yaml` file rather than only a watches file.
+- [x] 3.5 Update `AGENTS.md` with the global YAML configuration path, schema, clean migration from `watches`, and prompt precedence so the changed workflow remains discoverable.
+- [x] 3.6 Run the prompt, discovery, and watcher tests and confirm command-line overrides, configured defaults, ignored configuration, watch union, and embedded fallback are green.
 
 ## 4. Validate and synchronize
 

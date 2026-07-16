@@ -209,3 +209,117 @@ func TestDedupeAndSortEmptyInputReturnsNil(t *testing.T) {
 		t.Fatalf("got %v, want nil", got)
 	}
 }
+
+// --- resolveWatchList (task 3.1) ----------------------------------------
+//
+// resolveWatchList became a pure coordinator over pre-loaded watch
+// slices in promote-config-to-yaml: it takes CLI and configured
+// watches, unions them, preserves the cwd fallback, and never
+// touches the filesystem to load configuration. The
+// --ignore-config decision lives in main() so the coordinator stays
+// trivially testable.
+
+// TestResolveWatchListUnionsCLIAndConfig proves CLI and configured
+// watches are combined into one sorted list (CLI entries first in
+// the raw input, dedupeAndSort sorts the union). A single repo on
+// each side keeps the assertion obvious.
+func TestResolveWatchListUnionsCLIAndConfig(t *testing.T) {
+	root := t.TempDir()
+	cliRepo := filepath.Join(root, "cli-repo")
+	cfgRepo := filepath.Join(root, "cfg-repo")
+	mkRepo(t, cliRepo)
+	mkRepo(t, cfgRepo)
+	got, warns, err := resolveWatchList([]string{cliRepo}, []string{cfgRepo})
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if len(warns) != 0 {
+		t.Fatalf("warnings = %v, want none", warns)
+	}
+	absCli, _ := filepath.Abs(cliRepo)
+	absCfg, _ := filepath.Abs(cfgRepo)
+	want := []string{absCfg, absCli} // sorted
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// TestResolveWatchListCLIOnly proves configured watches may be
+// empty without affecting CLI resolution.
+func TestResolveWatchListCLIOnly(t *testing.T) {
+	root := t.TempDir()
+	cliRepo := filepath.Join(root, "cli-repo")
+	mkRepo(t, cliRepo)
+	got, warns, err := resolveWatchList([]string{cliRepo}, nil)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if len(warns) != 0 {
+		t.Fatalf("warnings = %v, want none", warns)
+	}
+	absCli, _ := filepath.Abs(cliRepo)
+	if !reflect.DeepEqual(got, []string{absCli}) {
+		t.Fatalf("got %v, want [%q]", got, absCli)
+	}
+}
+
+// TestResolveWatchListConfigOnly proves CLI may be empty without
+// affecting configured resolution.
+func TestResolveWatchListConfigOnly(t *testing.T) {
+	root := t.TempDir()
+	cfgRepo := filepath.Join(root, "cfg-repo")
+	mkRepo(t, cfgRepo)
+	got, warns, err := resolveWatchList(nil, []string{cfgRepo})
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if len(warns) != 0 {
+		t.Fatalf("warnings = %v, want none", warns)
+	}
+	absCfg, _ := filepath.Abs(cfgRepo)
+	if !reflect.DeepEqual(got, []string{absCfg}) {
+		t.Fatalf("got %v, want [%q]", got, absCfg)
+	}
+}
+
+// TestResolveWatchListFallsBackToCWD covers the historical
+// behaviour: with both sides empty, the current working directory
+// is the single watch target. The function is not responsible for
+// config loading, so the cwd is whatever os.Getwd returns.
+func TestResolveWatchListFallsBackToCWD(t *testing.T) {
+	root := t.TempDir()
+	mkRepo(t, root)
+	t.Chdir(root)
+	got, warns, err := resolveWatchList(nil, nil)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if len(warns) != 0 {
+		t.Fatalf("warnings = %v, want none", warns)
+	}
+	abs, _ := filepath.Abs(root)
+	if !reflect.DeepEqual(got, []string{abs}) {
+		t.Fatalf("got %v, want [%q]", got, abs)
+	}
+}
+
+// TestResolveWatchListOverlappingSourcesDedupe proves duplicate
+// paths across CLI and configured slices collapse into one entry;
+// the coord passes both slices through resolveTargets which already
+// dedupes via dedupeAndSort.
+func TestResolveWatchListOverlappingSourcesDedupe(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "shared")
+	mkRepo(t, repo)
+	got, warns, err := resolveWatchList([]string{repo}, []string{repo})
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if len(warns) != 0 {
+		t.Fatalf("warnings = %v, want none", warns)
+	}
+	abs, _ := filepath.Abs(repo)
+	if len(got) != 1 || got[0] != abs {
+		t.Fatalf("got %v, want [%q]", got, abs)
+	}
+}
