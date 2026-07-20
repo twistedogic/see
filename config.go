@@ -78,12 +78,39 @@ func expandTilde(p string) (string, error) {
 	return filepath.Join(home, p[2:]), nil
 }
 
-// Config is the decoded contents of config.yaml. Both fields are
+// Config is the decoded contents of config.yaml. All fields are
 // optional: an empty Watches preserves the current-working-directory
-// fallback and an empty Prompt falls through to the embedded default.
+// fallback, an empty Prompt falls through to the embedded default,
+// and Condition / Commit belong to the custom workflow (see
+// validateCustomConfig for the blank-condition OpenSpec fallback).
 type Config struct {
-	Watches []string `yaml:"watches"`
-	Prompt  string   `yaml:"prompt"`
+	Watches   []string `yaml:"watches"`
+	Prompt    string   `yaml:"prompt"`
+	Condition string   `yaml:"condition"`
+	Commit    string   `yaml:"commit"`
+}
+
+// validateCustomConfig checks that custom workflow mode (triggered
+// by a nonblank Condition) has both an effective prompt template
+// and a nonblank Commit template before the watcher starts. The
+// effective prompt is the post-precedence value computed from
+// cliPrompt (the --prompt flag) and cfg.Prompt using the same
+// rule as selectPromptTemplate. Returns nil for compatibility mode
+// (blank Condition) regardless of the other fields — the OpenSpec
+// resolver does not need a commit template. Errors name the missing
+// field so the operator can fix the configuration without reading
+// the source.
+func validateCustomConfig(cfg Config, cliPrompt string) error {
+	if strings.TrimSpace(cfg.Condition) == "" {
+		return nil
+	}
+	if strings.TrimSpace(selectPromptTemplate(cliPrompt, cfg.Prompt)) == "" {
+		return fmt.Errorf("see: custom condition requires a prompt (configure `prompt` or pass --prompt)")
+	}
+	if strings.TrimSpace(cfg.Commit) == "" {
+		return fmt.Errorf("see: custom condition requires a `commit` template in config.yaml")
+	}
+	return nil
 }
 
 // loadConfig reads path and returns a strict-decoded Config. Missing

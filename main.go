@@ -502,6 +502,10 @@ func main() {
 		os.Exit(2)
 	}
 	w.SetPromptTemplate(selectPromptTemplate(*promptFlag, cfg.Prompt))
+	if err := validateCustomConfig(cfg, *promptFlag); err != nil {
+		fmt.Fprintln(os.Stderr, "see:", err)
+		os.Exit(2)
+	}
 
 	repos, warnings, err := resolveWatchList(watchFlag, cfg.Watches)
 	if err != nil {

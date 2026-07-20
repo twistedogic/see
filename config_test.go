@@ -271,6 +271,139 @@ func TestLoadStartupConfigTildeExpansion(t *testing.T) {
 	}
 }
 
+// --- custom workflow fields: add-custom-workflows (task 1.1) -------------
+
+// TestLoadConfigWithConditionAndCommit proves that the strict schema
+// decodes the new custom-workflow fields. Both fields are optional;
+// a configured condition + commit must round-trip through the loader
+// without surprising the existing prompt/watches decode path.
+func TestLoadConfigWithConditionAndCommit(t *testing.T) {
+	base := t.TempDir()
+	path := writeConfigYAML(t, base, "watches:\n  - /repos/alpha\nprompt: Apply {change}\ncondition: \"echo add-dark-mode\"\ncommit: \"see: apply {change}\"\n")
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if got, want := cfg.Condition, "echo add-dark-mode"; got != want {
+		t.Fatalf("Condition = %q, want %q", got, want)
+	}
+	if got, want := cfg.Commit, "see: apply {change}"; got != want {
+		t.Fatalf("Commit = %q, want %q", got, want)
+	}
+	if got, want := cfg.Prompt, "Apply {change}"; got != want {
+		t.Fatalf("Prompt = %q, want %q", got, want)
+	}
+}
+
+// TestLoadConfigWrongTypeCondition proves the schema rejects wrong
+// field types for the custom-workflow fields: condition and commit
+// must be strings.
+func TestLoadConfigWrongTypeCondition(t *testing.T) {
+	base := t.TempDir()
+	path := writeConfigYAML(t, base, "condition: {not: a string}\n")
+	_, err := loadConfig(path)
+	if err == nil {
+		t.Fatal("err = nil, want non-nil for wrong condition type")
+	}
+}
+
+func TestLoadConfigWrongTypeCommit(t *testing.T) {
+	base := t.TempDir()
+	path := writeConfigYAML(t, base, "commit: [not, a, string]\n")
+	_, err := loadConfig(path)
+	if err == nil {
+		t.Fatal("err = nil, want non-nil for wrong commit type")
+	}
+}
+
+// --- custom-mode startup validation: add-custom-workflows (task 1.2) -----
+
+// TestValidateCustomModeAcceptsCompleteConfig: a configured condition
+// with nonblank prompt and commit is a valid startup state.
+func TestValidateCustomModeAcceptsCompleteConfig(t *testing.T) {
+	cfg := Config{
+		Condition: "echo add-dark-mode",
+		Prompt:    "Apply {change}",
+		Commit:    "see: apply {change}",
+	}
+	if err := validateCustomConfig(cfg, ""); err != nil {
+		t.Fatalf("err = %v, want nil for complete custom config", err)
+	}
+}
+
+// TestValidateCustomModeAcceptsCLIOverridesPrompt: a configured
+// condition with a CLI-supplied prompt (effective prompt nonblank)
+// is valid even when the configured prompt is blank.
+func TestValidateCustomModeAcceptsCLIOverridesPrompt(t *testing.T) {
+	cfg := Config{
+		Condition: "echo add-dark-mode",
+		Commit:    "see: apply {change}",
+	}
+	if err := validateCustomConfig(cfg, "Apply {change} from CLI"); err != nil {
+		t.Fatalf("err = %v, want nil (CLI prompt should complete the config)", err)
+	}
+}
+
+// TestValidateCustomModeRejectsBlankPrompt: condition + commit but no
+// effective prompt is rejected. The error names the missing field.
+func TestValidateCustomModeRejectsBlankPrompt(t *testing.T) {
+	cfg := Config{
+		Condition: "echo add-dark-mode",
+		Commit:    "see: apply {change}",
+	}
+	err := validateCustomConfig(cfg, "")
+	if err == nil {
+		t.Fatal("err = nil, want non-nil when custom mode has no prompt")
+	}
+	if !strings.Contains(err.Error(), "prompt") {
+		t.Fatalf("err = %q, want it to mention the missing prompt", err.Error())
+	}
+}
+
+// TestValidateCustomModeRejectsBlankCommit: condition + effective
+// prompt but no commit template is rejected. The error names the
+// missing field.
+func TestValidateCustomModeRejectsBlankCommit(t *testing.T) {
+	cfg := Config{
+		Condition: "echo add-dark-mode",
+		Prompt:    "Apply {change}",
+	}
+	err := validateCustomConfig(cfg, "")
+	if err == nil {
+		t.Fatal("err = nil, want non-nil when custom mode has no commit template")
+	}
+	if !strings.Contains(err.Error(), "commit") {
+		t.Fatalf("err = %q, want it to mention the missing commit template", err.Error())
+	}
+}
+
+// TestValidateCustomModeRejectsBlankConditionIsCompatibility:
+// a blank condition disables custom mode regardless of prompt/commit;
+// validation returns nil so startup proceeds in OpenSpec
+// compatibility mode.
+func TestValidateCustomModeBlankConditionIsCompatibility(t *testing.T) {
+	cfg := Config{
+		Prompt: "Apply {change}",
+		Commit: "see: apply {change}",
+	}
+	if err := validateCustomConfig(cfg, ""); err != nil {
+		t.Fatalf("err = %v, want nil (blank condition = compatibility mode)", err)
+	}
+}
+
+// TestValidateCustomModeAcceptsWhitespaceConditionAsBlank: a
+// whitespace-only condition is treated as blank for the purpose
+// of selecting custom mode.
+func TestValidateCustomModeAcceptsWhitespaceConditionAsBlank(t *testing.T) {
+	cfg := Config{
+		Condition: "   \n\t",
+		Prompt:    "Apply {change}",
+	}
+	if err := validateCustomConfig(cfg, ""); err != nil {
+		t.Fatalf("err = %v, want nil (whitespace condition = compatibility mode)", err)
+	}
+}
+
 // --- selectPromptTemplate: task 1.4 --------------------------------------
 
 // TestSelectPromptTemplateCLIOverridesConfigured: a nonblank CLI
