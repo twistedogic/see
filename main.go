@@ -308,6 +308,36 @@ func (w Watcher) rollbackCustomLane(path, change, ref, commit string, created bo
 	return cause
 }
 
+// catchUpCustomCommit stages all working-tree changes after a
+// successful custom agent run and creates a commit with the rendered
+// CommitTemplate when the index differs from HEAD. It is a
+// successful no-op when the agent committed all work itself or
+// made no changes; the empty-staged-diff case skips `git commit`
+// entirely so an idempotent run never emits a no-changes Warning.
+// `git add` and `git commit` failures are surfaced as Warning
+// events so the operator can see why a catch-up commit was missed
+// without failing the run. The custom lane is left checked out in
+// every case so the next polling pass resumes the same persistent
+// branch.
+func (w Watcher) catchUpCustomCommit(path, change string) {
+	add := exec.Command("git", "-C", path, "add", "-A")
+	if out, err := add.CombinedOutput(); err != nil {
+		w.warn(path, change, fmt.Sprintf("git add failed: %v\n%s", err, out))
+		return
+	}
+	// ponytail: diff --cached --quiet exits 0 when the index matches
+	// HEAD and 1 when it differs. Skipping `git commit` on the
+	// empty case keeps an idempotent run warning-free.
+	diff := exec.Command("git", "-C", path, "diff", "--cached", "--quiet")
+	if err := diff.Run(); err == nil {
+		return
+	}
+	msg := renderTemplate(w.CommitTemplate, change)
+	if out, err := exec.Command("git", "-C", path, "commit", "-m", msg).CombinedOutput(); err != nil {
+		w.warn(path, change, fmt.Sprintf("git commit failed: %v\n%s", err, out))
+	}
+}
+
 // runWithRetry invokes work up to w.RetryCount times on repo, emitting
 // RetryAttempt events between attempts. Each custom attempt resolves the
 // condition again so retries can become idle or select a different lane.
@@ -458,6 +488,13 @@ type Watcher struct {
 	PromptTemplate string
 	// Condition selects custom workflow mode when nonblank.
 	Condition string
+	// CommitTemplate is the catch-up commit message rendered with
+	// {change} substitution in custom mode. The startup validator
+	// (validateCustomConfig) rejects a blank CommitTemplate whenever
+	// Condition is nonblank, so a Watcher in custom mode is expected
+	// to carry a nonblank value. Use SetCommitTemplate to apply the
+	// trimming rule rather than assigning directly.
+	CommitTemplate string
 }
 
 // DefaultPollInterval is the post-success-pass delay Watch applies in
@@ -475,6 +512,16 @@ func (w *Watcher) SetPromptTemplate(s string) {
 		return
 	}
 	w.PromptTemplate = s
+}
+
+// SetCommitTemplate stores s as the effective custom commit
+// message template, trimming surrounding whitespace. A blank
+// trimmed value is left as-is; the startup validator guarantees
+// nonblank when custom mode is active, and the catch-up helper
+// short-circuits on an empty staged diff so a blank template
+// cannot surface a "nothing to commit" warning in the common path.
+func (w *Watcher) SetCommitTemplate(s string) {
+	w.CommitTemplate = strings.TrimSpace(s)
 }
 
 // NewWatcher constructs a fully-populated Watcher. PiAgent fields are
@@ -558,6 +605,7 @@ func (w Watcher) workResolved(ctx context.Context, path, change string) error {
 		if runErr != nil {
 			return w.rollbackCustomLane(path, change, ref, attemptTip, created, runErr)
 		}
+		w.catchUpCustomCommit(path, change)
 		if w.observer != nil {
 			w.observer.Observe(ChangeDone{Path: path, Change: change})
 		}
@@ -724,6 +772,7 @@ func main() {
 		os.Exit(2)
 	}
 	w.SetPromptTemplate(selectPromptTemplate(*promptFlag, cfg.Prompt))
+	w.SetCommitTemplate(cfg.Commit)
 	w.Condition = cfg.Condition
 	if err := validateCustomConfig(cfg, *promptFlag); err != nil {
 		fmt.Fprintln(os.Stderr, "see:", err)

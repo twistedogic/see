@@ -23,8 +23,8 @@
 
 ## 4. Catch-up Commit Behavior
 
-- [ ] 4.1 Add failing tests for rendering the custom commit message, committing leftover staged changes, preserving agent-created commits, and treating an unchanged successful run as a warning-free no-op.
-- [ ] 4.2 Implement staged-diff detection and custom catch-up commits while leaving the successful automation lane checked out.
+- [x] 4.1 Add failing tests for rendering the custom commit message, committing leftover staged changes, preserving agent-created commits, and treating an unchanged successful run as a warning-free no-op.
+- [x] 4.2 Implement staged-diff detection and custom catch-up commits while leaving the successful automation lane checked out.
 
 ## 5. Events, Logs, and Terminal User Interface
 

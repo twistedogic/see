@@ -2545,3 +2545,124 @@ func TestCustomRetryConditionExitOneBecomesIdle(t *testing.T) {
 		t.Fatalf("agent runs = %d, want only the first attempt", runs)
 	}
 }
+
+// Custom-mode catch-up commit: after a successful agent run, leftover
+// changes receive a commit with the rendered custom commit message.
+// Commits made by the agent stay intact; a successful run that does
+// not change anything is a warning-free no-op. The custom lane
+// stays checked out in every case so the next polling pass resumes
+// the same persistent branch.
+
+func TestCustomCatchUpCommitRendersCommitTemplate(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	agent := &fakeAgent{
+		onRun: func() error {
+			return os.WriteFile(filepath.Join(repo, "leftover.txt"), []byte("agent work"), 0o644)
+		},
+	}
+	w := Watcher{
+		agent:          agent,
+		Condition:      condition,
+		CommitTemplate: "see: complete {change}",
+		RetryCount:     1,
+		Once:           true,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("git", "-C", repo, "log", "--oneline").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "see: complete add-foo") {
+		t.Fatalf("expected rendered commit message in log:\n%s", out)
+	}
+	// Lane remains checked out; the next polling pass resumes here.
+	if got := currentBranch(t, repo); got != "see/"+customChangeDigest("add-foo") {
+		t.Fatalf("current branch = %q, want custom lane checked out", got)
+	}
+}
+
+func TestCustomCatchUpCommitPreservesAgentCommits(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	agent := &fakeAgent{
+		onRun: func() error {
+			if err := os.WriteFile(filepath.Join(repo, "agent.txt"), []byte("agent work"), 0o644); err != nil {
+				return err
+			}
+			run("add", "-A")
+			run("commit", "-q", "-m", "agent commit")
+			return nil
+		},
+	}
+	obs := &recordingObserver{}
+	w := Watcher{
+		agent:          agent,
+		Condition:      condition,
+		CommitTemplate: "see: complete {change}",
+		RetryCount:     1,
+		Once:           true,
+		observer:       obs,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("git", "-C", repo, "log", "--oneline").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(out)
+	if !strings.Contains(log, "agent commit") {
+		t.Fatalf("agent commit missing from log:\n%s", log)
+	}
+	if strings.Contains(log, "see: complete add-foo") {
+		t.Fatalf("catch-up commit ran despite agent committing everything:\n%s", log)
+	}
+	// No no-changes warning for the empty staged diff.
+	for _, e := range obs.events {
+		if _, ok := e.(Warning); ok {
+			t.Fatalf("unexpected warning event when agent committed everything: %+v", e)
+		}
+	}
+}
+
+func TestCustomCatchUpCommitIsWarningFreeNoOpWhenUnchanged(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	// agent has no onRun and no error → success with zero changes
+	agent := &fakeAgent{}
+	obs := &recordingObserver{}
+	w := Watcher{
+		agent:          agent,
+		Condition:      condition,
+		CommitTemplate: "see: complete {change}",
+		RetryCount:     1,
+		Once:           true,
+		observer:       obs,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("git", "-C", repo, "log", "--oneline").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "see: complete add-foo") {
+		t.Fatalf("expected no commit for unchanged run, got:\n%s", out)
+	}
+	for _, e := range obs.events {
+		if _, ok := e.(Warning); ok {
+			t.Fatalf("unexpected warning event for unchanged run: %+v", e)
+		}
+	}
+}
