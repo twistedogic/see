@@ -32,11 +32,10 @@ import (
 //go:embed prompt.md
 var defaultPromptTemplate string
 
-// renderPrompt substitutes the literal token `{change}` in template
-// with the active change name. One substitution, no escape syntax,
-// no other tokens — see openspec/changes/extract-apply-prompt-flag
-// for the design rationale.
-func renderPrompt(template, change string) string {
+// renderTemplate substitutes every literal token `{change}` in template
+// with the active change value. There is no escape syntax and unknown
+// tokens remain unchanged.
+func renderTemplate(template, change string) string {
 	return strings.ReplaceAll(template, "{change}", change)
 }
 
@@ -399,7 +398,7 @@ func (w Watcher) work(ctx context.Context, path string) error {
 	if template == "" {
 		template = defaultPromptTemplate
 	}
-	logPath, runErr := w.agent.Run(ctx, path, change, renderPrompt(template, change))
+	logPath, runErr := w.agent.Run(ctx, path, change, renderTemplate(template, change))
 	if logPath != "" && w.observer != nil {
 		w.observer.Observe(LogPath{Path: logPath, Change: change})
 	}

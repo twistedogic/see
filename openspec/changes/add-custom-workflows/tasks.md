@@ -10,7 +10,7 @@
 - [x] 2.2 Implement the custom condition resolver using the platform shell and watcher context, with normalized stdout as the change value.
 - [x] 2.3 Add failing tests for full Secure Hash Algorithm 256-bit (SHA-256) branch identity, stable repeated output, distinct changed output, and hash-based per-agent log filenames.
 - [x] 2.4 Implement change hashing and use the digest for custom branch and log path components so raw condition output never becomes a path.
-- [ ] 2.5 Add failing tests that `{change}` is replaced in both prompt and commit templates, then reuse the existing renderer for both values.
+- [x] 2.5 Add failing tests that `{change}` is replaced in both prompt and commit templates, then reuse the existing renderer for both values.
 
 ## 3. Persistent Custom Branch Lifecycle
 

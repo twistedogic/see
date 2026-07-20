@@ -118,20 +118,25 @@ func TestListActiveOpenSpecChanges(t *testing.T) {
 	}
 }
 
-func TestRenderPromptSubstitutesChange(t *testing.T) {
-	if got, want := renderPrompt("Apply {change}", "add-foo"), "Apply add-foo"; got != want {
-		t.Fatalf("renderPrompt(substitute) = %q, want %q", got, want)
+func TestRenderTemplateSubstitutesChangeInPromptAndCommit(t *testing.T) {
+	for template, want := range map[string]string{
+		"Apply {change}":                 "Apply add-foo",
+		"see: apply {change} ({change})": "see: apply add-foo (add-foo)",
+		"Apply {change} in {repo}":       "Apply add-foo in {repo}",
+	} {
+		if got := renderTemplate(template, "add-foo"); got != want {
+			t.Errorf("renderTemplate(%q) = %q, want %q", template, got, want)
+		}
 	}
-	// Empty change name still produces a single space where the token was.
-	if got, want := renderPrompt("Apply {change}", ""), "Apply "; got != want {
-		t.Fatalf("renderPrompt(empty change) = %q, want %q", got, want)
+	if got, want := renderTemplate("Apply {change}", ""), "Apply "; got != want {
+		t.Errorf("renderTemplate() = %q, want %q", got, want)
 	}
 }
 
 func TestDefaultTemplateMentionsChange(t *testing.T) {
-	if !strings.Contains(renderPrompt(defaultPromptTemplate, "add-foo"), "add-foo") {
+	if !strings.Contains(renderTemplate(defaultPromptTemplate, "add-foo"), "add-foo") {
 		t.Fatalf("default template should mention change name after substitution; got %q",
-			renderPrompt(defaultPromptTemplate, "add-foo"))
+			renderTemplate(defaultPromptTemplate, "add-foo"))
 	}
 }
 
@@ -165,7 +170,7 @@ func TestWatcherFallsBackToEmbeddedDefault(t *testing.T) {
 	if len(agent.prompts) != 1 {
 		t.Fatalf("agent Run called %d times, want 1", len(agent.prompts))
 	}
-	if got, want := agent.prompts[0], renderPrompt(defaultPromptTemplate, "add-foo"); got != want {
+	if got, want := agent.prompts[0], renderTemplate(defaultPromptTemplate, "add-foo"); got != want {
 		t.Fatalf("rendered prompt = %q, want %q (default substituted with add-foo)", got, want)
 	}
 }
