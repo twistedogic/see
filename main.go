@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -35,6 +37,48 @@ var defaultPromptTemplate string
 // for the design rationale.
 func renderPrompt(template, change string) string {
 	return strings.ReplaceAll(template, "{change}", change)
+}
+
+// resolveCustomCondition runs the configured predicate in the platform
+// shell. A status of 1 is the normal idle result; successful stdout is
+// normalized into the single-line custom change identity.
+func resolveCustomCondition(ctx context.Context, path, condition string) (string, error) {
+	var shell string
+	var args []string
+	if runtime.GOOS == "windows" {
+		shell, args = "cmd.exe", []string{"/C", condition}
+	} else {
+		shell, args = "/bin/sh", []string{"-c", condition}
+	}
+
+	cmd := exec.CommandContext(ctx, shell, args...)
+	configureConditionCommand(cmd)
+	cmd.Dir = path
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return "", nil
+		}
+		if diagnostic := strings.TrimSpace(stderr.String()); diagnostic != "" {
+			return "", fmt.Errorf("see: custom condition failed: %w: %s", err, diagnostic)
+		}
+		return "", fmt.Errorf("see: custom condition failed: %w", err)
+	}
+
+	change := strings.TrimRight(stdout.String(), "\r\n")
+	if strings.TrimSpace(change) == "" {
+		return "", errors.New("see: custom condition produced an empty change")
+	}
+	if strings.ContainsAny(change, "\r\n") {
+		return "", errors.New("see: custom condition output must be single-line")
+	}
+	return change, nil
 }
 
 type runMode int
@@ -444,14 +488,14 @@ func (w Watcher) Watch(ctx context.Context, repos []string) error {
 
 func main() {
 	var (
-		pi           = flag.String("pi", "pi", "path to the pi binary")
-		retry        = flag.Int("retry", 3, "retries per repo on failure")
-		modeFlag     = flag.String("mode", "tui", "output mode (default \"tui\"); one of: tui, log")
-		once         = flag.Bool("once", false, "run one scan and exit")
+		pi         = flag.String("pi", "pi", "path to the pi binary")
+		retry      = flag.Int("retry", 3, "retries per repo on failure")
+		modeFlag   = flag.String("mode", "tui", "output mode (default \"tui\"); one of: tui, log")
+		once       = flag.Bool("once", false, "run one scan and exit")
 		configFlag = flag.String("config", "", "path to config.yaml (default: $XDG_CONFIG_HOME/see/config.yaml); pass \"-\" to skip")
-		promptFlag   = flag.String("prompt", "", "override the agent prompt template; {change} is replaced with the active change name")
-		interval     = flag.Duration("interval", DefaultPollInterval, "delay between completed scans in continuous mode; 0 disables the delay, negative values are rejected")
-		watchFlag    multiFlag
+		promptFlag = flag.String("prompt", "", "override the agent prompt template; {change} is replaced with the active change name")
+		interval   = flag.Duration("interval", DefaultPollInterval, "delay between completed scans in continuous mode; 0 disables the delay, negative values are rejected")
+		watchFlag  multiFlag
 	)
 	flag.Var(&watchFlag, "watch", "watch path or shell-glob (path, ~/path, or shell-glob with *, ?, [abc]; '**' is rejected). Repeatable.")
 	flag.Parse()

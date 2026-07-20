@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -1830,4 +1831,119 @@ func TestCompatibilityModeRetainsOpenSpecContract(t *testing.T) {
 			t.Fatalf("working tree on %q, want main (compatibility rollback)", got)
 		}
 	})
+}
+
+func platformCondition(unix, windows string) string {
+	if runtime.GOOS == "windows" {
+		return windows
+	}
+	return unix
+}
+
+func TestResolveCustomConditionUsesPlatformShellAndNormalizesOutput(t *testing.T) {
+	got, err := resolveCustomCondition(t.Context(), t.TempDir(), platformCondition(
+		`printf 'add-dark-mode\r\n'`,
+		`echo add-dark-mode`,
+	))
+	if err != nil {
+		t.Fatalf("resolveCustomCondition: %v", err)
+	}
+	if got != "add-dark-mode" {
+		t.Fatalf("normalized change = %q, want %q", got, "add-dark-mode")
+	}
+}
+
+func TestResolveCustomConditionExitOneReportsIdle(t *testing.T) {
+	got, err := resolveCustomCondition(t.Context(), t.TempDir(), platformCondition(
+		`exit 1`,
+		`exit /b 1`,
+	))
+	if err != nil {
+		t.Fatalf("exit 1 returned error: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("idle change = %q, want empty", got)
+	}
+}
+
+func TestResolveCustomConditionFailureIncludesStderr(t *testing.T) {
+	_, err := resolveCustomCondition(t.Context(), t.TempDir(), platformCondition(
+		`printf 'syntax error' >&2; exit 2`,
+		`echo syntax error 1>&2 & exit /b 2`,
+	))
+	if err == nil {
+		t.Fatal("resolveCustomCondition returned nil error for exit 2")
+	}
+	if !strings.Contains(err.Error(), "syntax error") {
+		t.Fatalf("error = %q, want captured stderr", err)
+	}
+}
+
+func TestResolveCustomConditionCancellationStopsShell(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	dir := t.TempDir()
+	result := make(chan error, 1)
+	go func() {
+		_, err := resolveCustomCondition(ctx, dir, platformCondition(
+			`touch condition-started; sleep 30`,
+			`echo started > condition-started & ping -n 30 127.0.0.1 >NUL`,
+		))
+		result <- err
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "condition-started")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("condition did not start before cancellation test deadline")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancellation error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("resolveCustomCondition did not stop after cancellation")
+	}
+}
+
+func TestResolveCustomConditionRejectsInvalidSuccessfulOutput(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		wantErr string
+	}{
+		{
+			name:    "empty",
+			command: platformCondition(`printf ''`, `type nul`),
+			wantErr: "empty",
+		},
+		{
+			name:    "whitespace-only",
+			command: platformCondition(`printf ' \t'`, `echo    `),
+			wantErr: "empty",
+		},
+		{
+			name:    "multiline",
+			command: platformCondition(`printf 'first\nsecond\n'`, `echo first & echo second`),
+			wantErr: "single-line",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := resolveCustomCondition(t.Context(), t.TempDir(), tc.command)
+			if err == nil {
+				t.Fatal("resolveCustomCondition returned nil error for invalid output")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %q, want %q", err, tc.wantErr)
+			}
+		})
+	}
 }
