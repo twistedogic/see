@@ -1665,3 +1665,169 @@ func mkRepoWithChange(t *testing.T, repo, change string) {
 		t.Fatal(err)
 	}
 }
+
+// Regression for add-custom-workflows task 1.3: a Watcher with no
+// custom condition must keep the legacy OpenSpec contract end-to-end:
+// active-change discovery, the `see/<change>` branch name, archival
+// as completion, and the default OpenSpec-format commit message.
+// Pins the compatibility-mode surface so adding the custom resolver
+// in tasks 2/3 cannot silently regress it. Subtests give each scenario
+// a fresh repo so the success path's branch state cannot leak into
+// the failure path.
+func TestCompatibilityModeRetainsOpenSpecContract(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		repo := filepath.Join(t.TempDir(), "proj")
+		mkRepoWithChange(t, repo, "task-1")
+		preSHA, err := GetCurrentCommit(repo)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		agent := &fakeAgent{
+			onRun: func() error {
+				if err := os.WriteFile(filepath.Join(repo, "applied.txt"), []byte("done"), 0o644); err != nil {
+					return err
+				}
+				return os.Rename(
+					filepath.Join(repo, "openspec", "changes", "task-1"),
+					filepath.Join(repo, "openspec", "changes", "archive", "task-1"),
+				)
+			},
+		}
+		w := Watcher{agent: agent, RetryCount: 1}
+		if err := w.work(t.Context(), repo); err != nil {
+			t.Fatalf("compatibility-mode success: %v", err)
+		}
+
+		// Discovery + branch naming: the watcher created `see/task-1`
+		// (the OpenSpec name) and nothing digest-shaped.
+		branchList, err := exec.Command("git", "-C", repo, "branch", "--list", "see/task-1").CombinedOutput()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimSpace(string(branchList)) == "" {
+			t.Fatalf("expected see/task-1 to exist (compatibility branch name); got:\n%s", branchList)
+		}
+		digestList, err := exec.Command("git", "-C", repo, "branch", "--list", "see/[0-9a-f][0-9a-f][0-9a-f]*").CombinedOutput()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimSpace(string(digestList)) != "" {
+			t.Fatalf("compatibility mode must not create digest-named branches; got:\n%s", digestList)
+		}
+
+		// Default commit message: the OpenSpec subject format, no
+		// unresolved {change} tokens.
+		logOut, err := exec.Command("git", "-C", repo, "log", "--all", "--format=%s").CombinedOutput()
+		if err != nil {
+			t.Fatal(err)
+		}
+		logLines := strings.Split(strings.TrimSpace(string(logOut)), "\n")
+		wantSubject := "see: apply openspec change task-1"
+		found := false
+		for _, line := range logLines {
+			if line == wantSubject {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected default commit subject %q in %v", wantSubject, logLines)
+		}
+		for _, line := range logLines {
+			if strings.Contains(line, "{change}") {
+				t.Fatalf("commit subject leaks unresolved {change} token: %q", line)
+			}
+		}
+
+		// Archive completion: nothing active remains under
+		// openspec/changes/ except the archive directory.
+		active, err := os.ReadDir(filepath.Join(repo, "openspec", "changes"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range active {
+			if e.IsDir() && e.Name() != "archive" {
+				t.Fatalf("expected no active change remaining, found %q", e.Name())
+			}
+		}
+
+		// main is preserved: the apply commit lives on see/task-1,
+		// never on main.
+		mainSHA, err := exec.Command("git", "-C", repo, "rev-parse", "main").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimSpace(string(mainSHA)) != preSHA {
+			t.Fatalf("main advanced during compatibility run: pre=%s post=%s", preSHA, strings.TrimSpace(string(mainSHA)))
+		}
+	})
+
+	t.Run("failure_rolls_back", func(t *testing.T) {
+		repo := filepath.Join(t.TempDir(), "proj")
+		mkRepoWithChange(t, repo, "task-1")
+		preSHA, err := GetCurrentCommit(repo)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		agentErr := errors.New("agent boom")
+		agent := &fakeAgent{
+			err: agentErr,
+			onRun: func() error {
+				// Commit on the see lane so rollback has real state
+				// to undo; the agent error is returned after.
+				if err := os.WriteFile(filepath.Join(repo, "halfway.txt"), []byte("x"), 0o644); err != nil {
+					return err
+				}
+				add := exec.Command("git", "-C", repo, "add", "halfway.txt")
+				if err := add.Run(); err != nil {
+					return err
+				}
+				return exec.Command("git", "-C", repo, "commit", "-q", "-m", "halfway").Run()
+			},
+		}
+		w := Watcher{agent: agent, RetryCount: 1}
+		err = w.work(t.Context(), repo)
+		if !errors.Is(err, agentErr) {
+			t.Fatalf("compatibility-mode failure: err = %v, want %v", err, agentErr)
+		}
+
+		// Rollback contract: HEAD restored to pre-run tip, the see
+		// lane deleted, the working tree back on main, and the agent's
+		// untracked commit artifact gone. (TestWorkRollsBackBranchOnAgentFailure
+		// covers this in isolation; this subtest pins that the
+		// compatibility contract is the one in force.)
+		postSHA, err := GetCurrentCommit(repo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if postSHA != preSHA {
+			t.Fatalf("HEAD after rollback = %s, want %s (pre-run snapshot)", postSHA, preSHA)
+		}
+		mainSHA, err := exec.Command("git", "-C", repo, "rev-parse", "main").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimSpace(string(mainSHA)) != preSHA {
+			t.Fatalf("main advanced during failed compatibility run: pre=%s post=%s", preSHA, strings.TrimSpace(string(mainSHA)))
+		}
+		if _, err := os.Stat(filepath.Join(repo, "halfway.txt")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("expected halfway.txt removed by rollback; stat err = %v", err)
+		}
+		branches, err := exec.Command("git", "-C", repo, "branch", "--list", "see/task-1").CombinedOutput()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimSpace(string(branches)) != "" {
+			t.Fatalf("expected see/task-1 deleted on failure; got:\n%s", branches)
+		}
+		branch, err := exec.Command("git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD").CombinedOutput()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.TrimSpace(string(branch)); got != "main" {
+			t.Fatalf("working tree on %q, want main (compatibility rollback)", got)
+		}
+	})
+}
