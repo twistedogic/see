@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	_ "embed"
 	"errors"
 	"flag"
@@ -37,6 +38,10 @@ var defaultPromptTemplate string
 // for the design rationale.
 func renderPrompt(template, change string) string {
 	return strings.ReplaceAll(template, "{change}", change)
+}
+
+func customChangeDigest(change string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(change)))
 }
 
 // resolveCustomCondition runs the configured predicate in the platform

@@ -1947,3 +1947,39 @@ func TestResolveCustomConditionRejectsInvalidSuccessfulOutput(t *testing.T) {
 		})
 	}
 }
+
+func TestCustomChangeDigestDefinesFullSHA256BranchIdentity(t *testing.T) {
+	const want = "243ec3b4ff67401f58a9534d5661dc6bcf486321807fe4bc73db785264a7c1db"
+	got := customChangeDigest("add-dark-mode")
+	if got != want {
+		t.Fatalf("customChangeDigest = %q, want full SHA-256 digest %q", got, want)
+	}
+	if branch := "see/" + got; branch != "see/"+want {
+		t.Fatalf("custom branch = %q, want %q", branch, "see/"+want)
+	}
+}
+
+func TestCustomChangeDigestIsStableAndDistinct(t *testing.T) {
+	first := customChangeDigest("add-dark-mode")
+	if repeated := customChangeDigest("add-dark-mode"); repeated != first {
+		t.Fatalf("repeated digest = %q, want stable %q", repeated, first)
+	}
+	if changed := customChangeDigest("fix-cache"); changed == first {
+		t.Fatalf("different changes produced the same digest %q", first)
+	}
+}
+
+func TestCustomAgentLogFilenameUsesDigest(t *testing.T) {
+	const digest = "982587f309f9eb3d4ba019c9ee283fa89351bc6fc8905c80c9924dc38d00a93a"
+	const change = "../unsafe change"
+	got := pathFor("/repos/myproj", customChangeDigest(change))
+	if wantPrefix := "myproj--" + digest + "--"; !strings.HasPrefix(got, wantPrefix) {
+		t.Fatalf("custom log filename = %q, want prefix %q", got, wantPrefix)
+	}
+	if strings.Contains(got, change) {
+		t.Fatalf("custom log filename contains raw change: %q", got)
+	}
+	if filepath.Dir(got) != "." {
+		t.Fatalf("custom log filename escaped its log directory: %q", got)
+	}
+}
