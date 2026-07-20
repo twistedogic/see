@@ -198,6 +198,93 @@ func ensureBranch(path, sha, name string) error {
 	return nil
 }
 
+// ensureCustomLane creates or verifies the persistent custom-mode
+// lane `see/<digest>` for change on the repo at path. The lane is
+// the watcher's workspace while custom mode is active; the watched
+// checkout therefore belongs to it.
+//
+// Behavior:
+//   - Dirty working tree: rejected before any branching so a later
+//     rollback reset cannot delete operator edits; ignored files do
+//     not count toward dirtiness because they would be outside any
+//     rollback guarantee.
+//   - Lane does not exist: created at the current commit; `created`
+//     reports true so the rollback path knows to delete the lane on
+//     failure rather than reset it.
+//   - Lane exists and HEAD is on it: preserved as-is (no reset);
+//     `created` reports false so the rollback path knows to reset to
+//     the pre-run tip on failure.
+//   - Lane exists but HEAD is on another branch: refused with an
+//     actionable error and no mutation, since switching based on a
+//     stale condition would mutate the operator's working tree.
+//
+// The legacy OpenSpec branch path (ensureBranch) is left untouched:
+// this helper only governs the custom-mode lane.
+func ensureCustomLane(path, change string) (created bool, err error) {
+	digest := customChangeDigest(change)
+	branch := "see/" + digest
+
+	// Dirty working tree blocks all three success paths. A clean
+	// tree is also the rollback baseline for failed attempts.
+	if dirty, derr := hasUntrackedOrModified(path); derr != nil {
+		return false, derr
+	} else if dirty {
+		return false, fmt.Errorf("see: working tree on %s is dirty; commit or stash before see runs", path)
+	}
+
+	// Does the lane already exist?
+	showRef := exec.Command("git", "-C", path, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	if showRef.Run() != nil {
+		// First run: create the lane at the captured current commit.
+		if out, gerr := exec.Command("git", "-C", path, "switch", "-c", branch).CombinedOutput(); gerr != nil {
+			return false, fmt.Errorf("see: git switch -c %s on %s: %w\n%s", branch, path, gerr, out)
+		}
+		return true, nil
+	}
+
+	// Lane exists: refuse when the operator has checked out a
+	// different branch — switching based on a stale condition would
+	// mutate their working tree and could overwrite either branch.
+	cur, rerr := originalRef(path)
+	if rerr != nil {
+		return false, rerr
+	}
+	if cur != branch {
+		return false, fmt.Errorf("see: lane %s exists on branch %q; check it out (or remove/rename the lane) before see runs", branch, cur)
+	}
+	return false, nil
+}
+
+// hasUntrackedOrModified reports whether path has tracked or untracked
+// changes in its working tree, ignoring files matched by .gitignore.
+// `git status --porcelain` includes ignored entries in the "??" form
+// when `--ignored` is passed; we strip them here so a watched repo
+// with a populated .gitignore (caches, build output) still qualifies
+// as a clean tree for the custom lane check. Tracked-but-ignored
+// files (`!!` form) are likewise not dirtiness. A status failure is
+// surfaced as (true, err) so the dirty-path error is preferred over a
+// silent skip — better to over-reject than to mutate a repo whose
+// state we cannot read.
+func hasUntrackedOrModified(path string) (bool, error) {
+	out, err := exec.Command("git", "-C", path, "status", "--porcelain", "--ignored").CombinedOutput()
+	if err != nil {
+		return true, fmt.Errorf("see: git status on %s: %w\n%s", path, err, out)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if line == "" {
+			continue
+		}
+		// "??" untracked, "!!" ignored, " M" / "M " / etc. tracked
+		// modifications, "A " / "AM" staged. Anything not in the
+		// ignored-only set is dirtiness.
+		if strings.HasPrefix(line, "!!") {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
 // runWithRetry invokes work up to w.RetryCount times on repo, emitting
 // RetryAttempt events between attempts, and returns the name of the
 // change that was being worked (or "" when no active change existed

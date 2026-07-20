@@ -14,8 +14,8 @@
 
 ## 3. Persistent Custom Branch Lifecycle
 
-- [ ] 3.1 Add failing watcher tests for clean-tree enforcement, first-run branch creation, same-branch resume without reset, and refusal when an existing lane is not checked out.
-- [ ] 3.2 Implement custom branch creation and resume semantics without changing the legacy OpenSpec branch path.
+- [x] 3.1 Add failing watcher tests for clean-tree enforcement, first-run branch creation, same-branch resume without reset, and refusal when an existing lane is not checked out.
+- [x] 3.2 Implement custom branch creation and resume semantics without changing the legacy OpenSpec branch path.
 - [ ] 3.3 Add failing regression tests proving that failure on an existing lane restores its pre-attempt tip and untracked files without deleting prior commits, while failure on a newly-created lane restores the original branch and deletes only that new lane.
 - [ ] 3.4 Implement mode-aware rollback, including best-effort cleanup warnings and preservation of ignored files.
 - [ ] 3.5 Add failing tests for level-triggered repeated runs, condition exit `1` idle behavior, condition changes selecting a different lane, and retry re-resolution.

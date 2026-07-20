@@ -1988,3 +1988,249 @@ func TestCustomAgentLogFilenameUsesDigest(t *testing.T) {
 		t.Fatalf("custom log filename escaped its log directory: %q", got)
 	}
 }
+
+// mkCleanCustomRepo bootstraps a one-commit git repo on branch main
+// with no openspec/changes/. Used by tests that exercise the custom
+// workflow path; the condition-driven resolver replaces the OpenSpec
+// change directory in custom mode, so the repo must not depend on
+// openspec/ to drive work discovery.
+func mkCleanCustomRepo(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	repo := filepath.Join(root, "proj")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "t@e")
+	run("config", "user.name", "t")
+	run("commit", "--allow-empty", "-q", "-m", "init")
+	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/main").Run(); err != nil {
+		run("switch", "-c", "main")
+	}
+	return repo
+}
+
+// branchTip returns the SHA the given branch points to, or fails the
+// test if the branch does not exist.
+func branchTip(t *testing.T, repo, branch string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", repo, "rev-parse", branch).CombinedOutput()
+	if err != nil {
+		t.Fatalf("rev-parse %s: %v\n%s", branch, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// Custom-mode branch lifecycle: the lane `see/<digest>` is created
+// at the captured commit on the first run, preserved across runs
+// when already checked out, and refused when the lane exists on a
+// different branch. A dirty working tree blocks all three. These
+// tests pin the four behaviors the watcher must satisfy before
+// invoking the agent.
+
+// TestCustomLaneRejectsDirtyWorkingTree: custom mode must refuse a
+// dirty tree before any branching. The agent never runs, the lane is
+// never created, and the operator's edits remain unchanged.
+func TestCustomLaneRejectsDirtyWorkingTree(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "untracked.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	created, err := ensureCustomLane(repo, "add-foo")
+	if err == nil {
+		t.Fatal("ensureCustomLane accepted dirty tree; want error")
+	}
+	if created {
+		t.Fatal("created = true on dirty tree, want false")
+	}
+	if !strings.Contains(err.Error(), "dirty") {
+		t.Fatalf("err = %v, want 'dirty' in message", err)
+	}
+	listOut, err := exec.Command("git", "-C", repo, "branch", "--list", "see/*").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(listOut)) != "" {
+		t.Fatalf("expected no see/ branches after dirty rejection; got:\n%s", listOut)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "untracked.txt")); err != nil {
+		t.Fatalf("operator's untracked file should be preserved; stat err = %v", err)
+	}
+}
+
+// TestCustomLaneFirstRunCreatesBranch: when see/<digest> does not
+// exist, the watcher creates it at the captured current commit and
+// checks it out before the agent runs. `created` reports true.
+func TestCustomLaneFirstRunCreatesBranch(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	preSHA, err := GetCurrentCommit(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := customChangeDigest("add-foo")
+	branch := "see/" + digest
+	created, err := ensureCustomLane(repo, "add-foo")
+	if err != nil {
+		t.Fatalf("ensureCustomLane: %v", err)
+	}
+	if !created {
+		t.Fatal("created = false on first run, want true")
+	}
+	if tip := branchTip(t, repo, branch); tip != preSHA {
+		t.Fatalf("branch tip = %s, want %s (captured current commit)", tip, preSHA)
+	}
+	branchOut, err := exec.Command("git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(branchOut)); got != branch {
+		t.Fatalf("HEAD on %q, want %q (lane created and checked out)", got, branch)
+	}
+}
+
+// TestCustomLaneResumesWithoutReset: when see/<digest> exists and is
+// already checked out with prior successful commits, the watcher
+// runs the agent from the lane tip without resetting or deleting
+// prior commits. `created` reports false.
+func TestCustomLaneResumesWithoutReset(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	digest := customChangeDigest("add-foo")
+	branch := "see/" + digest
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("switch", "-c", branch)
+	if err := os.WriteFile(filepath.Join(repo, "sentinel.txt"), []byte("drift"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-q", "-m", "sentinel")
+	preTip := branchTip(t, repo, branch)
+	if preTip == branchTip(t, repo, "main") {
+		t.Fatal("sentinel commit did not advance the lane past main")
+	}
+	created, err := ensureCustomLane(repo, "add-foo")
+	if err != nil {
+		t.Fatalf("ensureCustomLane: %v", err)
+	}
+	if created {
+		t.Fatal("created = true on resume, want false")
+	}
+	if tip := branchTip(t, repo, branch); tip != preTip {
+		t.Fatalf("lane tip moved on resume: pre=%s post=%s", preTip, tip)
+	}
+	// Prior commits reachable from the lane.
+	logOut, err := exec.Command("git", "-C", repo, "log", "--oneline", branch).CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logOut), "sentinel") {
+		t.Fatalf("lane history dropped sentinel commit on resume:\n%s", logOut)
+	}
+	branchOut, err := exec.Command("git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(branchOut)); got != branch {
+		t.Fatalf("HEAD on %q, want %q (lane preserved checked-out)", got, branch)
+	}
+}
+
+// TestCustomLaneRefusesWhenLaneNotCheckedOut: when see/<digest>
+// exists but the operator has checked out a different branch, the
+// watcher must refuse without switching or mutating either branch.
+// `created` reports false and the agent never runs.
+func TestCustomLaneRefusesWhenLaneNotCheckedOut(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	digest := customChangeDigest("add-foo")
+	branch := "see/" + digest
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("switch", "-c", branch)
+	if err := os.WriteFile(filepath.Join(repo, "sentinel.txt"), []byte("drift"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-q", "-m", "sentinel")
+	preLaneTip := branchTip(t, repo, branch)
+	preMainTip := branchTip(t, repo, "main")
+	run("switch", "main")
+
+	created, err := ensureCustomLane(repo, "add-foo")
+	if err == nil {
+		t.Fatal("ensureCustomLane accepted lane on different branch; want error")
+	}
+	if created {
+		t.Fatal("created = true on refusal, want false")
+	}
+	if !strings.Contains(err.Error(), branch) {
+		t.Fatalf("err = %v, want lane name %q in message", err, branch)
+	}
+	if tip := branchTip(t, repo, branch); tip != preLaneTip {
+		t.Fatalf("lane tip moved on refusal: pre=%s post=%s", preLaneTip, tip)
+	}
+	if tip := branchTip(t, repo, "main"); tip != preMainTip {
+		t.Fatalf("main moved on refusal: pre=%s post=%s", preMainTip, tip)
+	}
+	branchOut, err := exec.Command("git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(branchOut)); got != "main" {
+		t.Fatalf("HEAD on %q, want main (refusal must not switch)", got)
+	}
+}
+
+// TestCustomLaneAcceptsIgnoredOnlyChanges: files matched by .gitignore
+// are not dirtiness for the custom lane check. A repo with only
+// ignored files beyond the commit still qualifies as clean and the
+// lane can be created or resumed.
+func TestCustomLaneAcceptsIgnoredOnlyChanges(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("ignored/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("add", "-A")
+	run("commit", "-q", "-m", "ignore ignored")
+	if err := os.MkdirAll(filepath.Join(repo, "ignored"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "ignored", "cache.bin"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	created, err := ensureCustomLane(repo, "add-foo")
+	if err != nil {
+		t.Fatalf("ensureCustomLane rejected ignored-only tree: %v", err)
+	}
+	if !created {
+		t.Fatal("created = false on first run, want true")
+	}
+}
