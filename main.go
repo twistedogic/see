@@ -309,33 +309,53 @@ func (w Watcher) rollbackCustomLane(path, change, ref, commit string, created bo
 }
 
 // runWithRetry invokes work up to w.RetryCount times on repo, emitting
-// RetryAttempt events between attempts, and returns the name of the
-// change that was being worked (or "" when no active change existed
-// before the first attempt) plus the final error from the last attempt.
-// A nil error short-circuits the loop; exhausting all attempts returns
-// the last attempt's error.
+// RetryAttempt events between attempts. Each custom attempt resolves the
+// condition again so retries can become idle or select a different lane.
 func (w Watcher) runWithRetry(ctx context.Context, repo string) (string, error) {
 	lastChange := ""
 	var prevErr error
 	for attempt := 1; attempt <= w.RetryCount; attempt++ {
-		changeName := ""
-		if cs := ListActiveOpenSpecChanges(repo); len(cs) > 0 {
-			changeName = cs[0]
-			lastChange = changeName
-		}
 		if prevErr != nil && w.observer != nil {
 			w.observer.Observe(RetryAttempt{
-				Path: repo, Change: changeName, N: attempt, Max: w.RetryCount,
+				Path: repo, Change: lastChange, N: attempt, Max: w.RetryCount,
 				Err: prevErr.Error(),
 			})
 		}
-		err := w.work(ctx, repo)
-		if err == nil {
-			return lastChange, nil
+
+		changeName, err := w.resolveChange(ctx, repo)
+		if attempt == 1 && w.observer != nil {
+			w.observer.Observe(RepoSeen{Path: repo, HasOpenspec: changeName != ""})
 		}
-		prevErr = err
+		if err != nil {
+			prevErr = err
+			continue
+		}
+		if changeName == "" {
+			return "", nil
+		}
+		lastChange = changeName
+		if err := w.workResolved(ctx, repo, changeName); err == nil {
+			return lastChange, nil
+		} else {
+			prevErr = err
+		}
 	}
 	return lastChange, prevErr
+}
+
+func (w Watcher) customMode() bool {
+	return strings.TrimSpace(w.Condition) != ""
+}
+
+func (w Watcher) resolveChange(ctx context.Context, path string) (string, error) {
+	if w.customMode() {
+		return resolveCustomCondition(ctx, path, w.Condition)
+	}
+	changes := ListActiveOpenSpecChanges(path)
+	if len(changes) == 0 {
+		return "", nil
+	}
+	return changes[0], nil
 }
 
 // Event is the watcher→observer interface. Concrete types are below;
@@ -436,6 +456,8 @@ type Watcher struct {
 	// default"; use SetPromptTemplate to apply the normalization
 	// rule rather than assigning directly.
 	PromptTemplate string
+	// Condition selects custom workflow mode when nonblank.
+	Condition string
 }
 
 // DefaultPollInterval is the post-success-pass delay Watch applies in
@@ -480,8 +502,7 @@ func (w Watcher) warn(path, change, msg string) {
 }
 
 func (w Watcher) work(ctx context.Context, path string) error {
-	current, err := GetCurrentCommit(path)
-	if err != nil {
+	if _, err := GetCurrentCommit(path); err != nil {
 		return err
 	}
 	ref, err := originalRef(path)
@@ -492,17 +513,63 @@ func (w Watcher) work(ctx context.Context, path string) error {
 		w.warn(path, "", "detached HEAD; switch to a branch first")
 		return fmt.Errorf("detached HEAD on %s", path)
 	}
-	changes := ListActiveOpenSpecChanges(path)
-	if len(changes) == 0 {
+	change, err := w.resolveChange(ctx, path)
+	if err != nil || change == "" {
+		return err
+	}
+	return w.workResolved(ctx, path, change)
+}
+
+func (w Watcher) workResolved(ctx context.Context, path, change string) error {
+	current, err := GetCurrentCommit(path)
+	if err != nil {
+		return err
+	}
+	ref, err := originalRef(path)
+	if err != nil {
+		return err
+	}
+	if ref == "" {
+		w.warn(path, change, "detached HEAD; switch to a branch first")
+		return fmt.Errorf("detached HEAD on %s", path)
+	}
+
+	if w.customMode() {
+		created, err := ensureCustomLane(path, change)
+		if err != nil {
+			return err
+		}
+		attemptTip, err := GetCurrentCommit(path)
+		if err != nil {
+			return err
+		}
+		if w.observer != nil {
+			w.observer.Observe(ChangeStarted{Path: path, Change: change})
+		}
+		template := w.PromptTemplate
+		if template == "" {
+			template = defaultPromptTemplate
+		}
+		logChange := customChangeDigest(change)
+		logPath, runErr := w.agent.Run(ctx, path, logChange, renderTemplate(template, change))
+		if logPath != "" && w.observer != nil {
+			w.observer.Observe(LogPath{Path: logPath, Change: change})
+		}
+		if runErr != nil {
+			return w.rollbackCustomLane(path, change, ref, attemptTip, created, runErr)
+		}
+		if w.observer != nil {
+			w.observer.Observe(ChangeDone{Path: path, Change: change})
+		}
 		return nil
 	}
-	change := changes[0]
+
 	branch := "see/" + change
-	if w.observer != nil {
-		w.observer.Observe(ChangeStarted{Path: path, Change: change})
-	}
 	if err := ensureBranch(path, current, branch); err != nil {
 		return err
+	}
+	if w.observer != nil {
+		w.observer.Observe(ChangeStarted{Path: path, Change: change})
 	}
 	template := w.PromptTemplate
 	if template == "" {
@@ -555,9 +622,6 @@ func (w Watcher) runOnce(ctx context.Context, repos []string) error {
 			}
 			if _, err := GetCurrentCommit(repo); err != nil {
 				continue
-			}
-			if w.observer != nil {
-				w.observer.Observe(RepoSeen{Path: repo, HasOpenspec: len(ListActiveOpenSpecChanges(repo)) > 0})
 			}
 			lastChange, err := w.runWithRetry(ctx, repo)
 			if err != nil {
@@ -660,6 +724,7 @@ func main() {
 		os.Exit(2)
 	}
 	w.SetPromptTemplate(selectPromptTemplate(*promptFlag, cfg.Prompt))
+	w.Condition = cfg.Condition
 	if err := validateCustomConfig(cfg, *promptFlag); err != nil {
 		fmt.Fprintln(os.Stderr, "see:", err)
 		os.Exit(2)

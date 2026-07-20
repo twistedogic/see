@@ -2396,3 +2396,152 @@ func currentBranch(t *testing.T, repo string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+func writeSequenceCondition(t *testing.T, outputs ...string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("sequence condition test uses a POSIX shell script")
+	}
+	dir := t.TempDir()
+	state := filepath.Join(dir, "state")
+	script := filepath.Join(dir, "condition")
+	body := "#!/bin/sh\n"
+	body += "n=$(cat \"" + state + "\" 2>/dev/null || printf 0)\n"
+	body += "case \"$n\" in\n"
+	for i, output := range outputs {
+		if output == "<idle>" {
+			body += fmt.Sprintf("%d) exit 1;;\n", i)
+			continue
+		}
+		body += fmt.Sprintf("%d) printf '%s';;\n", i, strings.ReplaceAll(output, "'", "'\\\"'\\\"'"))
+	}
+	fallback := outputs[len(outputs)-1]
+	if fallback == "<idle>" {
+		body += "*) exit 1;;\n"
+	} else {
+		body += fmt.Sprintf("*) printf '%s';;\n", strings.ReplaceAll(fallback, "'", "'\\\"'\\\"'"))
+	}
+	body += "esac\n"
+	body += "printf '%s' $((n + 1)) > \"" + state + "\"\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
+func TestCustomConditionIsLevelTriggeredAcrossPollingPasses(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	condition := writeSequenceCondition(t, "same-change\\n")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var runs int
+	agent := &fakeAgent{onRun: func() error {
+		runs++
+		if runs == 2 {
+			cancel()
+		}
+		return nil
+	}}
+	w := Watcher{agent: agent, Condition: condition, RetryCount: 1, PollInterval: 0}
+	if err := w.Watch(ctx, []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want nil after cancellation", err)
+	}
+	if runs != 2 {
+		t.Fatalf("agent runs = %d, want 2 for a condition that stays true", runs)
+	}
+	if got := currentBranch(t, repo); got != "see/"+customChangeDigest("same-change") {
+		t.Fatalf("current branch = %q, want persistent custom lane", got)
+	}
+}
+
+func TestCustomConditionExitOneLeavesRepoIdle(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	condition := platformCondition("exit 1", "exit /b 1")
+	agent := &fakeAgent{}
+	obs := &recordingObserver{}
+	w := Watcher{agent: agent, Condition: condition, RetryCount: 1, Once: true, observer: obs}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want nil for idle condition", err)
+	}
+	if len(agent.runs) != 0 {
+		t.Fatalf("agent runs = %d, want 0 for condition exit 1", len(agent.runs))
+	}
+	if len(obs.events) != 1 {
+		t.Fatalf("events = %v, want exactly RepoSeen", obs.eventTypes())
+	}
+	rs, ok := obs.events[0].(RepoSeen)
+	if !ok || rs.HasOpenspec {
+		t.Fatalf("event = %+v, want RepoSeen with no change", obs.events[0])
+	}
+}
+
+func TestCustomConditionChangeSelectsDifferentLane(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	condition := writeSequenceCondition(t, "first\\n", "second\\n")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var runs int
+	agent := &fakeAgent{onRun: func() error {
+		runs++
+		if runs == 2 {
+			cancel()
+		}
+		return nil
+	}}
+	w := Watcher{agent: agent, Condition: condition, RetryCount: 1, PollInterval: 0}
+	if err := w.Watch(ctx, []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want nil after cancellation", err)
+	}
+	if runs != 2 {
+		t.Fatalf("agent runs = %d, want 2 after condition changed", runs)
+	}
+	for _, change := range []string{"first", "second"} {
+		branch := "see/" + customChangeDigest(change)
+		if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/"+branch).Run(); err != nil {
+			t.Fatalf("missing custom lane %q", branch)
+		}
+	}
+	if got := currentBranch(t, repo); got != "see/"+customChangeDigest("second") {
+		t.Fatalf("current branch = %q, want second custom lane", got)
+	}
+}
+
+func TestCustomRetryReResolvesCondition(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	condition := writeSequenceCondition(t, "first\\n", "second\\n")
+	var runs int
+	agent := &fakeAgent{onRun: func() error {
+		runs++
+		if runs == 1 {
+			return errors.New("retry me")
+		}
+		return nil
+	}}
+	w := Watcher{agent: agent, Condition: condition, RetryCount: 2, Once: true}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want retry success", err)
+	}
+	if runs != 2 {
+		t.Fatalf("agent runs = %d, want 2", runs)
+	}
+	if got := currentBranch(t, repo); got != "see/"+customChangeDigest("second") {
+		t.Fatalf("current branch = %q, want lane for re-resolved change", got)
+	}
+}
+
+func TestCustomRetryConditionExitOneBecomesIdle(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	condition := writeSequenceCondition(t, "first\\n", "<idle>")
+	var runs int
+	agent := &fakeAgent{onRun: func() error {
+		runs++
+		return errors.New("retry into idle")
+	}}
+	w := Watcher{agent: agent, Condition: condition, RetryCount: 2, Once: true}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want nil when retry becomes idle", err)
+	}
+	if runs != 1 {
+		t.Fatalf("agent runs = %d, want only the first attempt", runs)
+	}
+}

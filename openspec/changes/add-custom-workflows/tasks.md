@@ -18,8 +18,8 @@
 - [x] 3.2 Implement custom branch creation and resume semantics without changing the legacy OpenSpec branch path.
 - [x] 3.3 Add failing regression tests proving that failure on an existing lane restores its pre-attempt tip and untracked files without deleting prior commits, while failure on a newly-created lane restores the original branch and deletes only that new lane.
 - [x] 3.4 Implement mode-aware rollback, including best-effort cleanup warnings and preservation of ignored files.
-- [ ] 3.5 Add failing tests for level-triggered repeated runs, condition exit `1` idle behavior, condition changes selecting a different lane, and retry re-resolution.
-- [ ] 3.6 Wire condition resolution into the polling and retry flow so every true pass runs the agent and every blank-condition pass uses the compatibility resolver.
+- [x] 3.5 Add failing tests for level-triggered repeated runs, condition exit `1` idle behavior, condition changes selecting a different lane, and retry re-resolution.
+- [x] 3.6 Wire condition resolution into the polling and retry flow so every true pass runs the agent and every blank-condition pass uses the compatibility resolver.
 
 ## 4. Catch-up Commit Behavior
 
