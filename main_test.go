@@ -2234,3 +2234,165 @@ func TestCustomLaneAcceptsIgnoredOnlyChanges(t *testing.T) {
 		t.Fatal("created = false on first run, want true")
 	}
 }
+
+func TestRollbackCustomLane(t *testing.T) {
+	const change = "add-foo"
+	branch := "see/" + customChangeDigest(change)
+
+	t.Run("existing lane restores its tip and untracked state", func(t *testing.T) {
+		repo := mkCleanCustomRepo(t)
+		run := func(args ...string) {
+			t.Helper()
+			cmd := exec.Command("git", args...)
+			cmd.Dir = repo
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git %v: %v\n%s", args, err, out)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("ignored/\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		run("add", "-A")
+		run("commit", "-q", "-m", "ignore ignored")
+		run("switch", "-c", branch)
+		for _, name := range []string{"prior-b", "prior-c"} {
+			if err := os.WriteFile(filepath.Join(repo, name+".txt"), []byte(name), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			run("add", "-A")
+			run("commit", "-q", "-m", name)
+		}
+		preAttemptTip := branchTip(t, repo, branch)
+
+		if err := os.WriteFile(filepath.Join(repo, "failed-commit.txt"), []byte("failed"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		run("add", "-A")
+		run("commit", "-q", "-m", "failed attempt")
+		if err := os.WriteFile(filepath.Join(repo, "untracked.txt"), []byte("failed"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(repo, "ignored"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, "ignored", "cache"), []byte("keep"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		agentErr := errors.New("agent failed")
+		err := (Watcher{}).rollbackCustomLane(repo, change, branch, preAttemptTip, false, agentErr)
+		if !errors.Is(err, agentErr) {
+			t.Fatalf("rollback error = %v, want original agent error %v", err, agentErr)
+		}
+		if tip := branchTip(t, repo, branch); tip != preAttemptTip {
+			t.Fatalf("lane tip after rollback = %s, want %s", tip, preAttemptTip)
+		}
+		if got := currentBranch(t, repo); got != branch {
+			t.Fatalf("branch after rollback = %q, want %q", got, branch)
+		}
+		for _, name := range []string{"failed-commit.txt", "untracked.txt"} {
+			if _, err := os.Stat(filepath.Join(repo, name)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("%s survived rollback; stat err = %v", name, err)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(repo, "ignored", "cache")); err != nil {
+			t.Fatalf("ignored file did not survive rollback: %v", err)
+		}
+		logOut, err := exec.Command("git", "-C", repo, "log", "--oneline", branch).CombinedOutput()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(logOut), "prior-b") || !strings.Contains(string(logOut), "prior-c") || strings.Contains(string(logOut), "failed attempt") {
+			t.Fatalf("lane history after rollback is wrong:\n%s", logOut)
+		}
+	})
+
+	t.Run("new lane restores source branch and is deleted", func(t *testing.T) {
+		repo := mkCleanCustomRepo(t)
+		run := func(args ...string) {
+			t.Helper()
+			cmd := exec.Command("git", args...)
+			cmd.Dir = repo
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git %v: %v\n%s", args, err, out)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("ignored/\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		run("add", "-A")
+		run("commit", "-q", "-m", "ignore ignored")
+		preAttemptTip := branchTip(t, repo, "main")
+		created, err := ensureCustomLane(repo, change)
+		if err != nil || !created {
+			t.Fatalf("ensureCustomLane = (%v, %v), want (true, nil)", created, err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, "failed-commit.txt"), []byte("failed"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		run("add", "-A")
+		run("commit", "-q", "-m", "failed attempt")
+		if err := os.WriteFile(filepath.Join(repo, "untracked.txt"), []byte("failed"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(repo, "ignored"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, "ignored", "cache"), []byte("keep"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		agentErr := errors.New("agent failed")
+		err = (Watcher{}).rollbackCustomLane(repo, change, "main", preAttemptTip, true, agentErr)
+		if !errors.Is(err, agentErr) {
+			t.Fatalf("rollback error = %v, want original agent error %v", err, agentErr)
+		}
+		if got := currentBranch(t, repo); got != "main" {
+			t.Fatalf("branch after rollback = %q, want main", got)
+		}
+		if tip := branchTip(t, repo, "main"); tip != preAttemptTip {
+			t.Fatalf("main tip after rollback = %s, want %s", tip, preAttemptTip)
+		}
+		if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/"+branch).Run(); err == nil {
+			t.Fatalf("new lane %q survived rollback", branch)
+		}
+		for _, name := range []string{"failed-commit.txt", "untracked.txt"} {
+			if _, err := os.Stat(filepath.Join(repo, name)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("%s survived rollback; stat err = %v", name, err)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(repo, "ignored", "cache")); err != nil {
+			t.Fatalf("ignored file did not survive rollback: %v", err)
+		}
+	})
+}
+
+func TestRollbackCustomLaneWarnsForEveryCleanupFailure(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	if err := os.RemoveAll(repo); err != nil {
+		t.Fatal(err)
+	}
+	agentErr := errors.New("agent failed")
+	obs := &recordingObserver{}
+	err := (Watcher{observer: obs}).rollbackCustomLane(repo, "add-foo", "main", "deadbeef", true, agentErr)
+	if !errors.Is(err, agentErr) {
+		t.Fatalf("rollback error = %v, want original agent error %v", err, agentErr)
+	}
+	if len(obs.events) != 4 {
+		t.Fatalf("warnings = %v, want one for each of switch, reset, clean, and branch deletion", obs.eventTypes())
+	}
+	for i, event := range obs.events {
+		if _, ok := event.(Warning); !ok {
+			t.Fatalf("event[%d] = %T, want Warning", i, event)
+		}
+	}
+}
+
+func currentBranch(t *testing.T, repo string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", repo, "symbolic-ref", "--short", "HEAD").CombinedOutput()
+	if err != nil {
+		t.Fatalf("current branch: %v\n%s", err, out)
+	}
+	return strings.TrimSpace(string(out))
+}

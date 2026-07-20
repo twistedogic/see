@@ -285,6 +285,29 @@ func hasUntrackedOrModified(path string) (bool, error) {
 	return false, nil
 }
 
+// rollbackCustomLane restores the clean state captured immediately before a
+// custom agent attempt. Existing lanes stay checked out at their prior tip;
+// lanes created by this attempt are removed after returning to the source
+// branch. git clean intentionally omits -x so ignored files survive.
+func (w Watcher) rollbackCustomLane(path, change, ref, commit string, created bool, cause error) error {
+	branch := "see/" + customChangeDigest(change)
+	run := func(label string, args ...string) {
+		out, err := exec.Command("git", append([]string{"-C", path}, args...)...).CombinedOutput()
+		if err != nil {
+			w.warn(path, change, fmt.Sprintf("%s failed: %v\n%s", label, err, out))
+		}
+	}
+	if created {
+		run(fmt.Sprintf("switch back to %q", ref), "switch", ref)
+	}
+	run("reset failed custom attempt", "reset", "--hard", commit)
+	run("clean failed custom attempt", "clean", "-fd")
+	if created {
+		run("delete newly-created lane "+branch, "branch", "-D", branch)
+	}
+	return cause
+}
+
 // runWithRetry invokes work up to w.RetryCount times on repo, emitting
 // RetryAttempt events between attempts, and returns the name of the
 // change that was being worked (or "" when no active change existed
