@@ -71,6 +71,9 @@ watches:
 
 prompt: |-
   Apply the OpenSpec change "{change}".
+
+# condition: "git rev-parse --abbrev-ref HEAD"
+# commit:    "see: apply {change}"
 ```
 
 - `watches` is a sequence of strings. Each entry follows the same path,
@@ -81,10 +84,20 @@ prompt: |-
   interior line breaks; use `|-` to strip the trailing newline. The single
   token `{change}` is replaced with the active change name at runtime; no
   other tokens are substituted.
+- `condition` is a platform-shell command. A nonblank value switches `see`
+  into custom workflow mode for every watched repository; see
+  [Custom Workflows](#custom-workflows) below.
+- `commit` is a string template for the catch-up commit on a successful
+  custom run. The same `{change}` substitution rule applies. The field is
+  consulted only in custom workflow mode; OpenSpec compatibility mode uses
+  its own default commit subject.
 
-Both fields are optional. Omitting `watches` preserves the
-current-working-directory fallback. Omitting `prompt` falls through to the
-embedded `prompt.md` default.
+`watches`, `prompt`, `condition`, and `commit` are all optional. Omitting
+`watches` preserves the current-working-directory fallback. Omitting
+`prompt` falls through to the embedded `prompt.md` default. Omitting
+`condition` (or leaving it whitespace-only) keeps `see` in OpenSpec
+compatibility mode. Omitting `commit` while `condition` is nonblank is a
+startup error.
 
 ### Migration from the legacy plain-text `watches` file
 
@@ -156,3 +169,158 @@ non-fatal: `loadStartupConfig` writes one line to standard error
 returns a zero-value `Config` so the command-line entries and the
 current-working-directory fallback still produce a working watch
 list. The watcher starts regardless of bootstrap outcome.
+
+## Custom Workflows
+
+A nonblank `condition` switches `see` from OpenSpec discovery into
+custom workflow mode for every watched repository. The shell command
+becomes the work-existence predicate; the OpenSpec resolver, the
+archival-completion check, and the default commit subject are
+replaced. A blank or whitespace-only `condition` keeps the OpenSpec
+contract: `openspec/changes/` directories drive work, archival
+counts as completion, and the catch-up commit subject is
+`see: apply openspec change <change>`.
+
+### Startup requirements
+
+Custom mode is validated once at startup. A nonblank `condition`
+requires both:
+
+- a nonblank effective prompt (from `--prompt` or the configured
+  `prompt`), and
+- a nonblank `commit` template in `config.yaml`.
+
+Either missing fails fast with an actionable message and exits with
+status `2` before the watcher starts. The configured `commit` value
+is trimmed; whitespace-only is treated as blank.
+
+### Shell contract
+
+The condition runs in the repository's working directory under the
+platform shell:
+
+- `/bin/sh -c <condition>` on Unix-like systems,
+- `cmd.exe /C <condition>` on Windows.
+
+The watcher's context is attached so SIGINT/SIGTERM cancels an
+in-flight condition. On Unix the child is placed in its own process
+group so canceling the watcher does not strand descendants. The
+shell string is not interpolated or parsed by `see`; quoting and
+expansion belong to the shell. Configure conditions as
+side-effect-free predicates; they execute before branch isolation,
+so anything they write to the working tree will be picked up by the
+agent.
+
+Exit semantics:
+
+- **exit `0`** — work exists. Standard output (after a trailing
+  carriage-return/line-feed trim) becomes the change value for the
+  rest of the run.
+- **exit `1`** — no work. The repository is idle; the watcher
+  emits `RepoSeen{HasChange: false}` and moves on.
+- **any other exit** — condition failure. `see` captures standard
+  error, surfaces it in the `see:` error message and the `Warning`
+  event (when one applies), and treats the run as failed.
+
+Output rules:
+
+- Trailing `\r` and `\n` bytes are stripped.
+- The remaining value must contain at least one non-whitespace
+  character; an empty or whitespace-only stdout is a failure.
+- The remaining value must be single-line; embedded `\r` or `\n`
+  is a failure. Multi-line payloads can emit an identifier and let
+  the prompt tell the agent how to retrieve details.
+
+### Stable identity from a single-line value
+
+Custom mode hashes the normalized change value with the Secure Hash
+Algorithm 256-bit (SHA-256) digest, lowercased to hexadecimal, and
+uses it as the persistent branch suffix. The branch checked out
+during a custom run is therefore `see/<digest>`. The same digest
+is used as the per-invocation log filename component so raw
+condition output never reaches a filesystem path.
+
+Events, prompts, commit messages, and the Terminal User Interface
+(TUI) keep the human-readable change value; only the branch and
+log filename are opaque. Any non-newline byte change in the
+condition's stdout selects a different branch and a different log
+file.
+
+### Templates: `{change}` in prompt and commit
+
+The single token `{change}` is replaced in both the selected prompt
+template and the configured `commit` template before either is
+handed to the agent or `git commit`. Unknown tokens are preserved
+verbatim. The substitution uses the normalized change value (the
+same value that was hashed), not the digest.
+
+### Persistent per-change lanes
+
+Each unique change value owns one lane `see/<digest>`. The lane
+exists for as long as the operator wants that change active; the
+watcher does not delete it on success.
+
+`see` rejects a dirty working tree (tracked or untracked changes;
+ignored files do not count) before touching any branch, so a
+later rollback cannot delete operator edits. The lane lifecycle is
+then:
+
+- **Lane does not exist** — created at the current commit.
+- **Lane exists and HEAD is on it** — preserved as-is; no reset,
+  prior commits stay in place.
+- **Lane exists but HEAD is on another branch** — refused with an
+  actionable message and no mutation. Switching based on a stale
+  condition would overwrite either branch.
+
+Rollback is mode-aware:
+
+- **Existing lane** — reset to the commit captured immediately
+  before the attempt; untracked files created by the attempt are
+  removed (`git clean -fd`, no `-x`, so ignored caches survive);
+  the lane and its earlier commits stay.
+- **Lane created by the failed attempt** — return to the original
+  branch, reset to the captured commit, delete the new lane.
+
+Cleanup steps are best-effort: each failure emits a `Warning` event
+without replacing the agent error. Ignored files (per the
+`.gitignore`) are outside the rollback guarantee to avoid deleting
+caches or local configuration that predated the run.
+
+### Catch-up commit
+
+After a successful custom run, `see` stages all working-tree
+changes (`git add -A`) and inspects the staged diff:
+
+- **staged changes exist** — commit them with the rendered `commit`
+  template.
+- **no staged changes** — return success without a commit and
+  without a `Warning`. An idempotent run whose agent already
+  committed everything, or made no changes, stays warning-free.
+
+The lane stays checked out after the catch-up commit so the next
+polling pass resumes the same persistent branch.
+
+### Level-triggered polling and retries
+
+Continuous polling (`Watcher.PollInterval`, default five minutes)
+waits between successful passes. A condition that remains true
+will trigger another run each interval; a condition that turns
+false becomes an idle no-op. Each retry attempt re-evaluates the
+condition, so a retry can:
+
+- exit `0` and continue work,
+- exit `1` and become idle (no `ChangeFailed`),
+- select a different change value and switch to the corresponding
+  lane.
+
+### JSONL event payload migration
+
+The repository-availability event field has been renamed from
+`HasOpenspec` to `HasChange`. Custom and OpenSpec runs now use the
+same field; a custom condition that exits `0` and an OpenSpec
+resolver that finds an active change both set `HasChange: true`,
+and a custom condition that exits `1` and an OpenSpec repo with
+no active change both set `HasChange: false`. The previous field
+name is no longer emitted. Consumers reading the batch-level
+JavaScript Object Notation Lines (JSONL) stream need to read
+`HasChange` instead of `HasOpenspec`; no dual-write period.
