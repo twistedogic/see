@@ -7,8 +7,8 @@ package tui
 // the bubbletea Program via Program.Send.
 
 type RepoSeenMsg struct {
-	Path        string
-	HasOpenspec bool
+	Path      string
+	HasChange bool
 }
 
 type ChangeStartedMsg struct {

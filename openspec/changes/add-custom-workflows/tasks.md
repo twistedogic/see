@@ -28,9 +28,9 @@
 
 ## 5. Events, Logs, and Terminal User Interface
 
-- [ ] 5.1 Add failing event logger and watcher tests for `RepoSeen.HasChange`, including custom work, custom idle, condition failure, and OpenSpec fallback cases; assert that `HasOpenspec` is absent from JSONL.
-- [ ] 5.2 Rename repository availability state from `HasOpenspec` to `HasChange` across watcher events, JavaScript Object Notation Lines (JSONL), the observer adapter, and TUI messages/model state.
-- [ ] 5.3 Add failing TUI tests showing normalized custom changes in the CHANGE column, idle rows for either resolver, and unchanged phase/warning behavior; update the model and view to satisfy them.
+- [x] 5.1 Add failing event logger and watcher tests for `RepoSeen.HasChange`, including custom work, custom idle, condition failure, and OpenSpec fallback cases; assert that `HasOpenspec` is absent from JSONL.
+- [x] 5.2 Rename repository availability state from `HasOpenspec` to `HasChange` across watcher events, JavaScript Object Notation Lines (JSONL), the observer adapter, and TUI messages/model state.
+- [x] 5.3 Add failing TUI tests showing normalized custom changes in the CHANGE column, idle rows for either resolver, and unchanged phase/warning behavior; update the model and view to satisfy them.
 
 ## 6. Documentation and Verification
 

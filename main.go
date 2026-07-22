@@ -354,7 +354,7 @@ func (w Watcher) runWithRetry(ctx context.Context, repo string) (string, error) 
 
 		changeName, err := w.resolveChange(ctx, repo)
 		if attempt == 1 && w.observer != nil {
-			w.observer.Observe(RepoSeen{Path: repo, HasOpenspec: changeName != ""})
+			w.observer.Observe(RepoSeen{Path: repo, HasChange: changeName != ""})
 		}
 		if err != nil {
 			prevErr = err
@@ -396,8 +396,8 @@ func (w Watcher) resolveChange(ctx context.Context, path string) (string, error)
 type Event interface{ isEvent() }
 
 type RepoSeen struct {
-	Path        string
-	HasOpenspec bool
+	Path      string
+	HasChange bool
 }
 
 func (RepoSeen) isEvent() {}
@@ -891,7 +891,7 @@ type tuiObserver struct{ obs *tui.ChanObserver }
 func (o tuiObserver) Observe(e Event) {
 	switch e := e.(type) {
 	case RepoSeen:
-		o.obs.Send(tui.RepoSeenMsg{Path: e.Path, HasOpenspec: e.HasOpenspec})
+		o.obs.Send(tui.RepoSeenMsg{Path: e.Path, HasChange: e.HasChange})
 	case ChangeStarted:
 		o.obs.Send(tui.ChangeStartedMsg{Path: e.Path, Change: e.Change})
 	case RetryAttempt:

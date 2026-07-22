@@ -45,16 +45,16 @@ func (p Phase) Glyph() string {
 }
 
 type RepoRow struct {
-	Name        string
-	Change      string
-	Phase       Phase
-	RetryN      int
-	RetryMax    int
-	StartedAt   time.Time
-	LastErr     string
-	HasOpenspec bool
-	LogPath     string
-	Warning     bool
+	Name      string
+	Change    string
+	Phase     Phase
+	RetryN    int
+	RetryMax  int
+	StartedAt time.Time
+	LastErr   string
+	HasChange bool
+	LogPath   string
+	Warning   bool
 }
 
 type Model struct {
@@ -73,7 +73,7 @@ func (m *Model) ensureRow(path string) *RepoRow {
 	if r, ok := m.rows[path]; ok {
 		return r
 	}
-	r := &RepoRow{Name: filepath.Base(path), Phase: PhaseIdle, HasOpenspec: true}
+	r := &RepoRow{Name: filepath.Base(path), Phase: PhaseIdle, HasChange: true}
 	m.rows[path] = r
 	m.order = append(m.order, path)
 	return r
@@ -87,8 +87,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case RepoSeenMsg:
 		r := m.ensureRow(msg.Path)
-		r.HasOpenspec = msg.HasOpenspec
-		if !msg.HasOpenspec {
+		r.HasChange = msg.HasChange
+		if !msg.HasChange {
 			r.Phase = PhaseIdle
 			r.Change = "—"
 		}

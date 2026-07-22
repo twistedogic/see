@@ -22,7 +22,7 @@ func TestViewRendersRepoChangeDoneAndFooter(t *testing.T) {
 	m.width = 120
 	repo := "/tmp/proj"
 	m = driveMessages(m,
-		RepoSeenMsg{Path: repo, HasOpenspec: true},
+		RepoSeenMsg{Path: repo, HasChange: true},
 		ChangeStartedMsg{Path: repo, Change: "task-1"},
 		ChangeDoneMsg{Path: repo, Change: "task-1"},
 	)
@@ -49,7 +49,7 @@ func TestViewHandlesNoSpecRepo(t *testing.T) {
 	m.width = 120
 	repo := "/tmp/proj"
 	m = driveMessages(m,
-		RepoSeenMsg{Path: repo, HasOpenspec: false},
+		RepoSeenMsg{Path: repo, HasChange: false},
 	)
 	view := m.View()
 	if !strings.Contains(view, "idle") {
@@ -76,7 +76,7 @@ func TestViewTruncatesLongNames(t *testing.T) {
 	long := strings.Repeat("a", 50)
 	repo := "/tmp/" + long
 	m = driveMessages(m,
-		RepoSeenMsg{Path: repo, HasOpenspec: true},
+		RepoSeenMsg{Path: repo, HasChange: true},
 		ChangeStartedMsg{Path: repo, Change: "task-1"},
 	)
 	view := m.View()
@@ -101,7 +101,7 @@ func TestUpdateIgnoresUnknownEvents(t *testing.T) {
 	m.width = 120
 	repo := "/tmp/proj"
 	m = driveMessages(m,
-		RepoSeenMsg{Path: repo, HasOpenspec: true},
+		RepoSeenMsg{Path: repo, HasChange: true},
 		ChangeStartedMsg{Path: repo, Change: "task-1"},
 	)
 	beforeView := m.View()
@@ -190,8 +190,8 @@ func TestRowOrderingStableAcrossEvents(t *testing.T) {
 	// should still render alpha before beta because scan order is
 	// the order RepoSeen arrived.
 	m = driveMessages(m,
-		RepoSeenMsg{Path: "/wd/alpha", HasOpenspec: true},
-		RepoSeenMsg{Path: "/wd/beta", HasOpenspec: true},
+		RepoSeenMsg{Path: "/wd/alpha", HasChange: true},
+		RepoSeenMsg{Path: "/wd/beta", HasChange: true},
 		ChangeStartedMsg{Path: "/wd/beta", Change: "c1"},
 		ChangeStartedMsg{Path: "/wd/alpha", Change: "c2"},
 	)
@@ -210,14 +210,14 @@ func TestViewFooterCountsByPhase(t *testing.T) {
 	m := NewModel()
 	m.width = 120
 	m = driveMessages(m,
-		RepoSeenMsg{Path: "/wd/done-repo", HasOpenspec: true},
+		RepoSeenMsg{Path: "/wd/done-repo", HasChange: true},
 		ChangeDoneMsg{Path: "/wd/done-repo", Change: "c1"},
-		RepoSeenMsg{Path: "/wd/working-repo", HasOpenspec: true},
+		RepoSeenMsg{Path: "/wd/working-repo", HasChange: true},
 		ChangeStartedMsg{Path: "/wd/working-repo", Change: "c2"},
-		RepoSeenMsg{Path: "/wd/idle-repo", HasOpenspec: true},
-		RepoSeenMsg{Path: "/wd/failed-repo", HasOpenspec: true},
+		RepoSeenMsg{Path: "/wd/idle-repo", HasChange: true},
+		RepoSeenMsg{Path: "/wd/failed-repo", HasChange: true},
 		ChangeFailedMsg{Path: "/wd/failed-repo", Change: "c3", Err: "boom"},
-		RepoSeenMsg{Path: "/wd/nospec-repo", HasOpenspec: false},
+		RepoSeenMsg{Path: "/wd/nospec-repo", HasChange: false},
 	)
 	view := m.View()
 	// The repo without openspec/ also renders at PhaseIdle, so the
@@ -234,7 +234,7 @@ func TestViewHidesErrColumnBelow100Cols(t *testing.T) {
 	m.width = 90 // between 80 and 100: AGE shows, ERR hides
 	repo := "/tmp/proj"
 	m = driveMessages(m,
-		RepoSeenMsg{Path: repo, HasOpenspec: true},
+		RepoSeenMsg{Path: repo, HasChange: true},
 		ChangeFailedMsg{Path: repo, Change: "c1", Err: "boom"},
 	)
 	view := m.View()
@@ -255,7 +255,7 @@ func TestViewHidesAgeColumnBelow80Cols(t *testing.T) {
 	m.width = 60
 	repo := "/tmp/proj"
 	m = driveMessages(m,
-		RepoSeenMsg{Path: repo, HasOpenspec: true},
+		RepoSeenMsg{Path: repo, HasChange: true},
 		ChangeStartedMsg{Path: repo, Change: "c1"},
 	)
 	view := m.View()
@@ -274,7 +274,7 @@ func TestViewRendersLogPathWhenSet(t *testing.T) {
 	repo := "/tmp/proj"
 	lp := "/tmp/see/task-1--20260714T153022--12345.jsonl"
 	m = driveMessages(m,
-		RepoSeenMsg{Path: repo, HasOpenspec: true},
+		RepoSeenMsg{Path: repo, HasChange: true},
 		ChangeStartedMsg{Path: repo, Change: "task-1"},
 		ChangeDoneMsg{Path: repo, Change: "task-1"},
 		LogPathMsg{Path: lp, Change: "task-1"},
@@ -290,7 +290,7 @@ func TestViewOmitsLogPathWhenUnset(t *testing.T) {
 	m.width = 120
 	repo := "/tmp/proj"
 	m = driveMessages(m,
-		RepoSeenMsg{Path: repo, HasOpenspec: true},
+		RepoSeenMsg{Path: repo, HasChange: true},
 		ChangeStartedMsg{Path: repo, Change: "task-1"},
 		ChangeDoneMsg{Path: repo, Change: "task-1"},
 	)
@@ -303,5 +303,107 @@ func TestViewOmitsLogPathWhenUnset(t *testing.T) {
 	}
 	if strings.Contains(view, ".jsonl") {
 		t.Fatalf("view leaked a log path when none was set:\n%s", view)
+	}
+}
+
+// Regression for add-custom-workflows task 5.3: the TUI CHANGE
+// column must render the normalized custom condition value
+// (e.g. "add-dark-mode"), not its SHA-256 digest. The watcher
+// hashes the change for branch identity but ships the human value
+// on every event; the TUI must not regress to displaying the
+// digest even if a future change touches the model.
+func TestViewRendersCustomChangeNameNotDigest(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	repo := "/tmp/proj"
+	m = driveMessages(m,
+		RepoSeenMsg{Path: repo, HasChange: true},
+		ChangeStartedMsg{Path: repo, Change: "add-dark-mode"},
+	)
+	view := m.View()
+	if !strings.Contains(view, "add-dark-mode") {
+		t.Fatalf("view missing custom change value:\n%s", view)
+	}
+	// Sanity: the digest is 64 hex characters; ensure no 64-hex
+	// substring appears in the change column. The repo column
+	// holds "proj" plus the header labels — a digest collision
+	// there is impossible — so a flat substring scan is enough.
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, "add-dark-mode") {
+			continue
+		}
+		for i := 0; i+64 <= len(line); i++ {
+			chunk := line[i : i+64]
+			allHex := true
+			for _, r := range chunk {
+				if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+					allHex = false
+					break
+				}
+			}
+			if allHex {
+				t.Fatalf("TUI leaked a digest substring %q in row:\n%s", chunk, view)
+			}
+		}
+	}
+}
+
+// Regression for add-custom-workflows task 5.3: a custom resolver
+// that exits 1 (no change) must render the same idle row as the
+// OpenSpec fallback. The CHANGE column shows the em-dash
+// placeholder; PHASE is idle; the footer counts the row in the
+// idle bucket.
+func TestViewRendersCustomIdleRowWithEmDash(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	repo := "/tmp/proj"
+	m = driveMessages(m,
+		RepoSeenMsg{Path: repo, HasChange: false},
+	)
+	view := m.View()
+	lines := strings.Split(view, "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected at least 2 lines, got %d:\n%s", len(lines), view)
+	}
+	row := lines[1]
+	if !strings.Contains(row, "—") {
+		t.Fatalf("custom-idle row missing em-dash placeholder:\n%s", row)
+	}
+	if !strings.Contains(view, "idle") {
+		t.Fatalf("view missing idle phase for custom-idle row:\n%s", view)
+	}
+	if !strings.Contains(view, "1 idle") {
+		t.Fatalf("view missing idle counter:\n%s", view)
+	}
+}
+
+// Regression for add-custom-workflows task 5.3: phase transitions
+// and warning semantics must survive the HasOpenspec→HasChange
+// rename. A Warning followed by ChangeStarted must still toggle the
+// ⚠ glyph off; PHASE must still update from done to working; the
+// row's HasChange rename must not leak into the rendered view.
+func TestViewPhaseAndWarningUnchangedAcrossRename(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	repo := "/tmp/proj"
+	m = driveMessages(m,
+		RepoSeenMsg{Path: repo, HasChange: true},
+		ChangeStartedMsg{Path: repo, Change: "task-1"},
+		ChangeDoneMsg{Path: repo, Change: "task-1"},
+		WarningMsg{Path: repo, Change: "task-1", Msg: "rollback hiccup"},
+		ChangeStartedMsg{Path: repo, Change: "task-1"},
+	)
+	view := m.View()
+	if !strings.Contains(view, "working") {
+		t.Fatalf("view missing working phase after re-start:\n%s", view)
+	}
+	if strings.Contains(view, "⚠") {
+		t.Fatalf("view still shows warning glyph after ChangeStarted cleared it:\n%s", view)
+	}
+	if strings.Contains(view, "warning") {
+		t.Fatalf("view footer still counts a warning after ChangeStarted cleared it:\n%s", view)
+	}
+	if strings.Contains(view, "HasChange") || strings.Contains(view, "HasOpenspec") {
+		t.Fatalf("view leaked a struct field name:\n%s", view)
 	}
 }

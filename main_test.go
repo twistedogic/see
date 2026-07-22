@@ -330,7 +330,7 @@ func TestEventLoggerWritesJSONL(t *testing.T) {
 	}
 	defer events.Close()
 
-	events.Observe(RepoSeen{Path: "/some/repo", HasOpenspec: true})
+	events.Observe(RepoSeen{Path: "/some/repo", HasChange: true})
 	events.Observe(ChangeStarted{Path: "/some/repo", Change: "task-1"})
 	events.Observe(Warning{Path: "/some/repo", Change: "task-1", Msg: "rollback hiccup"})
 	events.Observe(InfraError{Where: "watcher", Err: "boom"})
@@ -361,8 +361,8 @@ func TestEventLoggerWritesJSONL(t *testing.T) {
 	if first.Event["Path"] != "/some/repo" {
 		t.Fatalf("line[0] event.Path = %v, want /some/repo", first.Event["Path"])
 	}
-	if first.Event["HasOpenspec"] != true {
-		t.Fatalf("line[0] event.HasOpenspec = %v, want true", first.Event["HasOpenspec"])
+	if first.Event["HasChange"] != true {
+		t.Fatalf("line[0] event.HasChange = %v, want true", first.Event["HasChange"])
 	}
 	if err := json.Unmarshal([]byte(lines[3]), &last); err != nil {
 		t.Fatalf("line[3] is not valid JSON: %v", err)
@@ -389,7 +389,7 @@ func TestEventLoggerMirrorsEncodedEvents(t *testing.T) {
 	var buf bytes.Buffer
 	events.SetMirror(&buf)
 
-	events.Observe(RepoSeen{Path: "/some/repo", HasOpenspec: true})
+	events.Observe(RepoSeen{Path: "/some/repo", HasChange: true})
 	events.Observe(ChangeStarted{Path: "/some/repo", Change: "task-1"})
 
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
@@ -402,7 +402,7 @@ func TestEventLoggerMirrorsEncodedEvents(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
 		t.Fatalf("mirror line[0] is not valid JSON: %v", err)
 	}
-	if first.Event["Path"] != "/some/repo" || first.Event["HasOpenspec"] != true {
+	if first.Event["Path"] != "/some/repo" || first.Event["HasChange"] != true {
 		t.Fatalf("mirror line[0] event = %v, want RepoSeen /some/repo", first.Event)
 	}
 	if err := json.Unmarshal([]byte(lines[1]), &second); err != nil {
@@ -410,6 +410,52 @@ func TestEventLoggerMirrorsEncodedEvents(t *testing.T) {
 	}
 	if second.Event["Change"] != "task-1" {
 		t.Fatalf("mirror line[1] event = %v, want ChangeStarted task-1", second.Event)
+	}
+}
+
+// Regression: the JSONL payload must use the workflow-neutral field
+// name HasChange. The legacy HasOpenspec field is a workflow-specific
+// rename and must not appear in serialized events. Custom and
+// OpenSpec compatibility paths both go through RepoSeen and both
+// must emit only HasChange; downstream consumers read the JSONL
+// expecting one canonical name.
+func TestRepoSeenPayloadUsesHasChangeNotHasOpenspec(t *testing.T) {
+	dir := t.TempDir()
+	events, err := openEventLogger(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer events.Close()
+
+	events.Observe(RepoSeen{Path: "/some/repo", HasChange: true})
+	events.Observe(RepoSeen{Path: "/some/repo", HasChange: false})
+
+	files, err := filepath.Glob(filepath.Join(dir, "see--*.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2:\n%s", len(lines), body)
+	}
+	for i, line := range lines {
+		var entry struct {
+			Ts    string         `json:"ts"`
+			Event map[string]any `json:"event"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("line[%d] is not valid JSON: %v\n%s", i, err, line)
+		}
+		if _, ok := entry.Event["HasOpenspec"]; ok {
+			t.Fatalf("line[%d] event still carries HasOpenspec: %v", i, entry.Event)
+		}
+		if _, ok := entry.Event["HasChange"]; !ok {
+			t.Fatalf("line[%d] event missing HasChange: %v", i, entry.Event)
+		}
 	}
 }
 
@@ -429,7 +475,7 @@ func TestEventLoggerStampsObservedAtOnEachEntry(t *testing.T) {
 	defer events.Close()
 
 	before := time.Now().UTC().Add(-time.Second)
-	events.Observe(RepoSeen{Path: "/some/repo", HasOpenspec: true})
+	events.Observe(RepoSeen{Path: "/some/repo", HasChange: true})
 	events.Observe(ChangeStarted{Path: "/some/repo", Change: "task-1"})
 	after := time.Now().UTC().Add(time.Second)
 
@@ -672,13 +718,13 @@ func TestRunOnceEmitsEventSequenceOnSuccess(t *testing.T) {
 			t.Fatalf("event[%d] = %s, want %s (full sequence: %v)", i, got[i], name, got)
 		}
 	}
-	// Confirm the RepoSeen payload reports HasOpenspec=true.
+	// Confirm the RepoSeen payload reports HasChange=true.
 	rs, ok := obs.events[0].(RepoSeen)
 	if !ok {
 		t.Fatalf("first event is not RepoSeen: %T", obs.events[0])
 	}
-	if !rs.HasOpenspec {
-		t.Fatalf("RepoSeen.HasOpenspec = false, want true")
+	if !rs.HasChange {
+		t.Fatalf("RepoSeen.HasChange = false, want true")
 	}
 	if rs.Path != repo {
 		t.Fatalf("RepoSeen.Path = %q, want %q", rs.Path, repo)
@@ -1261,7 +1307,7 @@ func TestObserverReceivesChangeFailedAfterRetriesExhausted(t *testing.T) {
 }
 
 // Regression: a git repo with no openspec/ must still emit RepoSeen
-// (with HasOpenspec=false) and nothing else.
+// (with HasChange=false) and nothing else.
 func TestRepoSeenFiresForRepoWithoutOpenspec(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "proj")
@@ -1292,8 +1338,8 @@ func TestRepoSeenFiresForRepoWithoutOpenspec(t *testing.T) {
 		t.Fatalf("events = %v, want exactly [RepoSeen]", got)
 	}
 	rs := obs.events[0].(RepoSeen)
-	if rs.HasOpenspec {
-		t.Fatalf("RepoSeen.HasOpenspec = true, want false")
+	if rs.HasChange {
+		t.Fatalf("RepoSeen.HasChange = true, want false")
 	}
 	if rs.Path != repo {
 		t.Fatalf("RepoSeen.Path = %q, want %q", rs.Path, repo)
@@ -2470,8 +2516,70 @@ func TestCustomConditionExitOneLeavesRepoIdle(t *testing.T) {
 		t.Fatalf("events = %v, want exactly RepoSeen", obs.eventTypes())
 	}
 	rs, ok := obs.events[0].(RepoSeen)
-	if !ok || rs.HasOpenspec {
+	if !ok || rs.HasChange {
 		t.Fatalf("event = %+v, want RepoSeen with no change", obs.events[0])
+	}
+}
+
+// Regression for add-custom-workflows task 5.1: the watcher must
+// report HasChange=true on RepoSeen when a custom condition
+// resolves work. The custom mode mirrors the OpenSpec fallback's
+// availability signal so downstream consumers can switch on one
+// field name regardless of resolver.
+func TestCustomConditionReportsHasChangeOnWork(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	agent := &fakeAgent{}
+	obs := &recordingObserver{}
+	w := Watcher{agent: agent, Condition: condition, RetryCount: 1, Once: true, observer: obs}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want nil for resolved custom change", err)
+	}
+	if len(obs.events) < 1 {
+		t.Fatalf("events = %v, want at least RepoSeen", obs.eventTypes())
+	}
+	rs, ok := obs.events[0].(RepoSeen)
+	if !ok {
+		t.Fatalf("first event = %T, want RepoSeen", obs.events[0])
+	}
+	if !rs.HasChange {
+		t.Fatalf("RepoSeen.HasChange = false, want true when custom condition resolves work")
+	}
+}
+
+// Regression for add-custom-workflows task 5.1: the watcher must
+// report HasChange=false on RepoSeen when a custom condition fails
+// on every retry. The condition error must surface on a separate
+// ChangeFailed event so the operator can distinguish idle from
+// broken.
+func TestCustomConditionFailureReportsHasChangeFalseWithFailedEvent(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	condition := platformCondition("exit 2", "exit /b 2")
+	agent := &fakeAgent{}
+	obs := &recordingObserver{}
+	w := Watcher{agent: agent, Condition: condition, RetryCount: 1, Once: true, observer: obs}
+	err := w.Watch(t.Context(), []string{repo})
+	if err == nil {
+		t.Fatalf("Watch returned nil, want error from failing custom condition")
+	}
+	if len(agent.runs) != 0 {
+		t.Fatalf("agent runs = %d, want 0 when condition errors", len(agent.runs))
+	}
+	rs, ok := obs.events[0].(RepoSeen)
+	if !ok {
+		t.Fatalf("first event = %T, want RepoSeen", obs.events[0])
+	}
+	if rs.HasChange {
+		t.Fatalf("RepoSeen.HasChange = true, want false when condition fails")
+	}
+	var sawFailed bool
+	for _, e := range obs.events {
+		if _, ok := e.(ChangeFailed); ok {
+			sawFailed = true
+		}
+	}
+	if !sawFailed {
+		t.Fatalf("events = %v, want a ChangeFailed alongside RepoSeen for condition error", obs.eventTypes())
 	}
 }
 

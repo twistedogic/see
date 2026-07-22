@@ -95,7 +95,7 @@ func (m *Model) renderRow(r *RepoRow, showAge bool) string {
 	// Repos without an openspec/ get an em-dash change column so the
 	// grid stays readable without a dedicated phase.
 	change := r.Change
-	if !r.HasOpenspec {
+	if !r.HasChange {
 		change = "—"
 	}
 	change = truncate(change, 30)
