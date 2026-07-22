@@ -698,7 +698,7 @@ func main() {
 		retry      = flag.Int("retry", 3, "retries per repo on failure")
 		modeFlag   = flag.String("mode", "tui", "output mode (default \"tui\"); one of: tui, log")
 		once       = flag.Bool("once", false, "run one scan and exit")
-		configFlag = flag.String("config", "", "path to config.yaml (default: $XDG_CONFIG_HOME/see/config.yaml); pass \"-\" to skip")
+		configFlag = flag.String("config", "", "path to config.yaml (default: ~/.config/see/config.yaml); pass \"-\" to skip")
 		promptFlag = flag.String("prompt", "", "override the agent prompt template; {change} is replaced with the active change name")
 		interval   = flag.Duration("interval", DefaultPollInterval, "delay between completed scans in continuous mode; 0 disables the delay, negative values are rejected")
 		watchFlag  multiFlag

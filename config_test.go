@@ -13,7 +13,7 @@ import (
 // writeConfigYAML drops a config.yaml at <base>/see/config.yaml with the
 // given body and returns the absolute path. The helper mirrors the
 // legacy writeWatchConfig shape so the file location matches what
-// watchConfigPath resolves to in tests that pin userConfigDir.
+// configPath resolves to ~/.config/see/config.yaml.
 func writeConfigYAML(t *testing.T, base, body string) string {
 	t.Helper()
 	seeDir := filepath.Join(base, "see")
@@ -174,15 +174,41 @@ func TestLoadConfigIgnoresLegacyWatchesFile(t *testing.T) {
 
 // --- loadStartupConfig / --config: task 3.x -------------------------------
 
+func TestConfigPathUsesHomeConfigDir(t *testing.T) {
+	home := t.TempDir()
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { _ = os.Setenv("HOME", origHome) })
+	if err := os.Setenv("HOME", home); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := configPath()
+	if err != nil {
+		t.Fatalf("configPath() error = %v", err)
+	}
+	want := filepath.Join(home, ".config", "see", "config.yaml")
+	if got != want {
+		t.Fatalf("configPath() = %q, want %q", got, want)
+	}
+}
+
 // TestLoadStartupConfigUnsetLoadsDefaultPath proves that an empty
 // configFlag (the common case: no --config passed) loads the file at
 // the resolved default config path.
 func TestLoadStartupConfigUnsetLoadsDefaultPath(t *testing.T) {
 	base := t.TempDir()
-	writeConfigYAML(t, base, "watches:\n  - /repos/default\nprompt: from default\n")
-	orig := userConfigDir
-	t.Cleanup(func() { userConfigDir = orig })
-	userConfigDir = func() (string, error) { return base, nil }
+	path := filepath.Join(base, ".config", "see", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("watches:\n  - /repos/default\nprompt: from default\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { _ = os.Setenv("HOME", origHome) })
+	if err := os.Setenv("HOME", base); err != nil {
+		t.Fatal(err)
+	}
 
 	cfg, err := loadStartupConfig("")
 	if err != nil {
@@ -209,9 +235,11 @@ func TestLoadStartupConfigExplicitPath(t *testing.T) {
 	if err := os.WriteFile(explicit, []byte("watches:\n  - /repos/explicit\nprompt: from explicit\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	orig := userConfigDir
-	t.Cleanup(func() { userConfigDir = orig })
-	userConfigDir = func() (string, error) { return base, nil }
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { _ = os.Setenv("HOME", origHome) })
+	if err := os.Setenv("HOME", base); err != nil {
+		t.Fatal(err)
+	}
 
 	cfg, err := loadStartupConfig(explicit)
 	if err != nil {
@@ -231,9 +259,11 @@ func TestLoadStartupConfigExplicitPath(t *testing.T) {
 func TestLoadStartupConfigSkipSentinel(t *testing.T) {
 	base := t.TempDir()
 	writeConfigYAML(t, base, "not: [valid\n")
-	orig := userConfigDir
-	t.Cleanup(func() { userConfigDir = orig })
-	userConfigDir = func() (string, error) { return base, nil }
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { _ = os.Setenv("HOME", origHome) })
+	if err := os.Setenv("HOME", base); err != nil {
+		t.Fatal(err)
+	}
 
 	cfg, err := loadStartupConfig("-")
 	if err != nil {
@@ -444,15 +474,17 @@ func TestSelectPromptTemplateBothBlankReturnsEmpty(t *testing.T) {
 
 // --- ensureDefaultConfig / bootstrap: add-default-config-bootstrap -----
 
-// readConfigPath resolves the default config path with userConfigDir
+// readConfigPath resolves the default config path
 // pinned to base. Tests in this section that need to predict the
 // bootstrap target use it instead of inlining configPath so the
 // helper is the single source of truth for the resolution.
 func readConfigPath(t *testing.T, base string) string {
 	t.Helper()
-	orig := userConfigDir
-	t.Cleanup(func() { userConfigDir = orig })
-	userConfigDir = func() (string, error) { return base, nil }
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { _ = os.Setenv("HOME", origHome) })
+	if err := os.Setenv("HOME", base); err != nil {
+		t.Fatal(err)
+	}
 	path, err := configPath()
 	if err != nil {
 		t.Fatalf("configPath: %v", err)
@@ -604,11 +636,13 @@ func TestLoadStartupConfigSkipSentinelDoesNotBootstrap(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(seeDir, 0o755) })
 
-	// Point userConfigDir at base, then verify loadStartupConfig("-")
+	// Verify loadStartupConfig("-")
 	// does not touch seeDir.
-	orig := userConfigDir
-	t.Cleanup(func() { userConfigDir = orig })
-	userConfigDir = func() (string, error) { return base, nil }
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { _ = os.Setenv("HOME", origHome) })
+	if err := os.Setenv("HOME", base); err != nil {
+		t.Fatal(err)
+	}
 
 	cfg, err := loadStartupConfig("-")
 	if err != nil {
@@ -638,10 +672,12 @@ func TestLoadStartupConfigExplicitPathDoesNotBootstrap(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(seeDir, 0o755) })
 
-	// Pin userConfigDir so configPath() would resolve into base/see.
-	orig := userConfigDir
-	t.Cleanup(func() { userConfigDir = orig })
-	userConfigDir = func() (string, error) { return base, nil }
+	// The default path is independent of this explicit config path.
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { _ = os.Setenv("HOME", origHome) })
+	if err := os.Setenv("HOME", base); err != nil {
+		t.Fatal(err)
+	}
 
 	// Explicit path is in a different temp dir (would be created if
 	// loaded, but loadConfig returns zero-value for missing files).
@@ -670,15 +706,20 @@ func TestLoadStartupConfigExplicitPathDoesNotBootstrap(t *testing.T) {
 func TestLoadStartupConfigBootstrapFailureNonFatal(t *testing.T) {
 	skipIfRoot(t)
 	base := t.TempDir()
-	seeDir := filepath.Join(base, "see")
+	configDir := filepath.Join(base, ".config")
+	if err := os.Mkdir(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seeDir := filepath.Join(configDir, "see")
 	if err := os.Mkdir(seeDir, 0o555); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(seeDir, 0o755) })
-
-	orig := userConfigDir
-	t.Cleanup(func() { userConfigDir = orig })
-	userConfigDir = func() (string, error) { return base, nil }
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { _ = os.Setenv("HOME", origHome) })
+	if err := os.Setenv("HOME", base); err != nil {
+		t.Fatal(err)
+	}
 
 	// Capture stderr via the indirection that loadStartupConfig
 	// writes to.
@@ -699,7 +740,7 @@ func TestLoadStartupConfigBootstrapFailureNonFatal(t *testing.T) {
 	if line == "" {
 		t.Fatal("expected a stderr line naming the bootstrap failure, got none")
 	}
-	if !strings.Contains(line, filepath.Join(base, "see", "config.yaml")) {
+	if !strings.Contains(line, filepath.Join(base, ".config", "see", "config.yaml")) {
 		t.Fatalf("stderr line %q does not name the target path", line)
 	}
 	if !strings.Contains(line, "permission denied") {

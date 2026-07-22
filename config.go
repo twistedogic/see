@@ -33,23 +33,13 @@ var defaultConfigTemplate string
 // os.Stderr (which is shared with other goroutines and processes).
 var stderrWriter io.Writer = os.Stderr
 
-// userConfigDir is the lookup used by configPath. Indirected through
-// a var so tests can pin the config dir without juggling environment
-// variables cross-platform (os.UserConfigDir ignores XDG_CONFIG_HOME
-// on macOS, so setting XDG_CONFIG_HOME alone is not enough to
-// redirect the config file under test).
-var userConfigDir = os.UserConfigDir
-
 // configPath returns the absolute path to the user's config.yaml.
-// os.UserConfigDir() honours $XDG_CONFIG_HOME on Linux/macOS and
-// falls back to ~/.config; on Windows it honours %AppData% —
-// sufficient for the v1 surface (no per-OS overrides needed).
 func configPath() (string, error) {
-	base, err := userConfigDir()
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("see: resolve config dir: %w", err)
+		return "", fmt.Errorf("see: resolve home dir: %w", err)
 	}
-	return filepath.Join(base, "see", "config.yaml"), nil
+	return filepath.Join(home, ".config", "see", "config.yaml"), nil
 }
 
 // expandTilde replaces a leading "~" or "~/" with the user's home
