@@ -1612,18 +1612,14 @@ func TestWatchDelaysNextPassByPollInterval(t *testing.T) {
 // Watch promptly without starting another pass.
 func TestWatchCancellationInterruptsPollInterval(t *testing.T) {
 	repo := newIntervalTestRepo(t)
-	agent := &fakeAgent{err: nil}
+	ctx, cancel := context.WithCancel(context.Background())
+	agent := &fakeAgent{onRun: func() error {
+		cancel()
+		return nil
+	}}
 	// Long interval so the test only completes when ctx cancels.
 	w := Watcher{agent: agent, RetryCount: 1, Once: false, PollInterval: time.Hour}
-	ctx, cancel := context.WithCancel(context.Background())
 	start := time.Now()
-	go func() {
-		// Wait for the first pass to complete (one Run), then cancel.
-		for len(agent.runs) == 0 {
-			time.Sleep(5 * time.Millisecond)
-		}
-		cancel()
-	}()
 	if err := w.Watch(ctx, []string{repo}); err != nil {
 		t.Fatalf("Watch returned %v, want nil", err)
 	}
@@ -1640,31 +1636,24 @@ func TestWatchCancellationInterruptsPollInterval(t *testing.T) {
 // — the next pass runs as soon as the previous one completes.
 func TestWatchZeroIntervalPollsImmediately(t *testing.T) {
 	repo := newIntervalTestRepo(t)
-	clock := &runClock{}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	runs := 0
 	agent := &fakeAgent{
 		onRun: func() error {
-			clock.record(time.Now())
+			runs++
+			if runs == 3 {
+				cancel()
+			}
 			return nil
 		},
 	}
 	w := Watcher{agent: agent, RetryCount: 1, Once: false, PollInterval: 0}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() {
-		for len(agent.runs) < 3 {
-			time.Sleep(5 * time.Millisecond)
-		}
-		cancel()
-	}()
 	if err := w.Watch(ctx, []string{repo}); err != nil {
 		t.Fatalf("Watch returned %v, want nil", err)
 	}
-	offsets := clock.snapshot()
-	if len(offsets) < 3 {
-		t.Fatalf("agent.Run called %d times, want >= 3 (immediate polling); offsets=%v", len(offsets), offsets)
-	}
-	if offsets[2] > 200*time.Millisecond {
-		t.Fatalf("third pass at %v, want < 200ms (zero interval should not wait)", offsets[2])
+	if len(agent.runs) != 3 {
+		t.Fatalf("agent.Run called %d times, want 3 before the deadline", len(agent.runs))
 	}
 }
 

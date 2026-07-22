@@ -36,4 +36,4 @@
 
 - [x] 6.1 Update `AGENTS.md` and user-facing configuration documentation with the custom condition shell contract, stdout-to-`{change}` behavior, commit templating, persistent branch ownership, level-triggered polling, OpenSpec compatibility fallback, and the JSONL field migration from `HasOpenspec` to `HasChange`.
 - [x] 6.2 Run `gofmt` on changed Go files and `go test -timeout 30s ./...`, fixing any regressions.
-- [ ] 6.3 Run the race-enabled test suite with a bounded timeout and validate the OpenSpec change artifacts.
+- [x] 6.3 Run the race-enabled test suite with a bounded timeout and validate the OpenSpec change artifacts.

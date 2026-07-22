@@ -256,33 +256,13 @@ func ensureCustomLane(path, change string) (created bool, err error) {
 }
 
 // hasUntrackedOrModified reports whether path has tracked or untracked
-// changes in its working tree, ignoring files matched by .gitignore.
-// `git status --porcelain` includes ignored entries in the "??" form
-// when `--ignored` is passed; we strip them here so a watched repo
-// with a populated .gitignore (caches, build output) still qualifies
-// as a clean tree for the custom lane check. Tracked-but-ignored
-// files (`!!` form) are likewise not dirtiness. A status failure is
-// surfaced as (true, err) so the dirty-path error is preferred over a
-// silent skip — better to over-reject than to mutate a repo whose
-// state we cannot read.
+// changes; git status excludes ignored files unless explicitly requested.
 func hasUntrackedOrModified(path string) (bool, error) {
-	out, err := exec.Command("git", "-C", path, "status", "--porcelain", "--ignored").CombinedOutput()
+	out, err := exec.Command("git", "-C", path, "status", "--porcelain").CombinedOutput()
 	if err != nil {
 		return true, fmt.Errorf("see: git status on %s: %w\n%s", path, err, out)
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		if line == "" {
-			continue
-		}
-		// "??" untracked, "!!" ignored, " M" / "M " / etc. tracked
-		// modifications, "A " / "AM" staged. Anything not in the
-		// ignored-only set is dirtiness.
-		if strings.HasPrefix(line, "!!") {
-			continue
-		}
-		return true, nil
-	}
-	return false, nil
+	return len(out) > 0, nil
 }
 
 // rollbackCustomLane restores the clean state captured immediately before a
