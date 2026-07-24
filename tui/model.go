@@ -45,24 +45,28 @@ func (p Phase) Glyph() string {
 }
 
 type RepoRow struct {
-	Name      string
-	Change    string
-	Phase     Phase
-	RetryN    int
-	RetryMax  int
-	StartedAt time.Time
-	LastErr   string
-	HasChange bool
-	LogPath   string
-	Warning   bool
+	Name        string
+	Change      string
+	Phase       Phase
+	RetryN      int
+	RetryMax    int
+	StartedAt   time.Time
+	LastErr     string
+	HasChange   bool
+	LogPath     string
+	Warning     bool
+	DiscoverSeq uint64 // assigned on first RepoSeen; stable fallback order
+	ActivitySeq uint64 // advanced on meaningful lifecycle events
 }
 
 type Model struct {
-	rows     map[string]*RepoRow // keyed by repo path
-	order    []string            // scan order, for stable rendering
-	width    int
-	height   int
-	infraErr string
+	rows        map[string]*RepoRow // keyed by repo path
+	order       []string            // scan order, for stable rendering
+	width       int
+	height      int
+	infraErr    string
+	discoverSeq uint64 // monotonic, assigned to a row on first RepoSeen
+	activitySeq uint64 // monotonic, advanced on each meaningful lifecycle event
 }
 
 func NewModel() *Model {
@@ -73,10 +77,24 @@ func (m *Model) ensureRow(path string) *RepoRow {
 	if r, ok := m.rows[path]; ok {
 		return r
 	}
-	r := &RepoRow{Name: filepath.Base(path), Phase: PhaseIdle, HasChange: true}
+	m.discoverSeq++
+	r := &RepoRow{
+		Name:        filepath.Base(path),
+		Phase:       PhaseIdle,
+		HasChange:   true,
+		DiscoverSeq: m.discoverSeq,
+	}
 	m.rows[path] = r
 	m.order = append(m.order, path)
 	return r
+}
+
+// markActivity advances the row's activity sequence. Called for
+// every lifecycle event except repeated RepoSeen, so a row that
+// only ever receives heartbeats never climbs the activity order.
+func (m *Model) markActivity(r *RepoRow) {
+	m.activitySeq++
+	r.ActivitySeq = m.activitySeq
 }
 
 func (m *Model) Init() tea.Cmd {
@@ -89,6 +107,10 @@ func (m *Model) Init() tea.Cmd {
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case RepoSeenMsg:
+		// Repeated RepoSeen for an existing row is a scan heartbeat
+		// and must not advance the activity order. ensureRow only
+		// assigns a DiscoverSeq on first observation; a heartbeat
+		// leaves it untouched.
 		r := m.ensureRow(msg.Path)
 		r.HasChange = msg.HasChange
 		if !msg.HasChange {
@@ -97,6 +119,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case ChangeStartedMsg:
 		r := m.ensureRow(msg.Path)
+		m.markActivity(r)
 		r.Phase = PhaseWorking
 		r.Change = msg.Change
 		r.StartedAt = time.Now()
@@ -106,6 +129,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		r.Warning = false
 	case RetryAttemptMsg:
 		r := m.ensureRow(msg.Path)
+		m.markActivity(r)
 		r.Phase = PhaseWorking
 		r.Change = msg.Change
 		r.RetryN = msg.N
@@ -113,6 +137,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		r.LastErr = msg.Err
 	case ChangeDoneMsg:
 		r := m.ensureRow(msg.Path)
+		m.markActivity(r)
 		r.Phase = PhaseDone
 		r.Change = msg.Change
 		r.LastErr = ""
@@ -120,6 +145,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		r.RetryMax = 0
 	case ChangeFailedMsg:
 		r := m.ensureRow(msg.Path)
+		m.markActivity(r)
 		r.Phase = PhaseFailed
 		r.Change = msg.Change
 		r.LastErr = msg.Err
@@ -131,6 +157,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case WarningMsg:
 		r := m.ensureRow(msg.Path)
+		m.markActivity(r)
 		r.Warning = true
 	case InfraErrorMsg:
 		m.infraErr = msg.Err

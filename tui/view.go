@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -32,28 +33,112 @@ func truncate(s string, n int) string {
 	return string(rs[:n-1]) + "…"
 }
 
+// viewportCap is the upper bound on rendered repository entries.
+// Short terminals may render fewer; we never render more.
+const viewportCap = 10
+
+// prioritizedRows returns at most viewportCap rows, ranked by
+// attention priority then by recent activity then by stable
+// discovery order. All retained rows remain in m.rows regardless
+// of the result.
+func (m *Model) prioritizedRows() []*RepoRow {
+	all := make([]*RepoRow, 0, len(m.order))
+	for _, p := range m.order {
+		all = append(all, m.rows[p])
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		return rowLess(all[i], all[j])
+	})
+	if len(all) > viewportCap {
+		all = all[:viewportCap]
+	}
+	return all
+}
+
+// fitToHeight shrinks the prioritized slice to the number of
+// rows that fit in the available height. A row with a log-path
+// continuation consumes two physical lines and is kept as a unit
+// (or dropped entirely, never split).
+func fitToHeight(rows []*RepoRow, avail int) []*RepoRow {
+	if avail <= 0 {
+		return nil
+	}
+	out := make([]*RepoRow, 0, len(rows))
+	budget := avail
+	for _, r := range rows {
+		rowLines := 1
+		if r.LogPath != "" {
+			rowLines = 2
+		}
+		if budget < rowLines {
+			break
+		}
+		out = append(out, r)
+		budget -= rowLines
+	}
+	return out
+}
+
+func rowLess(a, b *RepoRow) bool {
+	pa, pb := priorityClass(a), priorityClass(b)
+	if pa != pb {
+		return pa < pb // lower class index wins
+	}
+	if a.ActivitySeq != b.ActivitySeq {
+		return a.ActivitySeq > b.ActivitySeq // more recent activity first
+	}
+	return a.DiscoverSeq < b.DiscoverSeq // stable: earlier discovery first
+}
+
+func priorityClass(r *RepoRow) int {
+	switch {
+	case r.Phase == PhaseWorking:
+		return 0
+	case r.Phase == PhaseFailed:
+		return 1
+	case r.Warning:
+		return 2
+	default:
+		return 3
+	}
+}
+
 func (m *Model) View() string {
 	// Column visibility by terminal width: at >=80 cols show AGE,
 	// below that REPO/CHANGE/PHASE/RETRY only.
 	showAge := m.width >= 80
 
+	// Fixed lines: summary, header, footer, optional infrastructure
+	// error. Rows fill whatever remains, capped at viewportCap.
+	fixedLines := 3
+	if m.infraErr != "" {
+		fixedLines++
+	}
+	avail := m.height - fixedLines
+	if m.height == 0 {
+		// Pre-WindowSizeMsg: render up to the cap so the first
+		// paint shows real content.
+		avail = viewportCap
+	}
+	visible := fitToHeight(m.prioritizedRows(), avail)
+	summary := m.renderSummary(len(visible))
+
 	header := m.renderHeader(showAge)
-	rows := make([]string, 0, len(m.order))
-	for _, p := range m.order {
-		rows = append(rows, m.renderRow(m.rows[p], showAge))
+	body := make([]string, 0, len(visible))
+	for _, r := range visible {
+		body = append(body, m.renderRow(r, showAge))
 	}
 
-	body := strings.Join(rows, "\n")
-	parts := []string{header}
-	if body == "" {
+	parts := []string{summary, header}
+	if len(body) == 0 {
 		parts = append(parts, "(no repos scanned yet)")
 	} else {
-		parts = append(parts, body)
+		parts = append(parts, strings.Join(body, "\n"))
 	}
 	if m.infraErr != "" {
 		parts = append(parts, "! "+m.infraErr)
 	}
-	parts = append(parts, m.renderFooter())
+	parts = append(parts, "[q] quit")
 	return strings.Join(parts, "\n")
 }
 
@@ -130,10 +215,12 @@ func phaseString(r *RepoRow) string {
 	return "?"
 }
 
-func (m *Model) renderFooter() string {
-	var done, working, idle, failed, warnings int
+func (m *Model) renderSummary(visible int) string {
+	var total, done, working, idle, failed, warnings int
 	for _, p := range m.order {
-		switch m.rows[p].Phase {
+		r := m.rows[p]
+		total++
+		switch r.Phase {
 		case PhaseDone:
 			done++
 		case PhaseWorking:
@@ -143,29 +230,26 @@ func (m *Model) renderFooter() string {
 		case PhaseFailed:
 			failed++
 		}
-		if m.rows[p].Warning {
+		if r.Warning {
 			warnings++
 		}
 	}
-	parts := []string{}
-	if done > 0 {
-		parts = append(parts, fmt.Sprintf("%d done", done))
+	// At narrow widths, hide zero-count buckets and the per-phase
+	// breakdown to keep the summary on one line. The total and
+	// visible counters are always shown.
+	compact := m.width > 0 && m.width < 80
+	parts := []string{fmt.Sprintf("%d total", total)}
+	add := func(label string, n int) {
+		if compact && n == 0 {
+			return
+		}
+		parts = append(parts, fmt.Sprintf("%d %s", n, label))
 	}
-	if working > 0 {
-		parts = append(parts, fmt.Sprintf("%d working", working))
-	}
-	if idle > 0 {
-		parts = append(parts, fmt.Sprintf("%d idle", idle))
-	}
-	if failed > 0 {
-		parts = append(parts, fmt.Sprintf("%d failed", failed))
-	}
-	if warnings > 0 {
-		parts = append(parts, fmt.Sprintf("%d warning", warnings))
-	}
-	summary := strings.Join(parts, " · ")
-	if summary == "" {
-		summary = "no repos"
-	}
-	return summary + "    [q] quit"
+	add("working", working)
+	add("done", done)
+	add("idle", idle)
+	add("failed", failed)
+	add("warning", warnings)
+	parts = append(parts, fmt.Sprintf("%d/%d visible", visible, total))
+	return strings.Join(parts, "  ")
 }

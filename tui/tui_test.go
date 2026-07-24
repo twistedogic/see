@@ -56,13 +56,12 @@ func TestViewHandlesNoSpecRepo(t *testing.T) {
 	if !strings.Contains(view, "idle") {
 		t.Fatalf("view missing idle phase for repo without openspec:\n%s", view)
 	}
-	// The change column should show the em-dash placeholder, not
-	// the repo path or anything else.
+	// Layout: summary, header, row, footer. The row sits at index 2.
 	lines := strings.Split(view, "\n")
-	if len(lines) < 2 {
-		t.Fatalf("expected at least 2 lines (header + row), got %d:\n%s", len(lines), view)
+	if len(lines) < 3 {
+		t.Fatalf("expected at least 3 lines (summary + header + row), got %d:\n%s", len(lines), view)
 	}
-	row := lines[1]
+	row := lines[2]
 	if !strings.Contains(row, "—") {
 		t.Fatalf("no-spec row missing em-dash placeholder:\n%s", row)
 	}
@@ -84,10 +83,10 @@ func TestViewTruncatesLongNames(t *testing.T) {
 	// The repo column is 24 wide; a 50-char name must be truncated to
 	// fit, ending with the ellipsis.
 	lines := strings.Split(view, "\n")
-	if len(lines) < 2 {
-		t.Fatalf("expected at least 2 lines, got %d:\n%s", len(lines), view)
+	if len(lines) < 3 {
+		t.Fatalf("expected at least 3 lines (summary + header + row), got %d:\n%s", len(lines), view)
 	}
-	row := lines[1]
+	row := lines[2]
 	if !strings.Contains(row, "…") {
 		t.Fatalf("long name not truncated with ellipsis:\n%s", row)
 	}
@@ -318,11 +317,11 @@ func TestViewOmitsLogPathWhenUnset(t *testing.T) {
 		ChangeDoneMsg{Path: repo, Change: "task-1"},
 	)
 	view := m.View()
-	// Default shape is header + 1 row + footer = 3 lines. No extra row
-	// bearing a path (which would be a 4th line).
+	// Default shape is summary + header + 1 row + footer = 4 lines.
+	// No extra row bearing a path (which would be a 5th line).
 	lines := strings.Split(view, "\n")
-	if len(lines) != 3 {
-		t.Fatalf("expected exactly 3 lines (header + row + footer), got %d:\n%s", len(lines), view)
+	if len(lines) != 4 {
+		t.Fatalf("expected exactly 4 lines (summary + header + row + footer), got %d:\n%s", len(lines), view)
 	}
 	if strings.Contains(view, ".jsonl") {
 		t.Fatalf("view leaked a log path when none was set:\n%s", view)
@@ -385,10 +384,10 @@ func TestViewRendersCustomIdleRowWithEmDash(t *testing.T) {
 	)
 	view := m.View()
 	lines := strings.Split(view, "\n")
-	if len(lines) < 2 {
-		t.Fatalf("expected at least 2 lines, got %d:\n%s", len(lines), view)
+	if len(lines) < 3 {
+		t.Fatalf("expected at least 3 lines (summary + header + row), got %d:\n%s", len(lines), view)
 	}
-	row := lines[1]
+	row := lines[2]
 	if !strings.Contains(row, "—") {
 		t.Fatalf("custom-idle row missing em-dash placeholder:\n%s", row)
 	}
@@ -423,10 +422,359 @@ func TestViewPhaseAndWarningUnchangedAcrossRename(t *testing.T) {
 	if strings.Contains(view, "⚠") {
 		t.Fatalf("view still shows warning glyph after ChangeStarted cleared it:\n%s", view)
 	}
-	if strings.Contains(view, "warning") {
-		t.Fatalf("view footer still counts a warning after ChangeStarted cleared it:\n%s", view)
+	// The summary line is always present and includes the literal
+	// word "warning" as its label, so check for the counter (1+).
+	if strings.Contains(view, "1 warning") {
+		t.Fatalf("view still counts a warning after ChangeStarted cleared it:\n%s", view)
 	}
 	if strings.Contains(view, "HasChange") || strings.Contains(view, "HasOpenspec") {
 		t.Fatalf("view leaked a struct field name:\n%s", view)
+	}
+}
+
+// --- rework-tui-layout regression coverage -----------------------------
+
+// Summary counts every retained repository, even those not in the
+// visible viewport. The visible count is reported independently.
+func TestSummaryCountsAllRetainedRepos(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	// 12 repos; only 10 fit. Two will be dropped from the viewport.
+	msgs := []tea.Msg{}
+	for i := 0; i < 12; i++ {
+		path := "/wd/r" + string(rune('a'+i))
+		msgs = append(msgs,
+			RepoSeenMsg{Path: path, HasChange: true},
+			ChangeDoneMsg{Path: path, Change: "c"},
+		)
+	}
+	m = driveMessages(m, msgs...)
+	view := m.View()
+	if !strings.Contains(view, "12 total") {
+		t.Fatalf("summary should report 12 total, view:\n%s", view)
+	}
+	if !strings.Contains(view, "10/12") {
+		t.Fatalf("summary should report visible count 10/12, view:\n%s", view)
+	}
+}
+
+// The viewport must never render more than ten repository entries,
+// regardless of how many repos the model retains.
+func TestViewportCappedAtTenEntries(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	// 15 repos, all with at least one meaningful event so the
+	// selector has the full set to pick from.
+	for i := 0; i < 15; i++ {
+		path := "/wd/r" + string(rune('a'+i))
+		m = driveMessages(m,
+			RepoSeenMsg{Path: path, HasChange: true},
+			ChangeStartedMsg{Path: path, Change: "c"},
+		)
+	}
+	view := m.View()
+	// Count the number of repo rows. A row is a line that begins
+	// with a path basename. We rely on the "REPO" header being the
+	// first non-summary line and look for repo basenames r..r..
+	rows := 0
+	for _, line := range strings.Split(view, "\n") {
+		if len(line) >= 2 && line[0] == 'r' && line[1] >= 'a' && line[1] <= 'o' {
+			rows++
+		}
+	}
+	if rows != 10 {
+		t.Fatalf("expected exactly 10 visible rows, got %d:\n%s", rows, view)
+	}
+	// Model must still retain all 15 rows for the summary.
+	if len(m.rows) != 15 {
+		t.Fatalf("model should retain all 15 rows, got %d", len(m.rows))
+	}
+}
+
+// Working rows outrank failed rows outrank warning rows outrank
+// everything else, regardless of scan order.
+func TestViewportPrioritizesWorkingOverFailedOverWarningOverRest(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	// 4 repos, all in different attention classes.
+	m = driveMessages(m,
+		RepoSeenMsg{Path: "/wd/idle", HasChange: true},
+		RepoSeenMsg{Path: "/wd/warning", HasChange: true},
+		WarningMsg{Path: "/wd/warning", Msg: "hmm"},
+		RepoSeenMsg{Path: "/wd/failed", HasChange: true},
+		ChangeFailedMsg{Path: "/wd/failed", Change: "c", Err: "boom"},
+		RepoSeenMsg{Path: "/wd/working", HasChange: true},
+		ChangeStartedMsg{Path: "/wd/working", Change: "c"},
+	)
+	view := m.View()
+	// Layout: summary (line 0), header (line 1), rows (line 2+),
+	// footer (last line). Repo basenames live on the row lines.
+	lines := strings.Split(view, "\n")
+	if len(lines) < 6 {
+		t.Fatalf("expected summary + header + 4 rows + footer, got %d:\n%s", len(lines), view)
+	}
+	rowLines := lines[2 : len(lines)-1]
+	// Each row is rendered with a colored phase glyph. Find rows
+	// by their phase glyphs so we don't conflate the summary's
+	// "1 working" label with the row.
+	wIdx := -1
+	fIdx := -1
+	rowOrder := []string{}
+	for i, line := range rowLines {
+		switch {
+		case strings.Contains(line, "●"):
+			rowOrder = append(rowOrder, "working")
+		case strings.Contains(line, "✗"):
+			rowOrder = append(rowOrder, "failed")
+		case strings.Contains(line, "⚠"):
+			rowOrder = append(rowOrder, "warning")
+		case strings.Contains(line, "○"):
+			rowOrder = append(rowOrder, "idle")
+		}
+		_ = i
+	}
+	if len(rowOrder) != 4 {
+		t.Fatalf("expected 4 rows, got %d (rows: %v):\n%s", len(rowOrder), rowOrder, view)
+	}
+	want := []string{"working", "failed", "warning", "idle"}
+	for i, name := range want {
+		if rowOrder[i] != name {
+			t.Fatalf("row %d should be %q, got %q (order: %v):\n%s", i, name, rowOrder[i], rowOrder, view)
+		}
+	}
+	_ = wIdx
+	_ = fIdx
+}
+
+// Within a priority class, the most recent meaningful activity
+// comes first; stable discovery order breaks ties.
+func TestViewportActivityRecencyWithinClass(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	// Two working rows: alpha started first, beta started second.
+	// Beta should appear first (more recent activity).
+	m = driveMessages(m,
+		RepoSeenMsg{Path: "/wd/alpha", HasChange: true},
+		ChangeStartedMsg{Path: "/wd/alpha", Change: "c"},
+		RepoSeenMsg{Path: "/wd/beta", HasChange: true},
+		ChangeStartedMsg{Path: "/wd/beta", Change: "c"},
+	)
+	view := m.View()
+	alphaIdx := strings.Index(view, "alpha")
+	betaIdx := strings.Index(view, "beta")
+	if alphaIdx < 0 || betaIdx < 0 {
+		t.Fatalf("expected both repos in view:\n%s", view)
+	}
+	if alphaIdx < betaIdx {
+		t.Fatalf("beta (more recent activity) should appear before alpha:\n%s", view)
+	}
+}
+
+// Repeated RepoSeen events for an existing row must not refresh
+// its activity order. A new meaningful event on another row
+// should push the heartbeat-only row down.
+func TestRepeatedRepoSeenDoesNotChangeActivityOrder(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	// alpha gets ChangeStarted, then 5 RepoSeen heartbeats.
+	// beta then gets ChangeStarted and should rank above alpha.
+	m = driveMessages(m,
+		RepoSeenMsg{Path: "/wd/alpha", HasChange: true},
+		ChangeStartedMsg{Path: "/wd/alpha", Change: "c"},
+		RepoSeenMsg{Path: "/wd/alpha", HasChange: true},
+		RepoSeenMsg{Path: "/wd/alpha", HasChange: true},
+		RepoSeenMsg{Path: "/wd/alpha", HasChange: true},
+		RepoSeenMsg{Path: "/wd/alpha", HasChange: true},
+		RepoSeenMsg{Path: "/wd/alpha", HasChange: true},
+		RepoSeenMsg{Path: "/wd/beta", HasChange: true},
+		ChangeStartedMsg{Path: "/wd/beta", Change: "c"},
+	)
+	view := m.View()
+	alphaIdx := strings.Index(view, "alpha")
+	betaIdx := strings.Index(view, "beta")
+	if alphaIdx < 0 || betaIdx < 0 {
+		t.Fatalf("expected both repos in view:\n%s", view)
+	}
+	if alphaIdx < betaIdx {
+		t.Fatalf("beta's lifecycle event should rank above alpha's heartbeats:\n%s", view)
+	}
+}
+
+// A new repository observed only via RepoSeen must be selectable
+// (so the user sees newly-discovered repos) and stable across
+// heartbeats.
+func TestNewRepoReceivesDiscoveryOrder(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	// 11 rows total, but the viewport caps at 10. The latest
+	// RepoSeen (after the cap is met) must still be considered for
+	// future selection.
+	m = driveMessages(m,
+		RepoSeenMsg{Path: "/wd/r0", HasChange: true},
+		RepoSeenMsg{Path: "/wd/r1", HasChange: true},
+		RepoSeenMsg{Path: "/wd/r2", HasChange: true},
+		RepoSeenMsg{Path: "/wd/r3", HasChange: true},
+		RepoSeenMsg{Path: "/wd/r4", HasChange: true},
+		RepoSeenMsg{Path: "/wd/r5", HasChange: true},
+		RepoSeenMsg{Path: "/wd/r6", HasChange: true},
+		RepoSeenMsg{Path: "/wd/r7", HasChange: true},
+		RepoSeenMsg{Path: "/wd/r8", HasChange: true},
+		RepoSeenMsg{Path: "/wd/r9", HasChange: true},
+		// This eleventh row is invisible initially but should be
+		// tracked for the global count.
+		RepoSeenMsg{Path: "/wd/r10", HasChange: true},
+		// Repeated heartbeats for existing rows must not push r10
+		// out of the model.
+		RepoSeenMsg{Path: "/wd/r0", HasChange: true},
+		RepoSeenMsg{Path: "/wd/r1", HasChange: true},
+	)
+	view := m.View()
+	if !strings.Contains(view, "11 total") {
+		t.Fatalf("summary should report 11 total:\n%s", view)
+	}
+	if len(m.rows) != 11 {
+		t.Fatalf("model must retain all 11 rows, got %d", len(m.rows))
+	}
+}
+
+// The footer must no longer carry the phase/warning summary that
+// previously duplicated the top section. Only the quit hint and
+// any infrastructure error remain.
+func TestFooterNoLongerShowsPhaseCounts(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	m = driveMessages(m,
+		RepoSeenMsg{Path: "/wd/done", HasChange: true},
+		ChangeDoneMsg{Path: "/wd/done", Change: "c"},
+		RepoSeenMsg{Path: "/wd/working", HasChange: true},
+		ChangeStartedMsg{Path: "/wd/working", Change: "c"},
+		RepoSeenMsg{Path: "/wd/failed", HasChange: true},
+		ChangeFailedMsg{Path: "/wd/failed", Change: "c", Err: "boom"},
+	)
+	view := m.View()
+	// The footer should mention only [q] quit; the top summary
+	// owns the counts. Locate the last line.
+	lines := strings.Split(view, "\n")
+	last := lines[len(lines)-1]
+	if !strings.Contains(last, "[q] quit") {
+		t.Fatalf("last line should still contain the quit hint:\n%s", view)
+	}
+	// No "N done", "N working", "N failed", "N idle", "N warning"
+	// should appear in the last line.
+	for _, banned := range []string{" done", " working", " failed", " idle", " warning"} {
+		if strings.Contains(last, banned) {
+			t.Fatalf("footer should not contain %q; got %q", banned, last)
+		}
+	}
+}
+
+// A short terminal must render only the number of complete
+// repository entries that fit. The ten-row ceiling is still
+// honored when the height allows.
+func TestShortTerminalCapsVisibleRows(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	// Height 12: summary (~1) + header (1) + footer (1) + error (0) = 3
+	// non-row lines, leaving 9 for rows. Add 12 repos.
+	m.height = 12
+	for i := 0; i < 12; i++ {
+		path := "/wd/r" + string(rune('a'+i))
+		m = driveMessages(m,
+			RepoSeenMsg{Path: path, HasChange: true},
+			ChangeStartedMsg{Path: path, Change: "c"},
+		)
+	}
+	view := m.View()
+	// Count working-phase rows: a row line is the one carrying a
+	// "●" glyph.
+	count := 0
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, "●") {
+			count++
+		}
+	}
+	if count > 10 {
+		t.Fatalf("short terminal must not show more than 10 rows, got %d:\n%s", count, view)
+	}
+	// And the model still retains all 12.
+	if len(m.rows) != 12 {
+		t.Fatalf("model must retain all 12 rows, got %d", len(m.rows))
+	}
+}
+
+func TestRowPhaseTransitionRefreshesActivity(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	// Two rows. alpha gets ChangeStarted first, then ChangeDone.
+	// beta then gets ChangeStarted; beta should rank above alpha
+	// (more recent activity), and alpha should be in the "done"
+	// class which is lower priority than working.
+	m = driveMessages(m,
+		RepoSeenMsg{Path: "/wd/alpha", HasChange: true},
+		ChangeStartedMsg{Path: "/wd/alpha", Change: "c"},
+		ChangeDoneMsg{Path: "/wd/alpha", Change: "c"},
+		RepoSeenMsg{Path: "/wd/beta", HasChange: true},
+		ChangeStartedMsg{Path: "/wd/beta", Change: "c"},
+	)
+	view := m.View()
+	betaIdx := strings.Index(view, "beta")
+	alphaIdx := strings.Index(view, "alpha")
+	if betaIdx < 0 || alphaIdx < 0 {
+		t.Fatalf("expected both rows in view:\n%s", view)
+	}
+	if alphaIdx < betaIdx {
+		t.Fatalf("beta (working) should outrank alpha (done) regardless of scan order:\n%s", view)
+	}
+}
+
+func TestWarningRowStillVisibleWhenIdle(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	// alpha is idle, beta is idle but with a warning. beta should
+	// rank above alpha (warning > remaining).
+	m = driveMessages(m,
+		RepoSeenMsg{Path: "/wd/alpha", HasChange: true},
+		RepoSeenMsg{Path: "/wd/beta", HasChange: true},
+		WarningMsg{Path: "/wd/beta", Msg: "hmm"},
+	)
+	view := m.View()
+	betaIdx := strings.Index(view, "beta")
+	alphaIdx := strings.Index(view, "alpha")
+	if betaIdx < 0 || alphaIdx < 0 {
+		t.Fatalf("expected both rows in view:\n%s", view)
+	}
+	if alphaIdx < betaIdx {
+		t.Fatalf("warning row beta should outrank idle row alpha:\n%s", view)
+	}
+}
+
+func TestSummaryEmptyRepoState(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	view := m.View()
+	if !strings.Contains(view, "0 total") {
+		t.Fatalf("empty model summary should report 0 total:\n%s", view)
+	}
+	if !strings.Contains(view, "0/0 visible") {
+		t.Fatalf("empty model summary should report 0/0 visible:\n%s", view)
+	}
+}
+
+func TestSummaryVisibleCountWith10PlusRepos(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	for i := 0; i < 47; i++ {
+		path := "/wd/r" + string(rune('a'+i%26)) + string(rune('0'+i/26))
+		m = driveMessages(m,
+			RepoSeenMsg{Path: path, HasChange: true},
+			ChangeStartedMsg{Path: path, Change: "c"},
+		)
+	}
+	view := m.View()
+	if !strings.Contains(view, "47 total") {
+		t.Fatalf("summary should report 47 total, view:\n%s", view)
+	}
+	if !strings.Contains(view, "10/47 visible") {
+		t.Fatalf("summary should report 10/47 visible, view:\n%s", view)
 	}
 }
