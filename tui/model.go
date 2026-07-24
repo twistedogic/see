@@ -80,7 +80,10 @@ func (m *Model) ensureRow(path string) *RepoRow {
 }
 
 func (m *Model) Init() tea.Cmd {
-	return nil
+	// ponytail: 1Hz tick, no-op when nothing is happening. Smarter
+	// version (only tick while PhaseWorking is non-empty) when the
+	// per-second redraw shows up in profiling.
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -131,6 +134,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		r.Warning = true
 	case InfraErrorMsg:
 		m.infraErr = msg.Err
+	case tickMsg:
+		// Re-arm the tick. We don't mutate any row state — View()
+		// recomputes AGE from StartedAt, so the tick is purely a
+		// redraw trigger.
+		return m, tea.Tick(time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height

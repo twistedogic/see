@@ -1,5 +1,7 @@
 package tui
 
+import "time"
+
 // Message types for the TUI's Update loop. Defined in the tui package
 // (not imported from main) so the tui package has no dependency on
 // main's Event types. main.go provides an Observer adapter that
@@ -57,3 +59,10 @@ type InfraErrorMsg struct {
 	Where string
 	Err   string
 }
+
+// tickMsg fires once a second to drive a re-render. AGE is
+// recomputed at render time (time.Since(StartedAt)) so without a
+// periodic tick the column freezes at whatever View() produced
+// when the last event arrived — which is wrong for any row that
+// has been in PhaseWorking longer than the gap between events.
+type tickMsg time.Time

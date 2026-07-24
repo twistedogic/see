@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -142,6 +143,28 @@ func TestUpdateQuitsOnQ(t *testing.T) {
 	}
 	if updated == nil {
 		t.Fatalf("expected non-nil model on q key")
+	}
+}
+
+// Regression: AGE is time.Since(StartedAt), recomputed at render
+// time, so the model must drive periodic re-renders while a row is
+// in PhaseWorking — otherwise the column is frozen at whatever
+// View() produced when the last event arrived. Init() returns the
+// first tick; a tickMsg reschedules the next.
+func TestTickDrivesRedrawDuringWork(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	repo := "/tmp/proj"
+	m = driveMessages(m,
+		RepoSeenMsg{Path: repo, HasChange: true},
+		ChangeStartedMsg{Path: repo, Change: "c1"},
+	)
+	if m.Init() == nil {
+		t.Fatalf("Init must return a tick cmd to start the redraw loop")
+	}
+	_, cmd := m.Update(tickMsg(time.Now()))
+	if cmd == nil {
+		t.Fatalf("tickMsg must reschedule the next tick (got nil cmd)")
 	}
 }
 
