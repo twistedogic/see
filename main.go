@@ -829,43 +829,27 @@ func (m *multiFlag) Set(v string) error {
 // watcher's context so the tight poll loop returns.
 func runTUI(ctx context.Context, w *Watcher, events *eventLogger, repos []string) error {
 	prog, obs := tui.New()
+	defer prog.Quit()
 	events.Attach(tuiObserver{obs: obs})
 	w.observer = events
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	watchErr := make(chan error, 1)
-	go func() { watchErr <- w.Watch(ctx, repos) }()
-	// ponytail: watcher-exit → prog.Quit() wiring for --once. In loop mode the
-	// watcher only exits after cancel() runs (which fires after prog.Run()
-	// returns), so Quit() on an already-exited program is a no-op.
 	go func() {
-		if err := <-watchErr; err != nil {
-			events.Observe(InfraError{Where: "watcher", Err: err.Error()})
+		if _, err := prog.Run(); err != nil {
+			events.Observe(InfraError{Where: "tui", Err: err.Error()})
 		}
-		prog.Quit()
+		cancel()
 	}()
-	_, runErr := prog.Run()
-	// Program.Run() returned; cancel to break the watcher out of its
-	// poll loop if it's still running, then wait for it.
-	cancel()
-	if werr := <-watchErr; werr != nil && runErr == nil {
-		runErr = werr
+	err := w.Watch(ctx, repos)
+	if err != nil {
+		events.Observe(InfraError{Where: "watcher", Err: err.Error()})
 	}
-	if runErr != nil {
-		events.Observe(InfraError{Where: "tui", Err: runErr.Error()})
-	}
-	return runErr
+	return err
 }
 
-// tuiObserver implements main.Observer by translating each Event into
-// a typed method call on tui.ChanObserver, which sends a bubbletea
-// message to the running Program. The type-switch lives here (not in
-// the tui package) so the tui package has no dependency on main's
-// Event types.
-// tuiObserver implements main.Observer by translating each Event into
-// a tui Msg literal and forwarding it through ChanObserver.Send. The
-// type-switch lives here (not in the tui package) so the tui package
-// has no dependency on main's Event types.
+// tuiObserver forwards each Event to the bubbletea Program via
+// ChanObserver.Send. The type-switch lives here (not in the tui
+// package) so the tui package has no dependency on main's Event types.
 type tuiObserver struct{ obs *tui.ChanObserver }
 
 func (o tuiObserver) Observe(e Event) {

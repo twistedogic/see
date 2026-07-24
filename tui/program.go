@@ -28,10 +28,7 @@ func New() (*tea.Program, *ChanObserver) {
 // for it to exit (Done channel) and so the observer can Send messages.
 func (c *ChanObserver) Program() *tea.Program { return c.p }
 
-// Send forwards a tea.Msg to the running program, swallowing send
-// errors and panics that occur after the program has already exited
-// (the watcher may emit a final event after the user quits).
+// Send forwards a tea.Msg to the program.
 func (c *ChanObserver) Send(msg tea.Msg) {
-	defer func() { _ = recover() }()
 	c.p.Send(msg)
 }
