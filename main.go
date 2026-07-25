@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -772,7 +773,7 @@ func main() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		if err := runTUI(ctx, &w, events, repos); err != nil {
-			os.Exit(1)
+			log.Fatal(err)
 		}
 		return
 	}
