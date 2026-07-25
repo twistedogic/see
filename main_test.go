@@ -145,7 +145,7 @@ func TestWatcherRendersUserPrompt(t *testing.T) {
 	agent := &fakeAgent{}
 	w := Watcher{agent: agent, RetryCount: 1}
 	w.SetPromptTemplate("Apply {change} now")
-	if err := w.work(context.Background(), dir); err != nil {
+	if _, err := w.runWithRetry(context.Background(), dir); err != nil {
 		t.Fatal(err)
 	}
 	if len(agent.prompts) != 1 {
@@ -164,7 +164,7 @@ func TestWatcherFallsBackToEmbeddedDefault(t *testing.T) {
 	if got, want := w.PromptTemplate, defaultPromptTemplate; got != want {
 		t.Fatalf("PromptTemplate after whitespace setter = %q, want embedded default", got)
 	}
-	if err := w.work(context.Background(), dir); err != nil {
+	if _, err := w.runWithRetry(context.Background(), dir); err != nil {
 		t.Fatal(err)
 	}
 	if len(agent.prompts) != 1 {
@@ -178,7 +178,7 @@ func TestWatcherFallsBackToEmbeddedDefault(t *testing.T) {
 // bootstrapPromptRepo creates a temp git repository with a single
 // active openspec change and HEAD on main. The prompt-template tests
 // only need a working git tree + one active change to drive
-// Watcher.work down to the Agent.Run call.
+// Watcher.runWithRetry down to the Agent.Run call.
 func bootstrapPromptRepo(t *testing.T, change string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -641,7 +641,7 @@ func TestWorkCommitsOnSuccess(t *testing.T) {
 	}
 	w := Watcher{agent: agent, RetryCount: 1}
 	ctx := t.Context()
-	if err := w.work(ctx, repo); err != nil {
+	if _, err := w.runWithRetry(ctx, repo); err != nil {
 		t.Fatal(err)
 	}
 	// After the catch-up commit, see/<change>'s tip carries the apply commit.
@@ -795,7 +795,7 @@ func TestWorkIsolatesAgentRunOnBranch(t *testing.T) {
 	}
 	w := Watcher{agent: agent, RetryCount: 1}
 	ctx := t.Context()
-	if err := w.work(ctx, repo); err != nil {
+	if _, err := w.runWithRetry(ctx, repo); err != nil {
 		t.Fatal(err)
 	}
 
@@ -967,7 +967,7 @@ func TestWorkRollsBackBranchOnAgentFailure(t *testing.T) {
 	}
 	w := Watcher{agent: agent, RetryCount: 1}
 	ctx := t.Context()
-	err = w.work(ctx, repo)
+	_, err = w.runWithRetry(ctx, repo)
 	if !errors.Is(err, agentErr) {
 		t.Fatalf("expected agent error %v, got %v", agentErr, err)
 	}
@@ -1053,7 +1053,7 @@ func TestWorkReusesExistingBranchAndResetsToOriginalSHA(t *testing.T) {
 	}
 	w := Watcher{agent: agent, RetryCount: 1}
 	ctx := t.Context()
-	if err := w.work(ctx, repo); err != nil {
+	if _, err := w.runWithRetry(ctx, repo); err != nil {
 		t.Fatal(err)
 	}
 	// Sentinel wiped by reset --hard before the agent ran.
@@ -1100,9 +1100,9 @@ func TestWorkReusesExistingBranchAndResetsToOriginalSHA(t *testing.T) {
 	}
 }
 
-// Regression: Watcher.work must refuse to run on a detached HEAD before
-// mutating repo state. v1 contract is "bail with an error"; the user must
-// switch to a real branch first.
+// Regression: Watcher.workResolved must refuse to run on a detached HEAD
+// before mutating repo state. v1 contract is "bail with an error"; the user
+// must switch to a real branch first.
 func TestWorkRejectsDetachedHead(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "proj")
@@ -1121,6 +1121,10 @@ func TestWorkRejectsDetachedHead(t *testing.T) {
 	run("config", "user.email", "t@e")
 	run("config", "user.name", "t")
 	run("commit", "--allow-empty", "-q", "-m", "init")
+	// Seed change so runWithRetry reaches workResolved (where the detached-HEAD guard lives).
+	if err := os.MkdirAll(filepath.Join(repo, "openspec", "changes", "task-1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	detachedSHA, err := GetCurrentCommit(repo)
 	if err != nil {
 		t.Fatal(err)
@@ -1136,7 +1140,7 @@ func TestWorkRejectsDetachedHead(t *testing.T) {
 	agent := &fakeAgent{err: nil}
 	w := Watcher{agent: agent, RetryCount: 1}
 	ctx := t.Context()
-	err = w.work(ctx, repo)
+	_, err = w.runWithRetry(ctx, repo)
 	if err == nil {
 		t.Fatal("expected error from work on detached HEAD, got nil")
 	}
@@ -1399,7 +1403,7 @@ func TestNilObserverIsSafe(t *testing.T) {
 	}
 }
 
-// Regression: Watcher.work must emit LogPath after a successful agent
+// Regression: Watcher.workResolved must emit LogPath after a successful agent
 // run with capture enabled. Pins the surfacing of the per-run log
 // path so TUI consumers can render it.
 func TestWorkEmitsLogPathOnSuccessfulCapture(t *testing.T) {
@@ -1419,7 +1423,7 @@ func TestWorkEmitsLogPathOnSuccessfulCapture(t *testing.T) {
 	obs := &recordingObserver{}
 	w := Watcher{agent: agent, RetryCount: 1, observer: obs}
 	ctx := t.Context()
-	if err := w.work(ctx, repo); err != nil {
+	if _, err := w.runWithRetry(ctx, repo); err != nil {
 		t.Fatal(err)
 	}
 	var lp *LogPath
@@ -1459,7 +1463,7 @@ func TestWorkDoesNotEmitLogPathOnCaptureFailure(t *testing.T) {
 	obs := &recordingObserver{}
 	w := Watcher{agent: agent, RetryCount: 1, observer: obs}
 	ctx := t.Context()
-	if err := w.work(ctx, repo); err != nil {
+	if _, err := w.runWithRetry(ctx, repo); err != nil {
 		t.Fatal(err)
 	}
 	for _, e := range obs.events {
@@ -1736,7 +1740,7 @@ func TestCompatibilityModeRetainsOpenSpecContract(t *testing.T) {
 			},
 		}
 		w := Watcher{agent: agent, RetryCount: 1}
-		if err := w.work(t.Context(), repo); err != nil {
+		if _, err := w.runWithRetry(t.Context(), repo); err != nil {
 			t.Fatalf("compatibility-mode success: %v", err)
 		}
 
@@ -1829,7 +1833,7 @@ func TestCompatibilityModeRetainsOpenSpecContract(t *testing.T) {
 			},
 		}
 		w := Watcher{agent: agent, RetryCount: 1}
-		err = w.work(t.Context(), repo)
+		_, err = w.runWithRetry(t.Context(), repo)
 		if !errors.Is(err, agentErr) {
 			t.Fatalf("compatibility-mode failure: err = %v, want %v", err, agentErr)
 		}

@@ -23,7 +23,7 @@ Guidelines for AI agents and contributors working on this project.
   `--interval=0` restores the pre-default tight-poll loop; negative
   intervals are rejected at startup. Tests that spawn the binary hang
   the test runner, so:
-  - Prefer unit tests that drive `Watcher.work` (or a single `runOnce`
+  - Prefer unit tests that drive `Watcher.runWithRetry` (or a single `runOnce`
     pass) directly with a `fakeAgent` and a `recordingObserver`
     (see `main_test.go`). Assert on the observed event sequence and
     the captured `Run` arguments — never on process exit codes or

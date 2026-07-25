@@ -319,9 +319,9 @@ func (w Watcher) catchUpCustomCommit(path, change string) {
 	}
 }
 
-// runWithRetry invokes work up to w.RetryCount times on repo, emitting
-// RetryAttempt events between attempts. Each custom attempt resolves the
-// condition again so retries can become idle or select a different lane.
+// runWithRetry invokes workResolved up to w.RetryCount times on repo,
+// emitting RetryAttempt events between attempts. Each attempt resolves the
+// change again so retries can become idle or select a different lane.
 func (w Watcher) runWithRetry(ctx context.Context, repo string) (string, error) {
 	lastChange := ""
 	var prevErr error
@@ -422,7 +422,7 @@ type LogPath struct {
 func (LogPath) isEvent() {}
 
 // Warning reports a per-repo cleanup or pre-run check step that
-// failed but is not itself the reason Watcher.work returns an error.
+// failed but is not itself the reason the run returns an error.
 // The Msg field carries the human-readable detail; the JSONL is the
 // source of truth for the message text.
 type Warning struct {
@@ -521,31 +521,11 @@ func NewWatcher(binary, logDir string, retry int, once bool) Watcher {
 
 // warn emits a Warning event to the observer when one is wired.
 // Centralised so cleanup-step call sites read as `w.warn(...)` and
-// stay silent in log mode without an observer (mirrors the
-// observer-nil pattern used elsewhere in Watcher.work).
+// stay silent in log mode without an observer.
 func (w Watcher) warn(path, change, msg string) {
 	if w.observer != nil {
 		w.observer.Observe(Warning{Path: path, Change: change, Msg: msg})
 	}
-}
-
-func (w Watcher) work(ctx context.Context, path string) error {
-	if _, err := GetCurrentCommit(path); err != nil {
-		return err
-	}
-	ref, err := originalRef(path)
-	if err != nil {
-		return err
-	}
-	if ref == "" {
-		w.warn(path, "", "detached HEAD; switch to a branch first")
-		return fmt.Errorf("detached HEAD on %s", path)
-	}
-	change, err := w.resolveChange(ctx, path)
-	if err != nil || change == "" {
-		return err
-	}
-	return w.workResolved(ctx, path, change)
 }
 
 func (w Watcher) workResolved(ctx context.Context, path, change string) error {
