@@ -65,9 +65,11 @@ or empty file is treated as "no configuration" and is not an error.
 ### Schema
 
 ```yaml
-watches:
-  - "~/Dev/*"
-  - "/var/repos"
+root_dir: "~/Dev"
+include:
+  - "playground-*"
+exclude:
+  - "playground-old"
 
 prompt: |-
   Apply the OpenSpec change "{change}".
@@ -76,10 +78,16 @@ prompt: |-
 # commit:    "see: apply {change}"
 ```
 
-- `watches` is a sequence of strings. Each entry follows the same path,
-  tilde expansion, and shell-glob rules as `--watch` (`~`, `~/path`, `*`,
-  `?`, `[abc]`; `**` is rejected). Tilde is the only expansion performed;
-  environment variables are not expanded.
+- `root_dir` is the base directory. `~` and `~/path` are expanded;
+  environment variables are not. When blank or omitted, `see` falls back to
+  the current working directory. A configured root must exist and be a
+  directory when the configuration loads.
+- `include` is a sequence of glob patterns relative to `root_dir`. An omitted
+  or empty sequence includes every immediate child directory. Patterns use
+  `filepath.Match` syntax (`*`, `?`, `[abc]`); recursive `**` is rejected.
+- `exclude` is a sequence of glob patterns matched against each included
+  candidate's basename. An omitted or empty sequence excludes nothing. It
+  follows the same tilde-expansion and pattern-validation rules as `include`.
 - `prompt` is a string. Literal-block scalars (`|`, `|-`, `|+`) preserve
   interior line breaks; use `|-` to strip the trailing newline. The single
   token `{change}` is replaced with the active change name at runtime; no
@@ -92,34 +100,44 @@ prompt: |-
   consulted only in custom workflow mode; OpenSpec compatibility mode uses
   its own default commit subject.
 
-`watches`, `prompt`, `condition`, and `commit` are all optional. Omitting
-`watches` preserves the current-working-directory fallback. Omitting
-`prompt` falls through to the embedded `prompt.md` default. Omitting
-`condition` (or leaving it whitespace-only) keeps `see` in OpenSpec
-compatibility mode. Omitting `commit` while `condition` is nonblank is a
-startup error.
+All fields are optional. Omitting `root_dir` preserves the
+current-working-directory fallback. Omitting `prompt` falls through to the
+embedded `prompt.md` default. Omitting `condition` (or leaving it
+whitespace-only) keeps `see` in OpenSpec compatibility mode. Omitting
+`commit` while `condition` is nonblank is a startup error.
 
-### Migration from the legacy plain-text `watches` file
+The former `watches` field and `--watch` command-line flag are not accepted.
 
-`see` no longer reads the old `os.UserConfigDir()/see/watches` plain-text
-file. To migrate, replace each non-comment line with an entry under
-`watches` in `config.yaml`:
+### Migration from legacy watch configuration
+
+`see` no longer reads the old `os.UserConfigDir()/see/watches` plain-text file
+or accepts the old `watches` field in `config.yaml`. Choose one common root,
+move the relative portions of the old entries into `include`, and add basename
+filters to `exclude` when needed:
 
 ```text
 ~/Dev/*
-/var/repos
+```
+
+or:
+
+```yaml
+watches:
+  - "~/Dev/*"
 ```
 
 becomes:
 
 ```yaml
-watches:
-  - "~/Dev/*"
-  - "/var/repos"
+root_dir: "~/Dev"
+include: [] # every immediate child
+exclude:
+  - "bin"
 ```
 
-Quote globs so YAML does not parse brackets or asterisks unexpectedly.
-Remove the old file after verifying startup.
+Quote globs so YAML does not parse brackets or asterisks unexpectedly. Remove
+the old file and remove `--watch` from scripts or aliases before restarting
+`see`.
 
 ### Prompt precedence
 
@@ -130,8 +148,8 @@ The effective prompt template is selected in this order:
 3. Embedded `prompt.md` default (the build-time fallback).
 
 "Blank" means whitespace-only. `--config=-` skips the global file
-entirely: configured watches and the configured prompt both fall through
-to CLI values and the embedded default respectively.
+entirely: repository discovery falls back to the current working directory,
+and the prompt falls through to the command-line value or embedded default.
 
 ### Configuration loading and `--config`
 
@@ -166,9 +184,9 @@ comments-only, valid, or malformed). A bootstrap write failure
 (permission denied, read-only filesystem, parent unwritable) is
 non-fatal: `loadStartupConfig` writes one line to standard error
 (stderr) naming the target path and the underlying error, then
-returns a zero-value `Config` so the command-line entries and the
-current-working-directory fallback still produce a working watch
-list. The watcher starts regardless of bootstrap outcome.
+returns a zero-value `Config` so the current-working-directory fallback still
+produces a working watch list. The watcher starts regardless of bootstrap
+outcome.
 
 ## Custom Workflows
 

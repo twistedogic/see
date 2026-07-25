@@ -4,7 +4,7 @@
 # This file is materialised by `see` on first run when no
 # configuration exists at the default path; until you uncomment and
 # edit a field, every value below is treated as "not set" and `see`
-# falls back to the command-line inputs and the embedded defaults.
+# falls back to the current working directory and the embedded defaults.
 #
 # A blank `condition` keeps `see` in OpenSpec compatibility mode:
 # it discovers `openspec/changes/` directories, runs the agent on
@@ -14,8 +14,11 @@
 # also requires a nonblank `commit` template (and a nonblank prompt
 # from either this file or `--prompt`) or startup fails.
 
-# watches:
-#   - "~/Dev/*"
+# root_dir: "~/Dev"
+# include:                 # relative to root_dir; empty means every immediate child
+#   - "playground-*"
+# exclude:                 # matched against each candidate's basename
+#   - "bin"
 
 # prompt: |-
 #   Apply the OpenSpec change "{change}".

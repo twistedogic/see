@@ -59,20 +59,19 @@ double the maintenance surface for one transitional release.
 A new private `validateConfig(cfg *Config) error` runs after the YAML decode
 and before `loadConfig` returns. It runs three checks:
 
-1. **`root_dir`** — if nonblank: tilde-expand via the existing `expandTilde`,
-   `os.Stat` the result, require it to be a directory. Stash the expanded
-   path back into `cfg.RootDir` so the resolver does not re-expand.
+1. **`root_dir`** — if nonblank: reject `**`, tilde-expand via the existing
+   `expandTilde`, `os.Stat` the result, require it to be a directory. Stash the
+   expanded path back into `cfg.RootDir` so the resolver does not re-expand.
 2. **`include`** and **`exclude`** — for each entry: reject `**` via the same
    string check `resolveTargets` uses today, probe `filepath.Match(entry,
    "test")` to catch `ErrBadPattern` (malformed bracket expressions), then
    tilde-expand and stash the expanded entry back into the slice. The probe
    matches against a throwaway `"test"` string so the syntax check fires
    without consulting the filesystem.
-3. **`custom condition` validation** — call the existing
-   `validateCustomConfig(cfg, cliPrompt)` with an empty `cliPrompt` (the CLI
-   no longer has any watch input, but `--prompt` still exists and is passed
-   in by `main` at a different call site; `loadConfig` only needs to check
-   the in-config fields).
+3. **Custom condition validation remains at startup** — `main` calls the
+   existing `validateCustomConfig(cfg, cliPrompt)` after configuration loading,
+   because only that call site has the effective `--prompt` value. The helper
+   and its precedence behavior are unchanged.
 
 Errors include the field path so operators can fix without grepping:
 `include[2]: '**' is not supported`, `root_dir "/nope": no such file or

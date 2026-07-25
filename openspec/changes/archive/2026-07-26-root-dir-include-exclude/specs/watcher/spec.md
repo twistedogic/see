@@ -216,16 +216,15 @@ decode and before returning, so configuration errors exit with status
 `2` before the watcher starts instead of producing warnings during
 the first scan. The validation SHALL run in this order:
 
-1. If `root_dir` is nonblank: tilde-expand via `expandTilde`, stat
-   the result, and require it to be a directory. The expanded path
-   SHALL be stashed back into `cfg.RootDir` so the resolver does not
-   re-expand.
+1. If `root_dir` is nonblank: reject `**`, tilde-expand via
+   `expandTilde`, stat the result, and require it to be a directory.
+   The expanded path SHALL be stashed back into `cfg.RootDir` so the
+   resolver does not re-expand.
 2. For each entry in `include`: reject `**`, probe
    `filepath.Match(entry, "test")` to catch `ErrBadPattern`, and
    tilde-expand. The expanded entry SHALL be stashed back into the
    slice.
 3. For each entry in `exclude`: the same checks as `include`.
-4. Run the existing `validateCustomConfig` for the in-config fields.
 
 Errors SHALL name the offending field path (`root_dir`,
 `include[2]`, `exclude[0]`) and the underlying cause. Validation

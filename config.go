@@ -33,6 +33,10 @@ var defaultConfigTemplate string
 // os.Stderr (which is shared with other goroutines and processes).
 var stderrWriter io.Writer = os.Stderr
 
+// userHomeDir is replaceable in tests so the otherwise platform-dependent
+// failure path remains covered.
+var userHomeDir = os.UserHomeDir
+
 // configPath returns the absolute path to the user's config.yaml.
 func configPath() (string, error) {
 	home, err := os.UserHomeDir()
@@ -56,7 +60,7 @@ func expandTilde(p string) (string, error) {
 	}
 	home := os.Getenv("HOME")
 	if home == "" {
-		h, err := os.UserHomeDir()
+		h, err := userHomeDir()
 		if err != nil {
 			return "", fmt.Errorf("see: expand ~: %w", err)
 		}
@@ -68,16 +72,63 @@ func expandTilde(p string) (string, error) {
 	return filepath.Join(home, p[2:]), nil
 }
 
-// Config is the decoded contents of config.yaml. All fields are
-// optional: an empty Watches preserves the current-working-directory
-// fallback, an empty Prompt falls through to the embedded default,
-// and Condition / Commit belong to the custom workflow (see
-// validateCustomConfig for the blank-condition OpenSpec fallback).
+// Config is the decoded contents of config.yaml. All fields are optional:
+// a blank RootDir preserves the current-working-directory fallback, empty
+// Include / Exclude slices include every immediate child and exclude none,
+// an empty Prompt falls through to the embedded default, and Condition /
+// Commit belong to the custom workflow.
 type Config struct {
-	Watches   []string `yaml:"watches"`
+	RootDir   string   `yaml:"root_dir"`
+	Include   []string `yaml:"include"`
+	Exclude   []string `yaml:"exclude"`
 	Prompt    string   `yaml:"prompt"`
 	Condition string   `yaml:"condition"`
 	Commit    string   `yaml:"commit"`
+}
+
+func validateConfig(cfg *Config) error {
+	if strings.TrimSpace(cfg.RootDir) == "" {
+		cfg.RootDir = ""
+	} else {
+		if strings.Contains(cfg.RootDir, "**") {
+			return fmt.Errorf("root_dir: '**' is not supported")
+		}
+		expanded, err := expandTilde(cfg.RootDir)
+		if err != nil {
+			return fmt.Errorf("root_dir: %w", err)
+		}
+		info, err := os.Stat(expanded)
+		if err != nil {
+			return fmt.Errorf("root_dir %q: %w", expanded, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("root_dir %q: not a directory", expanded)
+		}
+		cfg.RootDir = expanded
+	}
+	for _, group := range []struct {
+		field    string
+		patterns *[]string
+	}{
+		{"include", &cfg.Include},
+		{"exclude", &cfg.Exclude},
+	} {
+		for i, pattern := range *group.patterns {
+			path := fmt.Sprintf("%s[%d]", group.field, i)
+			if strings.Contains(pattern, "**") {
+				return fmt.Errorf("%s: '**' is not supported", path)
+			}
+			if _, err := filepath.Match(pattern, "test"); err != nil {
+				return fmt.Errorf("%s: invalid glob pattern: %w", path, err)
+			}
+			expanded, err := expandTilde(pattern)
+			if err != nil {
+				return fmt.Errorf("%s: %w", path, err)
+			}
+			(*group.patterns)[i] = expanded
+		}
+	}
+	return nil
 }
 
 // validateCustomConfig checks that custom workflow mode (triggered
@@ -135,6 +186,9 @@ func loadConfig(path string) (Config, error) {
 	// appended config does not silently hide configuration.
 	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		return cfg, fmt.Errorf("see: parse config %s: only one YAML document is allowed", path)
+	}
+	if err := validateConfig(&cfg); err != nil {
+		return Config{}, fmt.Errorf("see: validate config %s: %w", path, err)
 	}
 	return cfg, nil
 }

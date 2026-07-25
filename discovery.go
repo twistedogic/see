@@ -1,84 +1,73 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 )
 
-// hasGlob reports whether p contains a shell-glob metacharacter.
-// Patterns without metacharacters are treated as literal paths by
-// resolveTargets; the matching is then a single Stat check.
-func hasGlob(p string) bool {
-	return strings.ContainsAny(p, "*?[")
-}
+// resolveConfiguredTargets builds the repository list from the configured root
+// and its optional basename filters. Config validation has already checked the
+// root and pattern syntax; errors are still returned for direct callers.
+func resolveConfiguredTargets(cfg Config) (repos []string, warnings []Warning, err error) {
+	if cfg.RootDir == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return nil, nil, err
+		}
+		cfg.RootDir = cwd
+		cfg.Include = []string{"."}
+	}
 
-// resolveTargets turns a list of patterns (already tilde-expanded)
-// into a deduplicated, sorted, absolute list of repo paths.
-// Classification:
-//
-//   - stat(p/.git) succeeds → repo, single entry
-//   - p is a directory without .git → parent-of-repos; iterate its
-//     immediate children for entries with .git
-//   - anything else (file, missing, parent with no .git children) →
-//     a Warning event and skip
-//
-// Patterns containing "**" are rejected at startup with a clear error
-// because filepath.Match does not support recursive globs and the
-// project chooses not to add a dependency for the feature.
-func resolveTargets(patterns []string) (repos []string, warnings []Warning, err error) {
-	for _, p := range patterns {
-		if strings.Contains(p, "**") {
-			return nil, nil, fmt.Errorf(
-				"'**' is not supported in watch patterns (no recursive glob); list the paths you care about explicitly: %s",
-				p,
-			)
-		}
-		expanded, err := expandTilde(p)
+	var candidates []string
+	if len(cfg.Include) == 0 {
+		entries, err := os.ReadDir(cfg.RootDir)
 		if err != nil {
 			return nil, nil, err
 		}
-		matches, err := globMatches(expanded)
-		if err != nil {
-			return nil, nil, err
-		}
-		if len(matches) == 0 {
-			warnings = append(warnings, Warning{
-				Path:   p,
-				Change: "",
-				Msg:    fmt.Sprintf("no matches for %q", p),
-			})
-			continue
-		}
-		for _, m := range matches {
-			abs, err := filepath.Abs(m)
-			if err != nil {
-				warnings = append(warnings, Warning{Path: m, Msg: err.Error()})
-				continue
+		for _, entry := range entries {
+			if entry.IsDir() {
+				candidates = append(candidates, filepath.Join(cfg.RootDir, entry.Name()))
 			}
-			classified, w, err := classifyTarget(abs)
+		}
+	} else {
+		for _, pattern := range cfg.Include {
+			matches, err := filepath.Glob(filepath.Join(cfg.RootDir, pattern))
 			if err != nil {
 				return nil, nil, err
 			}
-			repos = append(repos, classified...)
-			warnings = append(warnings, w...)
+			candidates = append(candidates, matches...)
 		}
 	}
-	repos = dedupeAndSort(repos)
-	return repos, warnings, nil
-}
 
-// globMatches expands a single pattern. A pattern without glob
-// metacharacters is treated as a literal path; a pattern with
-// metacharacters is expanded by Glob. A literal path that does not
-// exist yields zero matches (the caller will emit a Warning).
-func globMatches(p string) ([]string, error) {
-	if !hasGlob(p) {
-		return []string{p}, nil
+	for _, candidate := range candidates {
+		excluded := false
+		for _, pattern := range cfg.Exclude {
+			match, err := filepath.Match(pattern, filepath.Base(candidate))
+			if err != nil {
+				return nil, nil, err
+			}
+			if match {
+				excluded = true
+				break
+			}
+		}
+		if excluded {
+			continue
+		}
+		abs, err := filepath.Abs(candidate)
+		if err != nil {
+			warnings = append(warnings, Warning{Path: candidate, Msg: err.Error()})
+			continue
+		}
+		classified, targetWarnings, err := classifyTarget(abs)
+		if err != nil {
+			return nil, nil, err
+		}
+		repos = append(repos, classified...)
+		warnings = append(warnings, targetWarnings...)
 	}
-	return filepath.Glob(p)
+	return dedupeAndSort(repos), warnings, nil
 }
 
 // classifyTarget returns the repo paths that p resolves to, plus any

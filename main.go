@@ -683,9 +683,7 @@ func main() {
 		configFlag = flag.String("config", "", "path to config.yaml (default: ~/.config/see/config.yaml); pass \"-\" to skip")
 		promptFlag = flag.String("prompt", "", "override the agent prompt template; {change} is replaced with the active change name")
 		interval   = flag.Duration("interval", DefaultPollInterval, "delay between completed scans in continuous mode; 0 disables the delay, negative values are rejected")
-		watchFlag  multiFlag
 	)
-	flag.Var(&watchFlag, "watch", "watch path or shell-glob (path, ~/path, or shell-glob with *, ?, [abc]; '**' is rejected). Repeatable.")
 	flag.Parse()
 
 	if *interval < 0 {
@@ -741,7 +739,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	repos, warnings, err := resolveWatchList(watchFlag, cfg.Watches)
+	repos, warnings, err := resolveConfiguredTargets(cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "see:", err)
 		os.Exit(2)
@@ -761,44 +759,6 @@ func main() {
 	if err := w.Watch(ctx, repos); err != nil {
 		os.Exit(1)
 	}
-}
-
-// resolveWatchList picks the watch list from layered sources using
-// the same precedence rule as selectPromptTemplate: the first source
-// that contributes at least one entry wins outright, and the next
-// source is not consulted. Order: CLI --watch entries, then the
-// configured `watches` sequence, then the current working directory
-// as the fallback when both are empty. It is a pure coordinator —
-// no configuration file input/output happens here; main() loads the
-// configuration once and threads cfg.Watches through this function
-// alongside the CLI entries so prompt and watches share one config
-// snapshot.
-func resolveWatchList(cliWatches, cfgWatches []string) ([]string, []Warning, error) {
-	patterns := cliWatches
-	if len(patterns) == 0 {
-		patterns = cfgWatches
-	}
-	if len(patterns) == 0 {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return nil, nil, err
-		}
-		patterns = []string{cwd}
-	}
-	return resolveTargets(patterns)
-}
-
-// multiFlag accumulates repeated --flag values into a slice.
-// Implements flag.Value so the standard flag package accepts
-// `--watch a --watch b` and `--watch=a,b` (the latter via a custom
-// split is out of scope; one --watch per pattern keeps the surface
-// simple).
-type multiFlag []string
-
-func (m *multiFlag) String() string { return strings.Join(*m, ",") }
-func (m *multiFlag) Set(v string) error {
-	*m = append(*m, v)
-	return nil
 }
 
 // runTUI runs the watcher with an eventLogger wired as the

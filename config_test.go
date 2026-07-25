@@ -29,18 +29,23 @@ func writeConfigYAML(t *testing.T, base, body string) string {
 
 // --- loadConfig: task 1.2 -------------------------------------------------
 
-// TestLoadConfigValid proves the happy path: a single YAML document with
-// both watches and a multiline prompt decodes into the struct.
+// TestLoadConfigValid proves the happy path: all configuration fields decode
+// and root_dir is validated before the configuration is returned.
 func TestLoadConfigValid(t *testing.T) {
 	base := t.TempDir()
-	path := writeConfigYAML(t, base, "watches:\n  - /repos/alpha\n  - /repos/beta\nprompt: |\n  Apply the change {change}.\n")
+	path := writeConfigYAML(t, base, "root_dir: \""+base+"\"\ninclude:\n  - playground-*\nexclude:\n  - playground-old\nprompt: |\n  Apply the change {change}.\n")
 	cfg, err := loadConfig(path)
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
-	wantWatches := []string{"/repos/alpha", "/repos/beta"}
-	if !reflect.DeepEqual(cfg.Watches, wantWatches) {
-		t.Fatalf("Watches = %v, want %v", cfg.Watches, wantWatches)
+	if cfg.RootDir != base {
+		t.Fatalf("RootDir = %q, want %q", cfg.RootDir, base)
+	}
+	if want := []string{"playground-*"}; !reflect.DeepEqual(cfg.Include, want) {
+		t.Fatalf("Include = %v, want %v", cfg.Include, want)
+	}
+	if want := []string{"playground-old"}; !reflect.DeepEqual(cfg.Exclude, want) {
+		t.Fatalf("Exclude = %v, want %v", cfg.Exclude, want)
 	}
 	// Block scalar with clip chomping ("|"): trailing newline preserved.
 	if got, want := cfg.Prompt, "Apply the change {change}.\n"; got != want {
@@ -73,11 +78,8 @@ func TestLoadConfigMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v, want nil for missing file", err)
 	}
-	if cfg.Watches != nil {
-		t.Fatalf("Watches = %v, want nil", cfg.Watches)
-	}
-	if cfg.Prompt != "" {
-		t.Fatalf("Prompt = %q, want empty", cfg.Prompt)
+	if !reflect.DeepEqual(cfg, Config{}) {
+		t.Fatalf("cfg = %+v, want zero-value Config", cfg)
 	}
 }
 
@@ -90,11 +92,8 @@ func TestLoadConfigEmptyFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v, want nil for empty file", err)
 	}
-	if cfg.Watches != nil {
-		t.Fatalf("Watches = %v, want nil", cfg.Watches)
-	}
-	if cfg.Prompt != "" {
-		t.Fatalf("Prompt = %q, want empty", cfg.Prompt)
+	if !reflect.DeepEqual(cfg, Config{}) {
+		t.Fatalf("cfg = %+v, want zero-value Config", cfg)
 	}
 }
 
@@ -113,14 +112,13 @@ func TestLoadConfigUnknownField(t *testing.T) {
 	}
 }
 
-// TestLoadConfigWrongTypeWatches proves the schema rejects wrong field
-// types. watches must be a sequence of strings; a mapping is wrong.
-func TestLoadConfigWrongTypeWatches(t *testing.T) {
+// TestLoadConfigWrongTypeRootDir proves root_dir must be a string.
+func TestLoadConfigWrongTypeRootDir(t *testing.T) {
 	base := t.TempDir()
-	path := writeConfigYAML(t, base, "watches: {not: a sequence}\n")
+	path := writeConfigYAML(t, base, "root_dir: {not: a string}\n")
 	_, err := loadConfig(path)
 	if err == nil {
-		t.Fatal("err = nil, want non-nil for wrong watches type")
+		t.Fatal("err = nil, want non-nil for wrong root_dir type")
 	}
 }
 
@@ -128,7 +126,7 @@ func TestLoadConfigWrongTypeWatches(t *testing.T) {
 // without a closing bracket.
 func TestLoadConfigMalformed(t *testing.T) {
 	base := t.TempDir()
-	path := writeConfigYAML(t, base, "watches: [\n")
+	path := writeConfigYAML(t, base, "root_dir: [\n")
 	_, err := loadConfig(path)
 	if err == nil {
 		t.Fatal("err = nil, want non-nil for malformed YAML")
@@ -140,35 +138,98 @@ func TestLoadConfigMalformed(t *testing.T) {
 // hide configuration.
 func TestLoadConfigMultipleDocuments(t *testing.T) {
 	base := t.TempDir()
-	path := writeConfigYAML(t, base, "watches:\n  - /repos/a\n---\nwatches:\n  - /repos/b\n")
+	path := writeConfigYAML(t, base, "prompt: first\n---\nprompt: second\n")
 	_, err := loadConfig(path)
 	if err == nil {
 		t.Fatal("err = nil, want non-nil for multi-document YAML")
 	}
 }
 
-// TestLoadConfigIgnoresLegacyWatchesFile pins the breaking change:
-// the legacy watches file is not consulted. With only the legacy file
-// present and no config.yaml, the loader returns a zero-value Config.
-func TestLoadConfigIgnoresLegacyWatchesFile(t *testing.T) {
-	base := t.TempDir()
-	seeDir := filepath.Join(base, "see")
-	if err := os.MkdirAll(seeDir, 0o755); err != nil {
+func TestLoadConfigRejectsLegacyWatchesField(t *testing.T) {
+	path := writeConfigYAML(t, t.TempDir(), "watches: []\n")
+	_, err := loadConfig(path)
+	if err == nil || !strings.Contains(err.Error(), "watches") {
+		t.Fatalf("err = %v, want unknown watches field", err)
+	}
+}
+
+func TestValidateConfigAllowsBlankRootDir(t *testing.T) {
+	cfg := Config{}
+	if err := validateConfig(&cfg); err != nil {
+		t.Fatalf("validateConfig: %v", err)
+	}
+}
+
+func TestValidateConfigExpandsTildes(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := Config{RootDir: "~", Include: []string{"~/repo"}, Exclude: []string{"~/skip"}}
+	if err := validateConfig(&cfg); err != nil {
+		t.Fatalf("validateConfig: %v", err)
+	}
+	if cfg.RootDir != home || cfg.Include[0] != filepath.Join(home, "repo") || cfg.Exclude[0] != filepath.Join(home, "skip") {
+		t.Fatalf("cfg = %+v, want expanded paths under %q", cfg, home)
+	}
+}
+
+func TestValidateConfigRejectsInvalidRootDir(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	legacy := filepath.Join(seeDir, "watches")
-	if err := os.WriteFile(legacy, []byte("/legacy/path\n"), 0o644); err != nil {
-		t.Fatal(err)
+	for _, tc := range []struct {
+		name, root, want string
+	}{
+		{"missing", filepath.Join(t.TempDir(), "missing"), "root_dir"},
+		{"file", file, "not a directory"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{RootDir: tc.root}
+			err := validateConfig(&cfg)
+			if err == nil || !strings.Contains(err.Error(), "root_dir") || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want root_dir error containing %q", err, tc.want)
+			}
+		})
 	}
-	cfg, err := loadConfig(filepath.Join(seeDir, "config.yaml"))
-	if err != nil {
-		t.Fatalf("err = %v, want nil (legacy file must not be read)", err)
+}
+
+func TestValidateConfigRejectsDoubleStarRootDir(t *testing.T) {
+	cfg := Config{RootDir: "work/**"}
+	err := validateConfig(&cfg)
+	if err == nil || !strings.Contains(err.Error(), "root_dir: '**' is not supported") {
+		t.Fatalf("err = %v, want root_dir double-star error", err)
 	}
-	if cfg.Watches != nil {
-		t.Fatalf("Watches = %v, want nil (legacy file must not contribute)", cfg.Watches)
+}
+
+func TestValidateConfigRejectsInvalidPatterns(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{"include double star", Config{Include: []string{"work/**"}}, "include[0]: '**' is not supported"},
+		{"exclude double star", Config{Exclude: []string{"work/**"}}, "exclude[0]: '**' is not supported"},
+		{"include malformed", Config{Include: []string{"[unclosed"}}, "include[0]: invalid glob pattern"},
+		{"exclude malformed", Config{Exclude: []string{"[unclosed"}}, "exclude[0]: invalid glob pattern"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateConfig(&tc.cfg)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+		})
 	}
-	if cfg.Prompt != "" {
-		t.Fatalf("Prompt = %q, want empty", cfg.Prompt)
+}
+
+func TestValidateConfigReportsTildeExpansionField(t *testing.T) {
+	t.Setenv("HOME", "")
+	old := userHomeDir
+	t.Cleanup(func() { userHomeDir = old })
+	userHomeDir = func() (string, error) { return "", os.ErrNotExist }
+	cfg := Config{RootDir: "~/Dev"}
+	err := validateConfig(&cfg)
+	if err == nil || !strings.Contains(err.Error(), "root_dir") || !strings.Contains(err.Error(), "expand ~") {
+		t.Fatalf("err = %v, want root_dir tilde expansion error", err)
 	}
 }
 
@@ -201,7 +262,7 @@ func TestLoadStartupConfigUnsetLoadsDefaultPath(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte("watches:\n  - /repos/default\nprompt: from default\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("root_dir: \""+base+"\"\nprompt: from default\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	origHome := os.Getenv("HOME")
@@ -214,8 +275,8 @@ func TestLoadStartupConfigUnsetLoadsDefaultPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
-	if !reflect.DeepEqual(cfg.Watches, []string{"/repos/default"}) {
-		t.Fatalf("Watches = %v, want [/repos/default]", cfg.Watches)
+	if cfg.RootDir != base {
+		t.Fatalf("RootDir = %q, want %q", cfg.RootDir, base)
 	}
 	if cfg.Prompt != "from default" {
 		t.Fatalf("Prompt = %q, want %q", cfg.Prompt, "from default")
@@ -232,7 +293,8 @@ func TestLoadStartupConfigExplicitPath(t *testing.T) {
 	writeConfigYAML(t, base, "not: [valid\n")
 	// Valid explicit file at a separate path.
 	explicit := filepath.Join(t.TempDir(), "explicit.yaml")
-	if err := os.WriteFile(explicit, []byte("watches:\n  - /repos/explicit\nprompt: from explicit\n"), 0o644); err != nil {
+	explicitRoot := t.TempDir()
+	if err := os.WriteFile(explicit, []byte("root_dir: \""+explicitRoot+"\"\nprompt: from explicit\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	origHome := os.Getenv("HOME")
@@ -245,8 +307,8 @@ func TestLoadStartupConfigExplicitPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v, want nil (default path must be bypassed)", err)
 	}
-	if !reflect.DeepEqual(cfg.Watches, []string{"/repos/explicit"}) {
-		t.Fatalf("Watches = %v, want [/repos/explicit]", cfg.Watches)
+	if cfg.RootDir != explicitRoot {
+		t.Fatalf("RootDir = %q, want %q", cfg.RootDir, explicitRoot)
 	}
 	if cfg.Prompt != "from explicit" {
 		t.Fatalf("Prompt = %q, want %q", cfg.Prompt, "from explicit")
@@ -269,18 +331,17 @@ func TestLoadStartupConfigSkipSentinel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v, want nil (sentinel must not read the file)", err)
 	}
-	if cfg.Watches != nil || cfg.Prompt != "" {
+	if !reflect.DeepEqual(cfg, Config{}) {
 		t.Fatalf("cfg = %+v, want zero-value Config", cfg)
 	}
 }
 
 // TestLoadStartupConfigTildeExpansion proves that a leading "~/" in
-// the configFlag value is expanded against $HOME, consistent with
-// --watch.
+// the configFlag value is expanded against $HOME.
 func TestLoadStartupConfigTildeExpansion(t *testing.T) {
 	home := t.TempDir()
 	explicit := filepath.Join(home, "see.yaml")
-	if err := os.WriteFile(explicit, []byte("watches:\n  - /repos/tilde\nprompt: from tilde\n"), 0o644); err != nil {
+	if err := os.WriteFile(explicit, []byte("root_dir: \"~\"\nprompt: from tilde\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	origHome := os.Getenv("HOME")
@@ -293,8 +354,8 @@ func TestLoadStartupConfigTildeExpansion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
-	if !reflect.DeepEqual(cfg.Watches, []string{"/repos/tilde"}) {
-		t.Fatalf("Watches = %v, want [/repos/tilde]", cfg.Watches)
+	if cfg.RootDir != home {
+		t.Fatalf("RootDir = %q, want %q", cfg.RootDir, home)
 	}
 	if cfg.Prompt != "from tilde" {
 		t.Fatalf("Prompt = %q, want %q", cfg.Prompt, "from tilde")
@@ -305,11 +366,10 @@ func TestLoadStartupConfigTildeExpansion(t *testing.T) {
 
 // TestLoadConfigWithConditionAndCommit proves that the strict schema
 // decodes the new custom-workflow fields. Both fields are optional;
-// a configured condition + commit must round-trip through the loader
-// without surprising the existing prompt/watches decode path.
+// a configured condition + commit must round-trip through the loader.
 func TestLoadConfigWithConditionAndCommit(t *testing.T) {
 	base := t.TempDir()
-	path := writeConfigYAML(t, base, "watches:\n  - /repos/alpha\nprompt: Apply {change}\ncondition: \"echo add-dark-mode\"\ncommit: \"see: apply {change}\"\n")
+	path := writeConfigYAML(t, base, "prompt: Apply {change}\ncondition: \"echo add-dark-mode\"\ncommit: \"see: apply {change}\"\n")
 	cfg, err := loadConfig(path)
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
@@ -548,7 +608,7 @@ func TestEnsureDefaultConfigWritesOnMiss(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadConfig on bootstrap file: %v", err)
 	}
-	if cfg.Watches != nil || cfg.Prompt != "" {
+	if !reflect.DeepEqual(cfg, Config{}) {
 		t.Fatalf("cfg = %+v, want zero-value", cfg)
 	}
 }
@@ -566,13 +626,19 @@ func TestLoadStartupConfigDoesNotOverwriteExisting(t *testing.T) {
 	}{
 		{"empty", ""},
 		{"comments-only", "# this is a comment, nothing else\n"},
-		{"valid", "watches:\n  - /repos/keep\nprompt: keep me\n"},
+		{"valid", "prompt: keep me\n"},
 		{"malformed", "not: [valid\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			base := t.TempDir()
-			path := writeConfigYAML(t, base, tc.body)
+			path := readConfigPath(t, base)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
 			before, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
@@ -590,7 +656,7 @@ func TestLoadStartupConfigDoesNotOverwriteExisting(t *testing.T) {
 			stderrWriter = io.Discard
 
 			cfg, err := loadStartupConfig("")
-			if err != nil {
+			if err != nil && tc.name != "malformed" {
 				t.Fatalf("loadStartupConfig(\"\"): %v", err)
 			}
 
@@ -648,7 +714,7 @@ func TestLoadStartupConfigSkipSentinelDoesNotBootstrap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadStartupConfig(\"-\"): %v", err)
 	}
-	if cfg.Watches != nil || cfg.Prompt != "" {
+	if !reflect.DeepEqual(cfg, Config{}) {
 		t.Fatalf("cfg = %+v, want zero-value", cfg)
 	}
 
@@ -687,7 +753,7 @@ func TestLoadStartupConfigExplicitPathDoesNotBootstrap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadStartupConfig(<path>): %v", err)
 	}
-	if cfg.Watches != nil || cfg.Prompt != "" {
+	if !reflect.DeepEqual(cfg, Config{}) {
 		t.Fatalf("cfg = %+v, want zero-value", cfg)
 	}
 
@@ -732,7 +798,7 @@ func TestLoadStartupConfigBootstrapFailureNonFatal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadStartupConfig(\"\"): %v (bootstrap failure must be non-fatal)", err)
 	}
-	if cfg.Watches != nil || cfg.Prompt != "" {
+	if !reflect.DeepEqual(cfg, Config{}) {
 		t.Fatalf("cfg = %+v, want zero-value", cfg)
 	}
 
