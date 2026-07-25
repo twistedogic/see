@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/term"
@@ -748,18 +749,15 @@ func main() {
 	for _, warn := range warnings {
 		events.Observe(warn)
 	}
-
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
+	defer cancel()
 	if mode == modeTUI {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		if err := runTUI(ctx, &w, events, repos); err != nil {
+		if err := runTUI(ctx, &w, events, repos); err != nil && !errors.Is(err, context.Canceled) {
 			log.Fatal(err)
 		}
 		return
 	}
 	// mode == modeLog
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
-	defer cancel()
 	if err := w.Watch(ctx, repos); err != nil {
 		os.Exit(1)
 	}
@@ -807,25 +805,32 @@ func (m *multiFlag) Set(v string) error {
 // Watcher.observer; the eventLogger fans events out to the bubbletea
 // ChanObserver in addition to the batch-level JSONL. The bubbletea
 // program owns signal handling; when it exits we cancel the
-// watcher's context so the tight poll loop returns.
+// watcher's context so the tight poll loop returns. The bubbletea
+// program must complete cleanup before this function returns error.
+// Otherwise, the terminal state will not be correctly restored due to
+// race condition.
 func runTUI(ctx context.Context, w *Watcher, events *eventLogger, repos []string) error {
-	prog, obs := tui.New()
-	defer prog.Quit()
+	tCtx, cancel := context.WithCancelCause(ctx)
+	prog, obs := tui.New(tCtx)
 	events.Attach(tuiObserver{obs: obs})
 	w.observer = events
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	go func() {
-		if _, err := prog.Run(); err != nil {
+	wg := &sync.WaitGroup{}
+	wg.Go(func() {
+		_, err := prog.Run()
+		if err != nil {
 			events.Observe(InfraError{Where: "tui", Err: err.Error()})
 		}
-		cancel()
-	}()
-	err := w.Watch(ctx, repos)
-	if err != nil {
-		events.Observe(InfraError{Where: "watcher", Err: err.Error()})
-	}
-	return err
+		cancel(err)
+	})
+	wg.Go(func() {
+		err := w.Watch(tCtx, repos)
+		if err != nil {
+			events.Observe(InfraError{Where: "watcher", Err: err.Error()})
+		}
+		cancel(err)
+	})
+	wg.Wait()
+	return context.Cause(tCtx)
 }
 
 // tuiObserver forwards each Event to the bubbletea Program via

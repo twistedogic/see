@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"context"
+
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -17,9 +19,9 @@ type ChanObserver struct {
 // the observer to a Watcher (as Watcher.observer), then calls
 // prog.Run() to start the UI. prog.Run() blocks until the user quits
 // or the program is killed.
-func New() (*tea.Program, *ChanObserver) {
+func New(ctx context.Context) (*tea.Program, *ChanObserver) {
 	m := NewModel()
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
 	obs := &ChanObserver{p: p}
 	return p, obs
 }
