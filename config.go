@@ -114,14 +114,19 @@ type Config struct {
 func boolPtr(b bool) *bool { return &b }
 
 // WorkflowConfig is one named entry in the ordered workflows slice.
-// Every field is required when the workflows block is configured;
-// validateWorkflows enforces the nonblank, unique-name contract
-// before the watcher starts.
+// Every field except Model is required when the workflows block is
+// configured; validateWorkflows enforces the nonblank, unique-name
+// contract before the watcher starts. Model is optional: a blank or
+// absent value is treated as "unset" at the call site (the agent's
+// default model is used), and the strict decoder accepts the string
+// silently so existing configurations without the field decode to
+// the zero value.
 type WorkflowConfig struct {
 	Name      string `yaml:"name"`
 	Prompt    string `yaml:"prompt"`
 	Condition string `yaml:"condition"`
 	Commit    string `yaml:"commit"`
+	Model     string `yaml:"model"`
 }
 
 func validateConfig(cfg *Config) error {

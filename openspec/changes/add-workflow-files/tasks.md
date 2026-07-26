@@ -15,19 +15,19 @@
 
 ## 2. Frontmatter and body parser
 
-- [ ] 2.1 Create `workflow_files.go` containing
+- [x] 2.1 Create `workflow_files.go` containing
       `parseWorkflowFile(path string) (WorkflowConfig, error)`. The parser
       reads the file, splits it at the first two `---` lines, decodes the
       frontmatter strictly into a `workflowFileFrontmatter` struct
       (`Name` ignored, `Condition`, `Commit`, `Model`), and returns the
       body as `WorkflowConfig.Prompt` after trimming one leading blank line
       and trailing whitespace.
-- [ ] 2.2 Define `workflowFileFrontmatter` with the four fields and a
+- [x] 2.2 Define `workflowFileFrontmatter` with the four fields and a
       comment on `Name` stating it is ignored (filename is authoritative).
-- [ ] 2.3 Surface actionable errors that name the file path: missing
+- [x] 2.3 Surface actionable errors that name the file path: missing
       opening `---`, missing closing `---`, unknown frontmatter key, blank
       `condition`, blank `commit`, blank body.
-- [ ] 2.4 Add a unit test covering: happy path with all four keys,
+- [x] 2.4 Add a unit test covering: happy path with all four keys,
       `name:` frontmatter is ignored, missing opening delimiter, missing
       closing delimiter, unknown frontmatter key, blank condition, blank
       commit, blank body, body with leading newline trimmed, body with
