@@ -963,3 +963,18 @@ func TestLoadConfigParsesWorktreeFields(t *testing.T) {
 		t.Fatalf("WorktreeRoot = %q, want ~/wt", cfg.WorktreeRoot)
 	}
 }
+
+func TestLoadConfigParsesWorkflowsDir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("workflows_dir: ~/workflows\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.WorkflowsDir != "~/workflows" {
+		t.Fatalf("WorkflowsDir = %q, want ~/workflows", cfg.WorkflowsDir)
+	}
+}

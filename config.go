@@ -86,10 +86,11 @@ func expandTilde(p string) (string, error) {
 // old custom configuration into one named workflow under
 // `workflows` (see AGENTS.md for the schema and the migration path).
 type Config struct {
-	RootDir   string           `yaml:"root_dir"`
-	Include   []string         `yaml:"include"`
-	Exclude   []string         `yaml:"exclude"`
-	Workflows []WorkflowConfig `yaml:"workflows"`
+	RootDir      string           `yaml:"root_dir"`
+	Include      []string         `yaml:"include"`
+	Exclude      []string         `yaml:"exclude"`
+	Workflows    []WorkflowConfig `yaml:"workflows"`
+	WorkflowsDir string           `yaml:"workflows_dir"`
 	// Worktree selects worktree lane isolation (the agent runs in a
 	// git worktree linked to the operator's checkout) instead of the
 	// default branch mode. Default false (zero value) selects branch

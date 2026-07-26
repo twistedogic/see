@@ -1,6 +1,6 @@
 ## 1. Configuration
 
-- [ ] 1.1 Add `WorkflowsDir string \`yaml:"workflows_dir"\`` to `Config` in
+- [x] 1.1 Add `WorkflowsDir string \`yaml:"workflows_dir"\`` to `Config` in
       `config.go`. No new validation logic in `validateConfig` beyond the
       existing `expandTilde` and `**` rejection pattern; the rest happens in
       the loader step.
