@@ -964,6 +964,101 @@ func TestLoadConfigParsesWorktreeFields(t *testing.T) {
 	}
 }
 
+func TestLoadStartupConfigMergesWorkflowFilesBeforeConfig(t *testing.T) {
+	dir := t.TempDir()
+	makeWorkflowFile(t, dir, "02-deps.md")
+	makeWorkflowFile(t, dir, "01-openspec.md")
+	config := filepath.Join(t.TempDir(), "config.yaml")
+	body := "workflows_dir: \"" + dir + "\"\nworkflows:\n" +
+		"  - name: release\n" +
+		"    prompt: Release {change}\n" +
+		"    condition: echo release\n" +
+		"    commit: see-release-{change}\n"
+	if err := os.WriteFile(config, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadStartupConfig(config)
+	if err != nil {
+		t.Fatalf("loadStartupConfig: %v", err)
+	}
+	if len(cfg.Workflows) != 3 {
+		t.Fatalf("len(Workflows) = %d, want 3", len(cfg.Workflows))
+	}
+	if got, want := []string{cfg.Workflows[0].Name, cfg.Workflows[1].Name, cfg.Workflows[2].Name}, []string{"01-openspec", "02-deps", "release"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("workflow names = %v, want %v", got, want)
+	}
+	if err := validateWorkflows(cfg); err != nil {
+		t.Fatalf("validateWorkflows: %v", err)
+	}
+}
+
+func TestLoadStartupConfigRejectsWorkflowFileCollision(t *testing.T) {
+	dir := t.TempDir()
+	makeWorkflowFile(t, dir, "openspec.md")
+	config := filepath.Join(t.TempDir(), "config.yaml")
+	body := "workflows_dir: \"" + dir + "\"\nworkflows:\n" +
+		"  - name: openspec\n" +
+		"    prompt: Apply {change}\n" +
+		"    condition: echo openspec\n" +
+		"    commit: see-apply-{change}\n"
+	if err := os.WriteFile(config, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadStartupConfig(config)
+	if err == nil {
+		t.Fatal("loadStartupConfig: want collision error")
+	}
+	if !strings.Contains(err.Error(), filepath.Join(dir, "openspec.md")) || !strings.Contains(err.Error(), "workflows[0]") {
+		t.Fatalf("error = %q, want file path and workflows[0]", err)
+	}
+}
+
+func TestLoadStartupConfigKeepsConfigWorkflowsWithoutFiles(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		workflowsDir string
+		includeDir   bool
+		createDir    bool
+	}{
+		{name: "empty", workflowsDir: filepath.Join(t.TempDir(), "workflows"), includeDir: true, createDir: true},
+		{name: "missing", workflowsDir: filepath.Join(t.TempDir(), "workflows"), includeDir: true},
+		{name: "absent", includeDir: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.createDir {
+				if err := os.Mkdir(tc.workflowsDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			config := filepath.Join(t.TempDir(), "config.yaml")
+			body := ""
+			if tc.includeDir {
+				body += "workflows_dir: \"" + tc.workflowsDir + "\"\n"
+			}
+			body += "workflows:\n" +
+				"  - name: release\n" +
+				"    prompt: Release {change}\n" +
+				"    condition: echo release\n" +
+				"    commit: see-release-{change}\n"
+			if err := os.WriteFile(config, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if !tc.includeDir {
+				t.Setenv("HOME", t.TempDir())
+			}
+			cfg, err := loadStartupConfig(config)
+			if err != nil {
+				t.Fatalf("loadStartupConfig: %v", err)
+			}
+			if len(cfg.Workflows) != 1 || cfg.Workflows[0].Name != "release" {
+				t.Fatalf("Workflows = %+v, want config workflow only", cfg.Workflows)
+			}
+		})
+	}
+}
+
 func TestLoadConfigParsesWorkflowsDir(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

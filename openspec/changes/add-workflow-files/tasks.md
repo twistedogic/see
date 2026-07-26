@@ -45,15 +45,15 @@
 
 ## 4. Merge and validation
 
-- [ ] 4.1 In `loadStartupConfig` (or a new helper called from `main`),
+- [x] 4.1 In `loadStartupConfig` (or a new helper called from `main`),
       resolve `workflows_dir`, call `loadWorkflowFiles`, and prepend the
       returned slice to `cfg.Workflows` before `validateWorkflows` runs.
-- [ ] 4.2 Detect name collisions between `.md` files and `cfg.Workflows`
+- [x] 4.2 Detect name collisions between `.md` files and `cfg.Workflows`
       before validation; on collision return an actionable error naming
       the file path and the `workflows:` index. The merged slice is built
       with `.md` files first (alphabetical) and `config.yaml` entries
       after in declared order.
-- [ ] 4.3 Add a unit test asserting: both sources contribute (alphabetical
+- [x] 4.3 Add a unit test asserting: both sources contribute (alphabetical
       `.md` first, then declared order), collision produces an actionable
       error, empty `workflows_dir` does not affect `config.yaml` workflows,
       and `config.yaml` `workflows:` still works when `workflows_dir` is

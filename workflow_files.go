@@ -81,22 +81,37 @@ func parseWorkflowFile(path string) (WorkflowConfig, error) {
 	}, nil
 }
 
+// mergeWorkflowFiles loads the optional Markdown workflow source,
+// rejects names that collide with config.yaml entries, and prepends
+// the alphabetically ordered file workflows to the configured slice.
+func mergeWorkflowFiles(cfg Config) (Config, error) {
+	dir, err := resolveWorkflowsDir(cfg)
+	if err != nil {
+		return Config{}, err
+	}
+	files, err := loadWorkflowFiles(dir)
+	if err != nil {
+		return Config{}, err
+	}
+	filePaths := make(map[string]string, len(files))
+	for _, wf := range files {
+		filePaths[strings.TrimSpace(wf.Name)] = filepath.Join(dir, wf.Name+".md")
+	}
+	for i, wf := range cfg.Workflows {
+		if path, ok := filePaths[strings.TrimSpace(wf.Name)]; ok {
+			return Config{}, fmt.Errorf("workflow file %s conflicts with workflows[%d] name %q", path, i, wf.Name)
+		}
+	}
+	cfg.Workflows = append(files, cfg.Workflows...)
+	return cfg, nil
+}
+
 // loadWorkflowFiles discovers workflow `.md` files in dir, sorts
 // them alphabetically by basename, and returns one parsed
-// WorkflowConfig per file. The returned slice is suitable for
-// prepending to cfg.Workflows before validateWorkflows runs.
-//
-// The function is a no-op (returns nil, nil) when dir does not
-// exist, so an operator without a configured workflows_dir never
-// blocks startup. Hidden files (basename starting with `.`) are
-// skipped, subdirectories are not traversed, and non-`.md` files
-// are silently ignored. The directory itself is not a workflow,
-// even if a sibling `*.md` glob would not match a directory name.
-//
-// Each file's basename minus the `.md` extension becomes the
-// workflow's Name; parseWorkflowFile leaves Name empty and this
-// function fills it in so the caller's later validation can pin
-// the name without trusting frontmatter.
+// WorkflowConfig per file. The function is a no-op when dir does
+// not exist; hidden files and subdirectories are skipped, and
+// non-`.md` files are ignored. Each file's basename minus the
+// `.md` extension becomes the workflow's Name.
 func loadWorkflowFiles(dir string) ([]WorkflowConfig, error) {
 	if _, err := os.Stat(dir); err != nil {
 		if os.IsNotExist(err) {

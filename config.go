@@ -416,6 +416,9 @@ func ensureDefaultConfig(path string) error {
 // A malformed default returns a zero-value Config (so startup
 // proceeds with command-line inputs); a malformed explicit path
 // returns the loadConfig error so the operator can see what is wrong.
+// For every loaded configuration, workflow Markdown files are merged
+// ahead of configured workflows before the caller validates the
+// resulting ordered slice.
 func loadStartupConfig(configFlag string) (Config, error) {
 	if configFlag == configPathNone {
 		return Config{}, nil
@@ -438,13 +441,21 @@ func loadStartupConfig(configFlag string) (Config, error) {
 					path, err)
 			}
 		}
-		return loadConfig(path)
+		cfg, err := loadConfig(path)
+		if err != nil {
+			return Config{}, err
+		}
+		return mergeWorkflowFiles(cfg)
 	}
 	expanded, err := expandTilde(configFlag)
 	if err != nil {
 		return Config{}, err
 	}
-	return loadConfig(expanded)
+	cfg, err := loadConfig(expanded)
+	if err != nil {
+		return Config{}, err
+	}
+	return mergeWorkflowFiles(cfg)
 }
 
 // selectPromptTemplate picks the effective prompt: a nonblank
