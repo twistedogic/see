@@ -6,13 +6,13 @@
 # edit a field, every value below is treated as "not set" and `see`
 # falls back to the current working directory and the embedded defaults.
 #
-# A blank `condition` keeps `see` in OpenSpec compatibility mode:
-# it discovers `openspec/changes/` directories, runs the agent on
-# `see/<change>` branches, treats archival as completion, and uses
-# the default commit message. Configuring `condition` switches `see`
-# into custom workflow mode for every watched repository; that mode
-# also requires a nonblank `commit` template (and a nonblank prompt
-# from either this file or `--prompt`) or startup fails.
+# A configured `workflows` sequence enables named custom workflows. Each
+# entry is required to have a unique name, prompt, condition, and commit
+# template. Leave the whole section commented out to retain OpenSpec
+# compatibility mode.
+#
+# Workflows run in order for each repository. Exit status 1 means that
+# workflow has no work; other workflows are still evaluated.
 
 # root_dir: "~/Dev"
 # include:                 # relative to root_dir; empty means every immediate child
@@ -20,9 +20,13 @@
 # exclude:                 # matched against each candidate's basename
 #   - "bin"
 
-# prompt: |-
-#   Apply the OpenSpec change "{change}".
-
-# condition: ""      # platform-shell command; exit 0 means work, exit 1 means idle, any other nonzero is a failure
-
-# commit: ""         # catch-up commit message template (custom workflow mode only); supports {change}
+# workflows:
+#   - name: openspec
+#     prompt: |-
+#       Apply the OpenSpec change "{change}".
+#     condition: "git rev-parse --abbrev-ref HEAD"
+#     commit: "see: apply {change}"
+#   - name: dependencies
+#     prompt: "Update dependency {change}."
+#     condition: "./scripts/next-dependency-update"
+#     commit: "see: update dependency {change}"

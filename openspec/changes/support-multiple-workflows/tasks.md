@@ -2,7 +2,7 @@
 
 - [ ] 1.1 Add a `WorkflowConfig` type and replace top-level custom workflow fields with `Config.Workflows []WorkflowConfig`, preserving strict YAML decoding and ordered entries.
 - [ ] 1.2 Add configuration tests for workflow decoding, multiline prompts, required fields, duplicate names, wrong field types, legacy top-level field rejection, and empty-workflow OpenSpec compatibility.
-- [ ] 1.3 Update `config.example.yaml` and `AGENTS.md` with the `workflows` schema, required fields, ordering, and migration from top-level `prompt`, `condition`, and `commit`.
+- [x] 1.3 Update `config.example.yaml` and `AGENTS.md` with the `workflows` schema, required fields, ordering, and migration from top-level `prompt`, `condition`, and `commit`.
 
 ## 2. Workflow condition and identity tests
 

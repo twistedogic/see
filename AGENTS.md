@@ -71,11 +71,17 @@ include:
 exclude:
   - "playground-old"
 
-prompt: |-
-  Apply the OpenSpec change "{change}".
-
-# condition: "git rev-parse --abbrev-ref HEAD"
-# commit:    "see: apply {change}"
+workflows:
+  - name: openspec
+    prompt: |-
+      Apply the OpenSpec change "{change}".
+    condition: "git rev-parse --abbrev-ref HEAD"
+    commit: "see: apply {change}"
+  - name: dependencies
+    prompt: |-
+      Update the dependency identified by "{change}".
+    condition: "./scripts/next-dependency-update"
+    commit: "see: update dependency {change}"
 ```
 
 - `root_dir` is the base directory. `~` and `~/path` are expanded;
@@ -88,25 +94,49 @@ prompt: |-
 - `exclude` is a sequence of glob patterns matched against each included
   candidate's basename. An omitted or empty sequence excludes nothing. It
   follows the same tilde-expansion and pattern-validation rules as `include`.
-- `prompt` is a string. Literal-block scalars (`|`, `|-`, `|+`) preserve
-  interior line breaks; use `|-` to strip the trailing newline. The single
-  token `{change}` is replaced with the active change name at runtime; no
-  other tokens are substituted.
-- `condition` is a platform-shell command. A nonblank value switches `see`
-  into custom workflow mode for every watched repository; see
-  [Custom Workflows](#custom-workflows) below.
-- `commit` is a string template for the catch-up commit on a successful
-  custom run. The same `{change}` substitution rule applies. The field is
-  consulted only in custom workflow mode; OpenSpec compatibility mode uses
-  its own default commit subject.
+- `workflows` is an ordered sequence. Each entry requires a unique nonblank
+  `name`, `prompt`, `condition`, and `commit`. Entries run in configuration
+  order for every discovered repository; workflows are not run concurrently.
+- A workflow `prompt` is a string. Literal-block scalars (`|`, `|-`, `|+`)
+  preserve interior line breaks; use `|-` to strip the trailing newline. The
+  single token `{change}` is replaced with that workflow's active change name;
+  no other tokens are substituted.
+- A workflow `condition` is a platform-shell command. Exit status `0` means
+  work exists, exit status `1` means that workflow is idle, and any other
+  nonzero status is a failure.
+- A workflow `commit` is the catch-up commit message template. The same
+  `{change}` substitution rule applies.
 
-All fields are optional. Omitting `root_dir` preserves the
-current-working-directory fallback. Omitting `prompt` falls through to the
-embedded `prompt.md` default. Omitting `condition` (or leaving it
-whitespace-only) keeps `see` in OpenSpec compatibility mode. Omitting
-`commit` while `condition` is nonblank is a startup error.
+All fields are optional except the fields inside a configured workflow entry.
+Omitting `workflows` preserves OpenSpec compatibility mode: OpenSpec changes
+are discovered using the embedded prompt and the default commit subject.
+The former top-level `prompt`, `condition`, and `commit` fields are not
+accepted; migrate each old custom configuration into one named workflow.
 
 The former `watches` field and `--watch` command-line flag are not accepted.
+
+### Migration from legacy custom workflow configuration
+
+A former single custom workflow:
+
+```yaml
+prompt: "Apply {change}"
+condition: "echo add-dark-mode"
+commit: "see: apply {change}"
+```
+
+becomes a named entry in `workflows`:
+
+```yaml
+workflows:
+  - name: add-dark-mode
+    prompt: "Apply {change}"
+    condition: "echo add-dark-mode"
+    commit: "see: apply {change}"
+```
+
+Choose a distinct name for each independent automation. Workflow names are
+used to distinguish events and to isolate persistent branches and logs.
 
 ### Migration from legacy watch configuration
 
@@ -141,15 +171,14 @@ the old file and remove `--watch` from scripts or aliases before restarting
 
 ### Prompt precedence
 
-The effective prompt template is selected in this order:
+For OpenSpec compatibility mode, the effective prompt template is selected in
+this order:
 
 1. Nonblank `--prompt` value (a flag overrides everything).
-2. Nonblank `config.yaml` `prompt` value (a user-default).
-3. Embedded `prompt.md` default (the build-time fallback).
+2. Embedded `prompt.md` default (the build-time fallback).
 
-"Blank" means whitespace-only. `--config=-` skips the global file
-entirely: repository discovery falls back to the current working directory,
-and the prompt falls through to the command-line value or embedded default.
+Configured workflow entries always provide their own prompt template. The
+`{change}` token is rendered separately for each workflow.
 
 ### Configuration loading and `--config`
 
@@ -190,27 +219,21 @@ outcome.
 
 ## Custom Workflows
 
-A nonblank `condition` switches `see` from OpenSpec discovery into
-custom workflow mode for every watched repository. The shell command
-becomes the work-existence predicate; the OpenSpec resolver, the
-archival-completion check, and the default commit subject are
-replaced. A blank or whitespace-only `condition` keeps the OpenSpec
-contract: `openspec/changes/` directories drive work, archival
-counts as completion, and the catch-up commit subject is
-`see: apply openspec change <change>`.
+A configured `workflows` sequence switches `see` into custom workflow mode for
+every watched repository. Each workflow's shell command becomes its work-existence
+predicate; the OpenSpec resolver, archival-completion check, and default commit
+subject are replaced for that workflow. Workflows are evaluated in their
+configuration order. Omitting `workflows` keeps the OpenSpec contract:
+`openspec/changes/` directories drive work, archival counts as completion, and
+the catch-up commit subject is `see: apply openspec change <change>`.
 
 ### Startup requirements
 
-Custom mode is validated once at startup. A nonblank `condition`
-requires both:
-
-- a nonblank effective prompt (from `--prompt` or the configured
-  `prompt`), and
-- a nonblank `commit` template in `config.yaml`.
-
-Either missing fails fast with an actionable message and exits with
-status `2` before the watcher starts. The configured `commit` value
-is trimmed; whitespace-only is treated as blank.
+Custom mode is validated once at startup. Every configured workflow requires a
+nonblank prompt, condition, and commit template, plus a unique nonblank name.
+Missing or duplicate fields fail fast with an actionable message before the
+watcher starts. The configured `commit` value is trimmed; whitespace-only is
+treated as blank.
 
 ### Shell contract
 
