@@ -84,9 +84,9 @@
       rejected at startup.
 - [x] 6.3 Update `config.example.yaml` to include a commented
       `workflows_dir:` line and a brief pointer to the new source.
-- [ ] 6.4 Run `gofmt` on the changed Go files.
-- [ ] 6.5 Run `go test -timeout 30s ./...`.
-- [ ] 6.6 Run `openspec sync-specs --change add-workflow-files` to promote
+- [x] 6.4 Run `gofmt` on the changed Go files.
+- [x] 6.5 Run `go test -timeout 30s ./...`.
+- [x] 6.6 Run `openspec sync-specs --change add-workflow-files` to promote
       the delta specs into `openspec/specs/`.
-- [ ] 6.7 Run `openspec validate --change add-workflow-files` and confirm
+- [x] 6.7 Run `openspec validate --change add-workflow-files` and confirm
       no issues.
