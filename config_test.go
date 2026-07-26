@@ -1163,3 +1163,111 @@ func TestResolveWorkflowsDirHappyPathDirectory(t *testing.T) {
 		t.Fatalf("resolveWorkflowsDir = %q, want %q", got, dir)
 	}
 }
+
+// --- startup-level workflow_files tests: tasks 5.1, 5.2, 5.3 -------
+
+// TestLoadStartupConfigMergesSingleWorkflowFile asserts the full
+// loader path: a t.TempDir containing one .md workflow with
+// frontmatter and a body is picked up by loadStartupConfig and the
+// merged slice carries the body's Prompt and the frontmatter's
+// Model through. The config.yaml has no workflows: of its own, so
+// the file workflow is the only entry.
+func TestLoadStartupConfigMergesSingleWorkflowFile(t *testing.T) {
+	dir := t.TempDir()
+	body := strings.Join([]string{
+		"---",
+		"condition: \"echo dark-mode\"",
+		"commit: \"see: apply {change}\"",
+		"model: \"openai/gpt-5-mini\"",
+		"---",
+		"Apply the dark-mode change.",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(dir, "dark-mode.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(config, []byte("workflows_dir: \""+dir+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadStartupConfig(config)
+	if err != nil {
+		t.Fatalf("loadStartupConfig: %v", err)
+	}
+	if len(cfg.Workflows) != 1 {
+		t.Fatalf("len(Workflows) = %d, want 1", len(cfg.Workflows))
+	}
+	wf := cfg.Workflows[0]
+	if wf.Name != "dark-mode" {
+		t.Fatalf("Name = %q, want dark-mode", wf.Name)
+	}
+	if wf.Prompt != "Apply the dark-mode change." {
+		t.Fatalf("Prompt = %q, want %q", wf.Prompt, "Apply the dark-mode change.")
+	}
+	if wf.Model != "openai/gpt-5-mini" {
+		t.Fatalf("Model = %q, want openai/gpt-5-mini", wf.Model)
+	}
+	if wf.Condition != "echo dark-mode" {
+		t.Fatalf("Condition = %q, want %q", wf.Condition, "echo dark-mode")
+	}
+	if wf.Commit != "see: apply {change}" {
+		t.Fatalf("Commit = %q, want %q", wf.Commit, "see: apply {change}")
+	}
+	if err := validateWorkflows(cfg); err != nil {
+		t.Fatalf("validateWorkflows: %v", err)
+	}
+}
+
+// TestLoadStartupConfigMissingWorkflowsDirIsNoOpWhenConfigHasWorkflows
+// asserts that a missing workflows_dir does not affect config.yaml
+// workflows: the configured slice is preserved as-is when the
+// directory does not exist.
+func TestLoadStartupConfigMissingWorkflowsDirIsNoOpWhenConfigHasWorkflows(t *testing.T) {
+	config := filepath.Join(t.TempDir(), "config.yaml")
+	body := "workflows_dir: \"" + filepath.Join(t.TempDir(), "does-not-exist") + "\"\n" +
+		"workflows:\n" +
+		"  - name: release\n" +
+		"    prompt: Release {change}\n" +
+		"    condition: echo release\n" +
+		"    commit: see-release-{change}\n"
+	if err := os.WriteFile(config, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadStartupConfig(config)
+	if err != nil {
+		t.Fatalf("loadStartupConfig: %v", err)
+	}
+	if len(cfg.Workflows) != 1 {
+		t.Fatalf("len(Workflows) = %d, want 1", len(cfg.Workflows))
+	}
+	if cfg.Workflows[0].Name != "release" {
+		t.Fatalf("Workflows[0].Name = %q, want release", cfg.Workflows[0].Name)
+	}
+}
+
+// TestLoadStartupConfigRejectsNonDirectoryWorkflowsDir asserts that a
+// configured workflows_dir pointing at a regular file produces an
+// actionable error naming the path; the loader must surface the
+// failure rather than fall through silently.
+func TestLoadStartupConfigRejectsNonDirectoryWorkflowsDir(t *testing.T) {
+	dir := t.TempDir()
+	notADir := filepath.Join(dir, "regular-file")
+	if err := os.WriteFile(notADir, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(t.TempDir(), "config.yaml")
+	body := "workflows_dir: \"" + notADir + "\"\nworkflows:\n" +
+		"  - name: release\n" +
+		"    prompt: Release {change}\n" +
+		"    condition: echo release\n" +
+		"    commit: see-release-{change}\n"
+	if err := os.WriteFile(config, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadStartupConfig(config)
+	if err == nil {
+		t.Fatal("loadStartupConfig: want non-directory error, got nil")
+	}
+	if !strings.Contains(err.Error(), notADir) {
+		t.Fatalf("error = %q, want it to name %s", err, notADir)
+	}
+}

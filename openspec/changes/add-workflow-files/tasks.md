@@ -61,14 +61,14 @@
 
 ## 5. End-to-end startup
 
-- [ ] 5.1 Add a startup-level test in `config_test.go` (or a new
+- [x] 5.1 Add a startup-level test in `config_test.go` (or a new
       `workflow_files_test.go`) that points `WorkflowsDir` at a `t.TempDir`
       containing one `.md` workflow, runs the full load, and asserts the
       merged slice contains the file's workflow with `Prompt` set to the
       body and `Model` passed through.
-- [ ] 5.2 Add a startup-level test asserting a missing `WorkflowsDir` is
+- [x] 5.2 Add a startup-level test asserting a missing `WorkflowsDir` is
       a silent no-op when `config.yaml` already supplies workflows.
-- [ ] 5.3 Add a startup-level test asserting a non-directory path under
+- [x] 5.3 Add a startup-level test asserting a non-directory path under
       `WorkflowsDir` produces an actionable error naming the path.
 
 ## 6. Documentation
