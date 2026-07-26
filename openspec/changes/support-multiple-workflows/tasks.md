@@ -8,7 +8,7 @@
 
 - [ ] 2.1 Add failing tests proving each workflow condition is evaluated independently in repository/workflow order and exit status `1` skips only the current workflow.
 - [ ] 2.2 Add failing tests for workflow-scoped SHA-256 identity, proving equal changes from different workflow names use different branch and log identities while repeated pairs remain stable.
-- [ ] 2.3 Add failing tests proving each workflow renders its own prompt and commit templates with `{change}` substitution.
+- [x] 2.3 Add failing tests proving each workflow renders its own prompt and commit templates with `{change}` substitution.
 - [ ] 2.4 Add failing tests proving condition, agent, and catch-up failures are isolated and later workflows run after successful rollback.
 
 ## 3. Sequential watcher orchestration

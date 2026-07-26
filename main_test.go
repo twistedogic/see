@@ -2930,3 +2930,169 @@ func TestWatcherWorkflowExitOneSkipsThatWorkflow(t *testing.T) {
 		t.Fatalf("current branch = %q, want active workflow lane", got)
 	}
 }
+
+// TestWatcherWorkflowAgentFailureIsolatedAndLaterRuns: a workflow's
+// agent failure must roll back that workflow's lane and let the
+// next workflow in configuration order run. The failure surfaces as
+// a single ChangeFailed event for the failing workflow, the rolled-
+// back lane is gone, and the second workflow's lane is checked out
+// with the catch-up commit applied.
+func TestWatcherWorkflowAgentFailureIsolatedAndLaterRuns(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	agentErr := errors.New("first agent failed")
+	var callCount int
+	agent := &fakeAgent{
+		onRun: func() error {
+			callCount++
+			if callCount == 1 {
+				if err := os.WriteFile(filepath.Join(repo, "halfway.txt"), []byte("x"), 0o644); err != nil {
+					return err
+				}
+				run("add", "-A")
+				if err := exec.Command("git", "-C", repo, "commit", "-q", "-m", "halfway").Run(); err != nil {
+					return err
+				}
+				return agentErr
+			}
+			return os.WriteFile(filepath.Join(repo, "second.txt"), []byte("ok"), 0o644)
+		},
+	}
+	obs := &recordingObserver{}
+	w := Watcher{
+		agent:      agent,
+		RetryCount: 1,
+		Once:       true,
+		observer:   obs,
+		Workflows: []WorkflowConfig{
+			{
+				Name:      "first",
+				Condition: platformCondition(`printf 'change-1'`, `echo change-1`),
+				Prompt:    "First {change}",
+				Commit:    "see: first {change}",
+			},
+			{
+				Name:      "second",
+				Condition: platformCondition(`printf 'change-2'`, `echo change-2`),
+				Prompt:    "Second {change}",
+				Commit:    "see: second {change}",
+			},
+		},
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want nil", err)
+	}
+	if len(agent.runs) != 2 {
+		t.Fatalf("agent runs = %d, want 2 (failed first, ran second)", len(agent.runs))
+	}
+	firstLane := "see/" + workflowIdentityDigest("first", "change-1")
+	secondLane := "see/" + workflowIdentityDigest("second", "change-2")
+	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/"+firstLane).Run(); err == nil {
+		t.Fatalf("rolled-back lane %q still exists", firstLane)
+	}
+	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/"+secondLane).Run(); err != nil {
+		t.Fatalf("second lane %q missing: %v", secondLane, err)
+	}
+	if got := currentBranch(t, repo); got != secondLane {
+		t.Fatalf("current branch = %q, want second lane %q", got, secondLane)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "halfway.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("first workflow's halfway.txt should have been rolled back, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "second.txt")); err != nil {
+		t.Fatalf("second workflow's file should exist, stat err = %v", err)
+	}
+	var failedCount int
+	for _, e := range obs.events {
+		if f, ok := e.(ChangeFailed); ok {
+			if f.Path != repo || f.Change != "first" {
+				t.Fatalf("unexpected ChangeFailed event: %+v", f)
+			}
+			if !strings.Contains(f.Err, agentErr.Error()) {
+				t.Fatalf("ChangeFailed.Err = %q, want substring %q", f.Err, agentErr.Error())
+			}
+			failedCount++
+		}
+	}
+	if failedCount != 1 {
+		t.Fatalf("ChangeFailed count = %d, want 1", failedCount)
+	}
+}
+
+// TestWatcherRendersOwnCommitTemplatePerWorkflow: each workflow's
+// catch-up commit uses its own commit template with that workflow's
+// change substitution. The first workflow's lane carries the first
+// template; the second workflow's lane carries the second.
+func TestWatcherRendersOwnCommitTemplatePerWorkflow(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	var callCount int
+	agent := &fakeAgent{
+		onRun: func() error {
+			callCount++
+			// Each workflow run writes a distinct untracked file
+			// so the catch-up commit has staged changes to commit.
+			name := fmt.Sprintf("wf%d.txt", callCount)
+			return os.WriteFile(filepath.Join(repo, name), []byte("done"), 0o644)
+		},
+	}
+	w := Watcher{
+		agent:      agent,
+		RetryCount: 1,
+		Once:       true,
+		Workflows: []WorkflowConfig{
+			{
+				Name:      "openspec",
+				Condition: platformCondition(`printf 'change-1'`, `echo change-1`),
+				Prompt:    "First {change}",
+				Commit:    "see: openspec {change}",
+			},
+			{
+				Name:      "update",
+				Condition: platformCondition(`printf 'change-2'`, `echo change-2`),
+				Prompt:    "Second {change}",
+				Commit:    "see: update {change}",
+			},
+		},
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want nil", err)
+	}
+	openspecLane := "see/" + workflowIdentityDigest("openspec", "change-1")
+	updateLane := "see/" + workflowIdentityDigest("update", "change-2")
+	for branch, want := range map[string]string{
+		openspecLane: "see: openspec change-1",
+		updateLane:   "see: update change-2",
+	} {
+		out, err := exec.Command("git", "-C", repo, "log", "--oneline", branch).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git log %s: %v\n%s", branch, err, out)
+		}
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("lane %s log missing commit %q:\n%s", branch, want, out)
+		}
+	}
+	// Both lanes stay intact — the spec leaves the final usable
+	// lane checked out but earlier lanes must remain reachable.
+	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/"+openspecLane).Run(); err != nil {
+		t.Fatalf("openspec lane %q should remain reachable: %v", openspecLane, err)
+	}
+	run("switch", "main")
+	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/"+updateLane).Run(); err != nil {
+		t.Fatalf("update lane %q should remain reachable after switching back: %v", updateLane, err)
+	}
+}
