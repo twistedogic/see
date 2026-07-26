@@ -390,6 +390,7 @@ func TestLoadConfigWithWorkflows(t *testing.T) {
     prompt: "Bump {change}"
     condition: "echo package-update"
     commit: "see: bump {change}"
+    model: "openai/gpt-5-mini"
 `
 	path := writeConfigYAML(t, base, body)
 	cfg, err := loadConfig(path)
@@ -408,8 +409,36 @@ func TestLoadConfigWithWorkflows(t *testing.T) {
 	if cfg.Workflows[1] != (WorkflowConfig{
 		Name: "update", Prompt: "Bump {change}",
 		Condition: "echo package-update", Commit: "see: bump {change}",
+		Model: "openai/gpt-5-mini",
 	}) {
 		t.Fatalf("Workflows[1] = %+v, want update entry", cfg.Workflows[1])
+	}
+}
+
+// TestLoadConfigWorkflowModelBlankIsUnset proves omitted and whitespace-only
+// model values decode without adding a required-field validation rule.
+func TestLoadConfigWorkflowModelBlankIsUnset(t *testing.T) {
+	base := t.TempDir()
+	body := `workflows:
+  - name: omitted
+    prompt: "Apply {change}"
+    condition: "echo omitted"
+    commit: "see: apply {change}"
+  - name: blank
+    prompt: "Apply {change}"
+    condition: "echo blank"
+    commit: "see: apply {change}"
+    model: "  "
+`
+	cfg, err := loadConfig(writeConfigYAML(t, base, body))
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if got := cfg.Workflows[0].Model; got != "" {
+		t.Fatalf("omitted model = %q, want empty", got)
+	}
+	if got := cfg.Workflows[1].Model; got != "  " {
+		t.Fatalf("blank model = %q, want decoded whitespace for call-site trimming", got)
 	}
 }
 

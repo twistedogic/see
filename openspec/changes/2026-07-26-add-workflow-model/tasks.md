@@ -1,13 +1,13 @@
 ## 1. Configuration
 
-- [ ] 1.1 Add a `Model string` field to `WorkflowConfig` in `config.go` with the
+- [x] 1.1 Add a `Model string` field to `WorkflowConfig` in `config.go` with the
       `yaml:"model"` tag. No new validation: the strict decoder accepts the
       string, blank is allowed, and `validateWorkflows` continues to require
       only `name`, `prompt`, `condition`, and `commit`.
-- [ ] 1.2 Add a failing round-trip test in `config_test.go` that decodes a
+- [x] 1.2 Add a failing round-trip test in `config_test.go` that decodes a
       workflow with `model: openai/gpt-5-mini` and asserts the value reaches
       `WorkflowConfig.Model`.
-- [ ] 1.3 Add a regression test asserting that a workflow with no `model`
+- [x] 1.3 Add a regression test asserting that a workflow with no `model`
       field decodes to the zero value and that a workflow with `model: "  "`
       also decodes to the zero value (whitespace-only is treated as unset at
       the call site, not the decode site).
