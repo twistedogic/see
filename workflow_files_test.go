@@ -282,3 +282,113 @@ func TestParseWorkflowFileBlankModelIsUnset(t *testing.T) {
 		t.Fatalf("Model = %q, want the raw value (whitespace-only handled at call site)", wf.Model)
 	}
 }
+
+// makeWorkflowFile drops a minimal-valid workflow markdown file at
+// <dir>/<name> and returns nothing; the test reads the directory
+// through loadWorkflowFiles so the helper stays focused on laying
+// out the input.
+func makeWorkflowFile(t *testing.T, dir, name string) {
+	t.Helper()
+	body := strings.Join([]string{
+		"---",
+		"condition: \"echo add-dark-mode\"",
+		"commit: \"see: apply {change}\"",
+		"---",
+		"Apply the change.",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+}
+
+func TestLoadWorkflowFilesAlphabeticalSort(t *testing.T) {
+	dir := t.TempDir()
+	makeWorkflowFile(t, dir, "02-deps.md")
+	makeWorkflowFile(t, dir, "01-openspec.md")
+	wfs, err := loadWorkflowFiles(dir)
+	if err != nil {
+		t.Fatalf("loadWorkflowFiles: %v", err)
+	}
+	if len(wfs) != 2 {
+		t.Fatalf("len = %d, want 2", len(wfs))
+	}
+	if wfs[0].Name != "01-openspec" {
+		t.Fatalf("wfs[0].Name = %q, want 01-openspec", wfs[0].Name)
+	}
+	if wfs[1].Name != "02-deps" {
+		t.Fatalf("wfs[1].Name = %q, want 02-deps", wfs[1].Name)
+	}
+}
+
+func TestLoadWorkflowFilesSkipsHidden(t *testing.T) {
+	dir := t.TempDir()
+	makeWorkflowFile(t, dir, "openspec.md")
+	// A hidden file would not parse anyway (it has no frontmatter
+	// delimiter), but the discovery filter must exclude it before
+	// the parser ever sees it.
+	if err := os.WriteFile(filepath.Join(dir, ".disabled.md"),
+		[]byte("not a workflow\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wfs, err := loadWorkflowFiles(dir)
+	if err != nil {
+		t.Fatalf("loadWorkflowFiles: %v", err)
+	}
+	if len(wfs) != 1 {
+		t.Fatalf("len = %d, want 1", len(wfs))
+	}
+	if wfs[0].Name != "openspec" {
+		t.Fatalf("wfs[0].Name = %q, want openspec", wfs[0].Name)
+	}
+}
+
+func TestLoadWorkflowFilesIgnoresNonMarkdown(t *testing.T) {
+	dir := t.TempDir()
+	makeWorkflowFile(t, dir, "openspec.md")
+	if err := os.WriteFile(filepath.Join(dir, "README.txt"),
+		[]byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wfs, err := loadWorkflowFiles(dir)
+	if err != nil {
+		t.Fatalf("loadWorkflowFiles: %v", err)
+	}
+	if len(wfs) != 1 {
+		t.Fatalf("len = %d, want 1", len(wfs))
+	}
+	if wfs[0].Name != "openspec" {
+		t.Fatalf("wfs[0].Name = %q, want openspec", wfs[0].Name)
+	}
+}
+
+func TestLoadWorkflowFilesMissingDirNoOp(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "nope")
+	wfs, err := loadWorkflowFiles(missing)
+	if err != nil {
+		t.Fatalf("loadWorkflowFiles: want nil err for missing dir, got %v", err)
+	}
+	if wfs != nil {
+		t.Fatalf("wfs = %v, want nil slice", wfs)
+	}
+}
+
+func TestLoadWorkflowFilesSkipsSubdirectory(t *testing.T) {
+	dir := t.TempDir()
+	makeWorkflowFile(t, dir, "openspec.md")
+	// A nested file with the right extension must not be picked up
+	// because subdirectories are not traversed.
+	if err := os.Mkdir(filepath.Join(dir, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	makeWorkflowFile(t, filepath.Join(dir, "nested"), "hidden.md")
+	wfs, err := loadWorkflowFiles(dir)
+	if err != nil {
+		t.Fatalf("loadWorkflowFiles: %v", err)
+	}
+	if len(wfs) != 1 {
+		t.Fatalf("len = %d, want 1 (nested file must be ignored)", len(wfs))
+	}
+	if wfs[0].Name != "openspec" {
+		t.Fatalf("wfs[0].Name = %q, want openspec", wfs[0].Name)
+	}
+}

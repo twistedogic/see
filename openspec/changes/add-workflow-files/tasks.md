@@ -35,11 +35,11 @@
 
 ## 3. Discovery
 
-- [ ] 3.1 Add `loadWorkflowFiles(dir string) ([]WorkflowConfig, error)`
+- [x] 3.1 Add `loadWorkflowFiles(dir string) ([]WorkflowConfig, error)`
       that returns `nil, nil` when `dir` does not exist; otherwise globs
       `*.md` in `dir`, sorts matches alphabetically, skips hidden files
       (basename starting with `.`), and calls `parseWorkflowFile` for each.
-- [ ] 3.2 Add a unit test asserting: alphabetical sort, hidden file
+- [x] 3.2 Add a unit test asserting: alphabetical sort, hidden file
       skipped, non-`.md` file ignored, missing dir returns `nil, nil`,
       subdirectory ignored (only direct children).
 

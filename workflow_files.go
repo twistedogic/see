@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -77,4 +79,59 @@ func parseWorkflowFile(path string) (WorkflowConfig, error) {
 		Commit:    fm.Commit,
 		Model:     fm.Model,
 	}, nil
+}
+
+// loadWorkflowFiles discovers workflow `.md` files in dir, sorts
+// them alphabetically by basename, and returns one parsed
+// WorkflowConfig per file. The returned slice is suitable for
+// prepending to cfg.Workflows before validateWorkflows runs.
+//
+// The function is a no-op (returns nil, nil) when dir does not
+// exist, so an operator without a configured workflows_dir never
+// blocks startup. Hidden files (basename starting with `.`) are
+// skipped, subdirectories are not traversed, and non-`.md` files
+// are silently ignored. The directory itself is not a workflow,
+// even if a sibling `*.md` glob would not match a directory name.
+//
+// Each file's basename minus the `.md` extension becomes the
+// workflow's Name; parseWorkflowFile leaves Name empty and this
+// function fills it in so the caller's later validation can pin
+// the name without trusting frontmatter.
+func loadWorkflowFiles(dir string) ([]WorkflowConfig, error) {
+	if _, err := os.Stat(dir); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("workflows_dir %q: %w", dir, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("workflows_dir %q: %w", dir, err)
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		if filepath.Ext(name) != ".md" {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]WorkflowConfig, 0, len(names))
+	for _, name := range names {
+		path := filepath.Join(dir, name)
+		wf, err := parseWorkflowFile(path)
+		if err != nil {
+			return nil, err
+		}
+		wf.Name = strings.TrimSuffix(name, ".md")
+		out = append(out, wf)
+	}
+	return out, nil
 }
