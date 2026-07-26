@@ -14,44 +14,44 @@
 
 ## 2. Watcher and Agent plumbing
 
-- [ ] 2.1 Add a `Model string` field to the `Watcher` struct in `main.go`,
+- [x] 2.1 Add a `Model string` field to the `Watcher` struct in `main.go`,
       with a comment that it is populated by `runOneWorkflow` for the
       duration of one workflow's run and is empty in OpenSpec-compat mode.
-- [ ] 2.2 Update the `Agent` interface to
+- [x] 2.2 Update the `Agent` interface to
       `Run(ctx, path, change, prompt, model string) (string, error)`.
-- [ ] 2.3 Update `PiAgent.Run` to accept the new parameter. When
+- [x] 2.3 Update `PiAgent.Run` to accept the new parameter. When
       `strings.TrimSpace(model) != ""`, append `"--model", trimmed` to the
       argv after the existing flags and before the positional prompt.
       Otherwise the argv is byte-identical to today.
-- [ ] 2.4 Update `fakeAgent.Run` in `main_test.go` to accept and record the
+- [x] 2.4 Update `fakeAgent.Run` in `main_test.go` to accept and record the
       new parameter (add a `models []string` slice mirroring `prompts`).
-- [ ] 2.5 Update the three `agent.Run` call sites in `main.go`
+- [x] 2.5 Update the three `agent.Run` call sites in `main.go`
       (`workResolvedWorktree`, the custom-mode branch of `workResolved`, and
       the OpenSpec-compat branch of `workResolved`) to pass `w.Model`; the
       compat site passes `""`.
-- [ ] 2.6 In `runOneWorkflow`, set `child.Model = strings.TrimSpace(wf.Model)`
+- [x] 2.6 In `runOneWorkflow`, set `child.Model = strings.TrimSpace(wf.Model)`
       on the child watcher copy, alongside the existing
       `Condition` / `CommitTemplate` / `WorkflowName` / prompt assignments.
 
 ## 3. Tests
 
-- [ ] 3.1 Add `TestPiAgentPassesModelFlag`: drive `PiAgent.Run` with a
+- [x] 3.1 Add `TestPiAgentPassesModelFlag`: drive `PiAgent.Run` with a
       recorded-argv fake binary and assert that the argv contains
       `--model openai/gpt-5-mini` and the trailing positional prompt.
-- [ ] 3.2 Add `TestPiAgentOmitsModelFlagWhenBlank`: same harness, pass
+- [x] 3.2 Add `TestPiAgentOmitsModelFlagWhenBlank`: same harness, pass
       `""` (and once `"  "`) and assert the argv contains no `--model`
       occurrence and is otherwise byte-identical to the pre-change argv.
-- [ ] 3.3 Add `TestWorkflowModelFlowsToAgent`: configure a watcher with one
+- [x] 3.3 Add `TestWorkflowModelFlowsToAgent`: configure a watcher with one
       workflow whose `model` is set, drive a successful run with a
       `fakeAgent`, and assert the recorded `models` slice contains the
       expected value.
-- [ ] 3.4 Add `TestWorkflowBlankModelDoesNotPropagate`: same harness with a
+- [x] 3.4 Add `TestWorkflowBlankModelDoesNotPropagate`: same harness with a
       blank `model`, assert the recorded `models` slice contains `""` and
       the resulting argv would have no `--model` flag.
-- [ ] 3.5 Update every existing `PiAgent{...}.Run(...)` and
+- [x] 3.5 Update every existing `PiAgent{...}.Run(...)` and
       `fakeAgent.Run(...)` call in `main_test.go` to pass the new `""`
       argument so the suite compiles.
-- [ ] 3.6 Run `gofmt` on the changed Go files and `go test -timeout 30s ./...`.
+- [x] 3.6 Run `gofmt` on the changed Go files and `go test -timeout 30s ./...`.
 
 ## 4. Documentation
 

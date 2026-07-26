@@ -21,18 +21,20 @@ import (
 // exercise the capture-failure path (logPath pointing at "" means
 // capture was unavailable; nil preserves the default non-empty path).
 // prompts records the 4th Run argument (the rendered prompt) on every
-// call so tests can assert what `pi` would receive.
+// call; models records the optional 5th argument.
 type fakeAgent struct {
 	runs    []string
 	prompts []string
+	models  []string
 	err     error
 	logPath *string
 	onRun   func() error
 }
 
-func (f *fakeAgent) Run(_ context.Context, path, _, prompt string) (string, error) {
+func (f *fakeAgent) Run(_ context.Context, path, _, prompt, model string) (string, error) {
 	f.runs = append(f.runs, path)
 	f.prompts = append(f.prompts, prompt)
+	f.models = append(f.models, model)
 	if f.onRun != nil {
 		if err := f.onRun(); err != nil {
 			return "", err
@@ -214,7 +216,7 @@ func TestPiAgentCapturesOutputToLogFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	logPath, err := (PiAgent{binary: script, logDir: logDir}).Run(context.Background(), dir, "task-1", "prompt")
+	logPath, err := (PiAgent{binary: script, logDir: logDir}).Run(context.Background(), dir, "task-1", "prompt", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +243,7 @@ func TestPiAgentRespectsSeeLogDir(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf hello\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	logPath, err := (PiAgent{binary: script, logDir: logDir}).Run(context.Background(), dir, "task-1", "prompt")
+	logPath, err := (PiAgent{binary: script, logDir: logDir}).Run(context.Background(), dir, "task-1", "prompt", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,13 +255,62 @@ func TestPiAgentRespectsSeeLogDir(t *testing.T) {
 	}
 }
 
+func TestPiAgentPassesModelFlag(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell script to record argv")
+	}
+	args := runPiAgentWithRecordedArgs(t, "openai/gpt-5-mini")
+	want := []string{"--mode", "json", "--no-session", "--model", "openai/gpt-5-mini", "prompt text"}
+	if strings.Join(args, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("argv = %q, want %q", args, want)
+	}
+}
+
+func TestPiAgentOmitsModelFlagWhenBlank(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell script to record argv")
+	}
+	want := []string{"--mode", "json", "--no-session", "prompt text"}
+	for _, model := range []string{"", "  "} {
+		t.Run(fmt.Sprintf("model-%q", model), func(t *testing.T) {
+			args := runPiAgentWithRecordedArgs(t, model)
+			if strings.Join(args, "\x00") != strings.Join(want, "\x00") {
+				t.Fatalf("argv = %q, want %q", args, want)
+			}
+		})
+	}
+}
+
+func runPiAgentWithRecordedArgs(t *testing.T, model string) []string {
+	t.Helper()
+	dir := t.TempDir()
+	logDir := filepath.Join(dir, "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	argvPath := filepath.Join(dir, "argv")
+	script := filepath.Join(dir, "agent")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$SEE_TEST_ARGV\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SEE_TEST_ARGV", argvPath)
+	if _, err := (PiAgent{binary: script, logDir: logDir}).Run(context.Background(), dir, "task-1", "prompt text", model); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatalf("read recorded argv: %v", err)
+	}
+	return strings.Split(strings.TrimSuffix(string(body), "\n"), "\n")
+}
+
 func TestPiAgentPreservesExitCodeByDefault(t *testing.T) {
 	script := filepath.Join(t.TempDir(), "agent")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 7\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := (PiAgent{binary: script, logDir: t.TempDir()}).Run(context.Background(), t.TempDir(), "task-1", "prompt")
+	_, err := (PiAgent{binary: script, logDir: t.TempDir()}).Run(context.Background(), t.TempDir(), "task-1", "prompt", "")
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
 		t.Fatalf("Run() error = %v, want exit code 7", err)
@@ -290,7 +341,7 @@ func TestPiAgentRunSurfacesFileCreateError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	logPath, err := (PiAgent{binary: script, logDir: logDir}).Run(context.Background(), dir, "task-1", "prompt")
+	logPath, err := (PiAgent{binary: script, logDir: logDir}).Run(context.Background(), dir, "task-1", "prompt", "")
 	if err == nil {
 		t.Fatal("Run returned nil error, want non-nil on capture failure")
 	}
@@ -2875,7 +2926,7 @@ type digestAgent struct {
 	digests []string
 }
 
-func (d *digestAgent) Run(_ context.Context, _, digest, _ string) (string, error) {
+func (d *digestAgent) Run(_ context.Context, _, digest, _, _ string) (string, error) {
 	d.digests = append(d.digests, digest)
 	return "/tmp/see--" + digest + ".jsonl", nil
 }
@@ -2945,11 +2996,56 @@ func TestWatcherIteratesWorkflowsInOrder(t *testing.T) {
 	}
 }
 
+func TestWorkflowModelFlowsToAgent(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	agent := &fakeAgent{}
+	w := Watcher{
+		agent:      agent,
+		RetryCount: 1,
+		Once:       true,
+		Workflows: []WorkflowConfig{{
+			Name:      "modelled",
+			Condition: platformCondition(`printf 'change'`, `echo change`),
+			Prompt:    "Apply {change}",
+			Commit:    "see: apply {change}",
+			Model:     "openai/gpt-5-mini",
+		}},
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want nil", err)
+	}
+	if len(agent.models) != 1 || agent.models[0] != "openai/gpt-5-mini" {
+		t.Fatalf("agent.models = %v, want [openai/gpt-5-mini]", agent.models)
+	}
+}
+
+func TestWorkflowBlankModelDoesNotPropagate(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	agent := &fakeAgent{}
+	w := Watcher{
+		agent:      agent,
+		RetryCount: 1,
+		Once:       true,
+		Workflows: []WorkflowConfig{{
+			Name:      "default-model",
+			Condition: platformCondition(`printf 'change'`, `echo change`),
+			Prompt:    "Apply {change}",
+			Commit:    "see: apply {change}",
+			Model:     "  ",
+		}},
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want nil", err)
+	}
+	if len(agent.models) != 1 || agent.models[0] != "" {
+		t.Fatalf("agent.models = %v, want an empty model", agent.models)
+	}
+}
+
 // TestWatcherDifferentWorkflowsSameChangeDifferentLanes: when two
-// workflows both emit the same normalized change, the watcher
-// uses the workflow-scoped digest so the persistent lanes stay
-// isolated. Equal collisions in the change alone must not produce
-// the same branch.
+// workflows both emit the same normalized change, the watcher uses
+// the workflow-scoped digest so the persistent lanes stay isolated.
+// Equal collisions in the change alone must not produce the same branch.
 func TestWatcherDifferentWorkflowsSameChangeDifferentLanes(t *testing.T) {
 	repo := mkCleanCustomRepo(t)
 	agent := &fakeAgent{}

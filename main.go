@@ -129,7 +129,7 @@ func selectRunMode(mode string, isTTY bool) (runMode, error) {
 // logPath is the rule rather than the exception — the log directory
 // is validated up front by ensureLogDir.
 type Agent interface {
-	Run(ctx context.Context, path, change, prompt string) (string, error)
+	Run(ctx context.Context, path, change, prompt, model string) (string, error)
 }
 
 type PiAgent struct {
@@ -144,8 +144,13 @@ func pathFor(repo, change string) string {
 	return logFilename(filepath.Base(repo) + "--" + change)
 }
 
-func (p PiAgent) Run(ctx context.Context, path, change, prompt string) (string, error) {
-	cmd := exec.CommandContext(ctx, p.binary, "--mode", "json", "--no-session", prompt)
+func (p PiAgent) Run(ctx context.Context, path, change, prompt, model string) (string, error) {
+	args := []string{"--mode", "json", "--no-session"}
+	if model = strings.TrimSpace(model); model != "" {
+		args = append(args, "--model", model)
+	}
+	args = append(args, prompt)
+	cmd := exec.CommandContext(ctx, p.binary, args...)
 	cmd.Dir = path
 	logPath := filepath.Join(p.logDir, pathFor(path, change))
 	f, err := os.Create(logPath)
@@ -664,6 +669,10 @@ type Watcher struct {
 	// default"; use SetPromptTemplate to apply the normalization
 	// rule rather than assigning directly.
 	PromptTemplate string
+	// Model is the optional per-workflow model selector. It is populated
+	// by runOneWorkflow for the duration of one workflow run and is empty
+	// in OpenSpec-compatibility mode.
+	Model string
 	// Condition selects custom workflow mode when nonblank.
 	Condition string
 	// CommitTemplate is the catch-up commit message rendered with
@@ -816,7 +825,7 @@ func (w Watcher) workResolvedWorktree(ctx context.Context, path, change, ref str
 	if template == "" {
 		template = defaultPromptTemplate
 	}
-	logPath, runErr := w.agent.Run(ctx, worktreePath, digest, renderTemplate(template, change))
+	logPath, runErr := w.agent.Run(ctx, worktreePath, digest, renderTemplate(template, change), w.Model)
 	if logPath != "" && w.observer != nil {
 		w.observer.Observe(LogPath{Path: logPath, Workflow: w.WorkflowName, Change: change})
 	}
@@ -876,7 +885,7 @@ func (w Watcher) workResolved(ctx context.Context, path, change string) error {
 		if template == "" {
 			template = defaultPromptTemplate
 		}
-		logPath, runErr := w.agent.Run(ctx, path, digest, renderTemplate(template, change))
+		logPath, runErr := w.agent.Run(ctx, path, digest, renderTemplate(template, change), w.Model)
 		if logPath != "" && w.observer != nil {
 			w.observer.Observe(LogPath{Path: logPath, Workflow: w.WorkflowName, Change: change})
 		}
@@ -904,7 +913,7 @@ func (w Watcher) workResolved(ctx context.Context, path, change string) error {
 	if template == "" {
 		template = defaultPromptTemplate
 	}
-	logPath, runErr := w.agent.Run(ctx, path, change, renderTemplate(template, change))
+	logPath, runErr := w.agent.Run(ctx, path, change, renderTemplate(template, change), "")
 	if logPath != "" && w.observer != nil {
 		w.observer.Observe(LogPath{Path: logPath, Workflow: w.WorkflowName, Change: change})
 	}
@@ -988,6 +997,7 @@ func (w Watcher) runOneWorkflow(ctx context.Context, repo string, wf WorkflowCon
 	child.Condition = wf.Condition
 	child.CommitTemplate = wf.Commit
 	child.WorkflowName = wf.Name
+	child.Model = strings.TrimSpace(wf.Model)
 	child.SetPromptTemplate(wf.Prompt)
 	return child.runWithRetry(ctx, repo)
 }
