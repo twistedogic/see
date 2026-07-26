@@ -9,14 +9,14 @@
 - [ ] 2.1 Add failing tests proving each workflow condition is evaluated independently in repository/workflow order and exit status `1` skips only the current workflow.
 - [ ] 2.2 Add failing tests for workflow-scoped SHA-256 identity, proving equal changes from different workflow names use different branch and log identities while repeated pairs remain stable.
 - [x] 2.3 Add failing tests proving each workflow renders its own prompt and commit templates with `{change}` substitution.
-- [ ] 2.4 Add failing tests proving condition, agent, and catch-up failures are isolated and later workflows run after successful rollback.
+- [x] 2.4 Add failing tests proving condition, agent, and catch-up failures are isolated and later workflows run after successful rollback.
 
 ## 3. Sequential watcher orchestration
 
 - [ ] 3.1 Extend watcher work state to carry workflow name, prompt, condition, commit template, and workflow-scoped change identity through resolution, retries, agent execution, events, and settlement.
 - [ ] 3.2 Replace the single-condition resolver path with an ordered per-repository workflow pass while retaining the no-workflows OpenSpec compatibility resolver.
 - [ ] 3.3 Scope retry handling to each workflow and preserve serialized execution so no two pi sessions run concurrently.
-- [ ] 3.4 Add watcher tests for repository order, workflow order, one active agent session, idle workflows, multiple active workflows, and continuation after ordinary workflow failure.
+- [x] 3.4 Add watcher tests for repository order, workflow order, one active agent session, idle workflows, multiple active workflows, and continuation after ordinary workflow failure.
 
 ## 4. Workflow lane lifecycle and rollback
 

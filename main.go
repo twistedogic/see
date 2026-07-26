@@ -324,28 +324,29 @@ func (w Watcher) rollbackWorkflowLane(path, change, digest, ref, commit string, 
 // successful no-op when the agent committed all work itself or
 // made no changes; the empty-staged-diff case skips `git commit`
 // entirely so an idempotent run never emits a no-changes Warning.
-// `git add` and `git commit` failures are surfaced as Warning
-// events so the operator can see why a catch-up commit was missed
-// without failing the run. The custom lane is left checked out in
-// every case so the next polling pass resumes the same persistent
-// branch.
-func (w Watcher) catchUpCustomCommit(path, change string) {
+// `git add` and `git commit` failures return an error wrapped with
+// the underlying git output; the caller surfaces the same detail
+// as a Warning event before triggering rollback so the next
+// workflow can run on a clean checkout. The custom lane is left
+// checked out when no error is returned so the next polling pass
+// resumes the same persistent branch.
+func (w Watcher) catchUpCustomCommit(path, change string) error {
 	add := exec.Command("git", "-C", path, "add", "-A")
 	if out, err := add.CombinedOutput(); err != nil {
-		w.warn(path, change, fmt.Sprintf("git add failed: %v\n%s", err, out))
-		return
+		return fmt.Errorf("see: git add failed: %w\n%s", err, out)
 	}
 	// ponytail: diff --cached --quiet exits 0 when the index matches
 	// HEAD and 1 when it differs. Skipping `git commit` on the
 	// empty case keeps an idempotent run warning-free.
 	diff := exec.Command("git", "-C", path, "diff", "--cached", "--quiet")
 	if err := diff.Run(); err == nil {
-		return
+		return nil
 	}
 	msg := renderTemplate(w.CommitTemplate, change)
 	if out, err := exec.Command("git", "-C", path, "commit", "-m", msg).CombinedOutput(); err != nil {
-		w.warn(path, change, fmt.Sprintf("git commit failed: %v\n%s", err, out))
+		return fmt.Errorf("see: git commit failed: %w\n%s", err, out)
 	}
+	return nil
 }
 
 // runWithRetry invokes workResolved up to w.RetryCount times on repo,
@@ -639,7 +640,10 @@ func (w Watcher) workResolved(ctx context.Context, path, change string) error {
 		if runErr != nil {
 			return w.rollbackWorkflowLane(path, change, digest, ref, attemptTip, created, runErr)
 		}
-		w.catchUpCustomCommit(path, change)
+		if commitErr := w.catchUpCustomCommit(path, change); commitErr != nil {
+			w.warn(path, change, commitErr.Error())
+			return w.rollbackWorkflowLane(path, change, digest, ref, attemptTip, created, commitErr)
+		}
 		if w.observer != nil {
 			w.observer.Observe(ChangeDone{Path: path, Workflow: w.WorkflowName, Change: change})
 		}

@@ -3256,3 +3256,219 @@ func TestLegacyEventsLeaveWorkflowBlank(t *testing.T) {
 		}
 	}
 }
+
+// TestWatcherWorkflowConditionFailureIsolatedAndLaterRuns: when a
+// workflow's condition fails (non-1, non-0 exit) the next workflow
+// in configuration order must still run. The first workflow emits
+// a ChangeFailed event with the workflow name (and an empty
+// Change because no change was resolved); the second workflow
+// creates its lane and runs its agent without inheriting the
+// first workflow's error.
+func TestWatcherWorkflowConditionFailureIsolatedAndLaterRuns(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	var calls []string
+	agent := &fakeAgent{
+		onRun: func() error {
+			calls = append(calls, "agent")
+			return os.WriteFile(filepath.Join(repo, "second.txt"), []byte("ok"), 0o644)
+		},
+	}
+	obs := &recordingObserver{}
+	w := Watcher{
+		agent:      agent,
+		RetryCount: 1,
+		Once:       true,
+		observer:   obs,
+		Workflows: []WorkflowConfig{
+			{
+				Name:      "broken",
+				Condition: platformCondition("exit 2", "exit /b 2"),
+				Prompt:    "Broken {change}",
+				Commit:    "see: broken {change}",
+			},
+			{
+				Name:      "healthy",
+				Condition: platformCondition(`printf 'change-2'`, `echo change-2`),
+				Prompt:    "Healthy {change}",
+				Commit:    "see: healthy {change}",
+			},
+		},
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want nil so later workflows still run", err)
+	}
+	if len(agent.runs) != 1 {
+		t.Fatalf("agent runs = %d, want exactly 1 for the healthy workflow", len(agent.runs))
+	}
+	if got := agent.prompts[0]; got != "Healthy change-2" {
+		t.Fatalf("agent.prompts[0] = %q, want %q", got, "Healthy change-2")
+	}
+	healthyLane := "see/" + workflowIdentityDigest("healthy", "change-2")
+	if got := currentBranch(t, repo); got != healthyLane {
+		t.Fatalf("current branch = %q, want healthy lane %q", got, healthyLane)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "second.txt")); err != nil {
+		t.Fatalf("healthy workflow's file should exist, stat err = %v", err)
+	}
+	var failedCount int
+	for _, e := range obs.events {
+		if f, ok := e.(ChangeFailed); ok {
+			if f.Workflow != "broken" {
+				t.Fatalf("ChangeFailed.Workflow = %q, want %q", f.Workflow, "broken")
+			}
+			if f.Path != repo {
+				t.Fatalf("ChangeFailed.Path = %q, want %q", f.Path, repo)
+			}
+			if !strings.Contains(f.Err, "exit status 2") && !strings.Contains(f.Err, "exit code") {
+				t.Fatalf("ChangeFailed.Err = %q, want underlying condition exit code", f.Err)
+			}
+			failedCount++
+		}
+	}
+	if failedCount != 1 {
+		t.Fatalf("ChangeFailed count = %d, want exactly 1 for the broken workflow", failedCount)
+	}
+}
+
+// TestWatcherWorkflowCatchUpCommitFailureIsolatedAndLaterRuns: when
+// a workflow's catch-up commit fails (here forced via a pre-commit
+// hook installed by the first workflow's agent and removed by the
+// second) the failure must surface as a Warning event but not stop
+// the next workflow in configuration order. The first workflow's
+// lane is rolled back so the second workflow can run on a clean
+// checkout, the second workflow's lane is created and committed
+// cleanly.
+func TestWatcherWorkflowCatchUpCommitFailureIsolatedAndLaterRuns(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("pre-commit hook is a POSIX shell script")
+	}
+	repo := mkCleanCustomRepo(t)
+	hookPath := filepath.Join(repo, ".git", "hooks", "pre-commit")
+	hookBody := []byte("#!/bin/sh\nexit 1\n")
+	var callCount int
+	agent := &fakeAgent{
+		onRun: func() error {
+			callCount++
+			if callCount == 1 {
+				if err := os.WriteFile(hookPath, hookBody, 0o755); err != nil {
+					return err
+				}
+			} else {
+				if err := os.Remove(hookPath); err != nil {
+					return err
+				}
+			}
+			name := fmt.Sprintf("wf%d.txt", callCount)
+			return os.WriteFile(filepath.Join(repo, name), []byte("work"), 0o644)
+		},
+	}
+	obs := &recordingObserver{}
+	w := Watcher{
+		agent:      agent,
+		RetryCount: 1,
+		Once:       true,
+		observer:   obs,
+		Workflows: []WorkflowConfig{
+			{
+				Name:      "broken-commit",
+				Condition: platformCondition(`printf 'change-1'`, `echo change-1`),
+				Prompt:    "First {change}",
+				Commit:    "see: first {change}",
+			},
+			{
+				Name:      "healthy",
+				Condition: platformCondition(`printf 'change-2'`, `echo change-2`),
+				Prompt:    "Second {change}",
+				Commit:    "see: healthy {change}",
+			},
+		},
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want nil so later workflows still run after a catch-up rollback", err)
+	}
+	if len(agent.runs) != 2 {
+		t.Fatalf("agent runs = %d, want 2 (broken-commit then healthy)", len(agent.runs))
+	}
+	healthyLane := "see/" + workflowIdentityDigest("healthy", "change-2")
+	if got := currentBranch(t, repo); got != healthyLane {
+		t.Fatalf("current branch = %q, want healthy lane %q", got, healthyLane)
+	}
+	out, err := exec.Command("git", "-C", repo, "log", "--oneline", healthyLane).CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "see: healthy change-2") {
+		t.Fatalf("healthy lane log missing its commit:\n%s", out)
+	}
+	var sawWarning bool
+	for _, e := range obs.events {
+		if warn, ok := e.(Warning); ok {
+			if warn.Workflow != "broken-commit" || warn.Change != "change-1" {
+				continue
+			}
+			if !strings.Contains(warn.Msg, "git commit failed") {
+				t.Fatalf("Warning.Msg = %q, want 'git commit failed' substring", warn.Msg)
+			}
+			sawWarning = true
+		}
+	}
+	if !sawWarning {
+		t.Fatalf("expected Warning for broken-commit's failed catch-up; events = %v", obs.eventTypes())
+	}
+	var sawFailed bool
+	for _, e := range obs.events {
+		if f, ok := e.(ChangeFailed); ok {
+			if f.Workflow == "broken-commit" && f.Change == "change-1" {
+				sawFailed = true
+			}
+		}
+	}
+	if !sawFailed {
+		t.Fatalf("expected ChangeFailed for broken-commit's failed catch-up rollback; events = %v", obs.eventTypes())
+	}
+}
+
+// TestWatcherIteratesRepositoriesInOrder: the watcher visits
+// repositories in the order they appear in the input slice; per-
+// repository work (and per-workflow iteration within a
+// repository) stays sequential. Two repos with one workflow each
+// produce interleaved events per-repo: repo-A's full sequence
+// (started/log/done) precedes repo-B's full sequence.
+func TestWatcherIteratesRepositoriesInOrder(t *testing.T) {
+	repoA := mkCleanCustomRepo(t)
+	repoB := mkCleanCustomRepo(t)
+	var calls []string
+	agent := &fakeAgent{
+		onRun: func() error {
+			calls = append(calls, "agent")
+			return nil
+		},
+	}
+	w := Watcher{
+		agent:      agent,
+		RetryCount: 1,
+		Once:       true,
+		Workflows: []WorkflowConfig{
+			{
+				Name:      "only",
+				Condition: platformCondition(`printf 'change'`, `echo change`),
+				Prompt:    "Apply {change}",
+				Commit:    "see: apply {change}",
+			},
+		},
+	}
+	if err := w.Watch(t.Context(), []string{repoA, repoB}); err != nil {
+		t.Fatalf("Watch returned %v, want nil", err)
+	}
+	if len(agent.runs) != 2 {
+		t.Fatalf("agent runs = %d, want 2 (one per repo)", len(agent.runs))
+	}
+	if agent.runs[0] != repoA || agent.runs[1] != repoB {
+		t.Fatalf("agent.runs = %v, want [%q, %q] in slice order", agent.runs, repoA, repoB)
+	}
+	for _, repo := range []string{repoA, repoB} {
+		if got := currentBranch(t, repo); got != "see/"+workflowIdentityDigest("only", "change") {
+			t.Fatalf("repo %s branch = %q, want workflow lane checked out", repo, got)
+		}
+	}
+}
