@@ -83,6 +83,10 @@ auto_merge: true
 # worktrees; tilde-expanded. Defaults to ~/.cache/see/worktrees.
 worktree_root: "~/.cache/see/worktrees"
 
+# Markdown workflow files are loaded before workflows below.
+# Defaults to ~/.config/see/workflows/ when omitted.
+workflows_dir: "~/.config/see/workflows/"
+
 workflows:
   - name: openspec
     prompt: |-
@@ -106,6 +110,11 @@ workflows:
 - `exclude` is a sequence of glob patterns matched against each included
   candidate's basename. An omitted or empty sequence excludes nothing. It
   follows the same tilde-expansion and pattern-validation rules as `include`.
+- `workflows_dir` is an optional directory containing custom workflows as
+  Markdown (`.md`) files. `~` and `~/path` are expanded, recursive `**` is
+  rejected, and the default is `~/.config/see/workflows/`. A missing directory
+  contributes no file workflows; a path that exists but is not a directory
+  fails startup.
 - `workflows` is an ordered sequence. Each entry requires a unique nonblank
   `name`, `prompt`, `condition`, and `commit`. Entries run in configuration
   order for every discovered repository; workflows are not run concurrently.
@@ -140,10 +149,11 @@ workflows:
   does not double-watch the worktree directory.
 
 All fields are optional except the fields inside a configured workflow entry.
-Omitting `workflows` preserves OpenSpec compatibility mode: OpenSpec changes
-are discovered using the embedded prompt and the default commit subject.
-The former top-level `prompt`, `condition`, and `commit` fields are not
-accepted; migrate each old custom configuration into one named workflow.
+Omitting `workflows` when `workflows_dir` contributes no files preserves
+OpenSpec compatibility mode: OpenSpec changes are discovered using the embedded
+prompt and the default commit subject. The former top-level `prompt`,
+`condition`, and `commit` fields are not accepted; migrate each old custom
+configuration into one named workflow.
 
 The former `watches` field and `--watch` command-line flag are not accepted.
 
@@ -258,6 +268,14 @@ subject are replaced for that workflow. Workflows are evaluated in their
 configuration order. Omitting `workflows` keeps the OpenSpec contract:
 `openspec/changes/` directories drive work, archival counts as completion, and
 the catch-up commit subject is `see: apply openspec change <change>`.
+
+Custom workflows may also be direct, non-hidden `.md` children of
+`workflows_dir`. The filename without `.md` is the workflow name and determines
+alphabetical execution order; a frontmatter `name` key is accepted but ignored.
+YAML frontmatter supplies required `condition` and `commit` values and an
+optional `model`, while the Markdown body is the prompt. File workflows run
+before `config.yaml` workflows, and a name collision between the sources fails
+startup.
 
 Custom workflows run under whichever [lane isolation mode](#lane-isolation-modes)
 the operator selected (`branch` by default, `worktree` opt-in); the mode applies

@@ -28,6 +28,11 @@
 # auto_merge: true                 # rebase + fast-forward merge on success (default)
 # worktree_root: "~/.cache/see/worktrees"
 
+# Custom workflows may also be direct Markdown files in workflows_dir.
+# The filename is the workflow name, frontmatter supplies condition/commit/model,
+# and the body is the prompt. The default directory is shown below.
+# workflows_dir: "~/.config/see/workflows/"
+
 # workflows:
 #   - name: openspec
 #     prompt: |-

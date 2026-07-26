@@ -73,16 +73,16 @@
 
 ## 6. Documentation
 
-- [ ] 6.1 Update `AGENTS.md` configuration schema with one bullet
+- [x] 6.1 Update `AGENTS.md` configuration schema with one bullet
       describing `workflows_dir`: optional string, tilde-expanded, default
       `~/.config/see/workflows/`, recursive `**` rejected, missing
       directory is a no-op, non-directory path fails startup.
-- [ ] 6.2 Update `AGENTS.md` custom workflows section with one paragraph
+- [x] 6.2 Update `AGENTS.md` custom workflows section with one paragraph
       describing `.md` workflows: frontmatter keys (`condition`, `commit`,
       `model`, with `name` ignored), body as prompt, filename as workflow
       name, alphabetical execution order, collision with `workflows:`
       rejected at startup.
-- [ ] 6.3 Update `config.example.yaml` to include a commented
+- [x] 6.3 Update `config.example.yaml` to include a commented
       `workflows_dir:` line and a brief pointer to the new source.
 - [ ] 6.4 Run `gofmt` on the changed Go files.
 - [ ] 6.5 Run `go test -timeout 30s ./...`.
