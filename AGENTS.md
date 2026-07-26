@@ -71,6 +71,18 @@ include:
 exclude:
   - "playground-old"
 
+# Lane isolation: "branch" (default) runs the agent in the
+# operator's checkout; "worktree" runs it in a git worktree so the
+# operator's checkout is never switched.
+worktree: false
+# Only meaningful with worktree: true. true (default) rebases the
+# lane onto the operator's branch tip and fast-forward merges it on
+# success; false leaves the rebased lane for manual review.
+auto_merge: true
+# Only meaningful with worktree: true. Parent directory for new
+# worktrees; tilde-expanded. Defaults to ~/.cache/see/worktrees.
+worktree_root: "~/.cache/see/worktrees"
+
 workflows:
   - name: openspec
     prompt: |-
@@ -106,6 +118,26 @@ workflows:
   nonzero status is a failure.
 - A workflow `commit` is the catch-up commit message template. The same
   `{change}` substitution rule applies.
+- `worktree` (boolean, default `false`) selects lane isolation. `false`
+  (the default) is **branch** mode: the agent runs in the operator's
+  checkout and success leaves the checkout on the lane. `true` is
+  **worktree** mode: the agent runs in a git worktree linked to the
+  operator's checkout and the operator's checkout is never switched. See
+  [Lane isolation modes](#lane-isolation-modes).
+- `auto_merge` (boolean, default `true`) is only meaningful with
+  `worktree: true`. `true` rebases the lane onto the operator's current
+  branch tip and fast-forward merges it on success (the lane and worktree
+  are removed). `false` rebases the lane and leaves it for manual review
+  (the lane and worktree are preserved). An explicitly set `auto_merge`
+  without `worktree: true` is rejected at startup.
+- `worktree_root` (string, default `~/.cache/see/worktrees`) is only
+  meaningful with `worktree: true`. It is the parent directory for new
+  worktrees; `~` and `~/path` are expanded using the same rule as
+  `root_dir`. A non-empty `worktree_root` without `worktree: true` is
+  rejected at startup. New worktrees are created at
+  `<worktree_root>/<repo-basename>--<digest>/`; if you place
+  `worktree_root` inside `root_dir`, add an `exclude` glob so discovery
+  does not double-watch the worktree directory.
 
 All fields are optional except the fields inside a configured workflow entry.
 Omitting `workflows` preserves OpenSpec compatibility mode: OpenSpec changes
@@ -227,6 +259,10 @@ configuration order. Omitting `workflows` keeps the OpenSpec contract:
 `openspec/changes/` directories drive work, archival counts as completion, and
 the catch-up commit subject is `see: apply openspec change <change>`.
 
+Custom workflows run under whichever [lane isolation mode](#lane-isolation-modes)
+the operator selected (`branch` by default, `worktree` opt-in); the mode applies
+uniformly to every workflow.
+
 ### Startup requirements
 
 Custom mode is validated once at startup. Every configured workflow requires a
@@ -297,9 +333,10 @@ same value that was hashed), not the digest.
 
 ### Persistent per-change lanes
 
-Each unique change value owns one lane `see/<digest>`. The lane
-exists for as long as the operator wants that change active; the
-watcher does not delete it on success.
+*(Branch mode — see [Lane isolation modes](#lane-isolation-modes)
+for the worktree-mode contract.)* Each unique change value owns one
+lane `see/<digest>`. The lane exists for as long as the operator wants
+that change active; the watcher does not delete it on success.
 
 `see` rejects a dirty working tree (tracked or untracked changes;
 ignored files do not count) before touching any branch, so a
@@ -372,3 +409,97 @@ no active change both set `HasChange: false`. The previous field
 name is no longer emitted. Consumers reading the batch-level
 JavaScript Object Notation Lines (JSONL) stream need to read
 `HasChange` instead of `HasOpenspec`; no dual-write period.
+
+## Lane isolation modes
+
+`see` supports three explicit isolation modes, selected by the pair
+`(worktree, auto_merge)`. The mode applies uniformly to every watched
+repository for the lifetime of the process; it is resolved once at
+startup from CLI flags and config fields and cannot switch mid-run.
+
+- **branch** (`worktree: false`, the default) — the agent runs in the
+  operator's checkout. The lane `see/<digest>` is created on that
+  checkout, success leaves the checkout on the lane, and the lane lives
+  until the operator removes it. This is the historical contract and is
+  unchanged.
+- **worktree + auto-merge** (`worktree: true, auto_merge: true`, the
+  default when `worktree: true`) — the agent runs in a `git worktree`
+  linked to the operator's checkout. The operator's checkout is never
+  switched. On success the lane is rebased onto the operator's *current*
+  branch tip (so commits the operator made during the run are preserved
+  and the agent's commits replay on top) and fast-forward merged into
+  it; the lane and worktree are removed after the merge.
+- **worktree + manual-merge** (`worktree: true, auto_merge: false`) — as
+  above, but on success the rebased lane is left in place (with the
+  worktree directory) for manual review instead of being merged.
+
+The operator experience: in branch mode the operator's checkout is on
+the lane during and after a run, so they must `git checkout` back to
+their branch. In both worktree modes the operator's checkout stays on
+their own branch for the whole run; with auto-merge the agent's commits
+land on their branch automatically, and with manual-merge the operator
+inspects and merges the rebased lane themselves.
+
+### Worktree lifecycle and rollback
+
+Before each attempt in worktree mode, `see` prunes stale worktree
+metadata (`git worktree prune`), reuses an existing worktree path or
+clears an orphan directory at it, and runs `git worktree add --force -B
+see/<digest> <worktree_root>/<repo-basename>--<digest> <start>`. The
+start point is the existing lane tip when the lane already exists
+(preserving prior commits) and the operator's `HEAD` otherwise. The
+operator's checkout is never switched, reset, or checked out by `see`
+while worktree mode is active.
+
+A dirty operator checkout (tracked or non-ignored untracked changes;
+ignored files do not count) blocks an attempt before the worktree is
+created, as defense in depth against condition commands that write to
+the operator's tree. On any failure (dirty tree, worktree creation,
+agent error, rebase conflict, or fast-forward failure) `see` runs the
+full cleanup in order and ignores individual step failures, emitting a
+`Warning` for each that fails: `git rebase --abort` (state lives in the
+worktree), `git merge --abort` (state lives in the operator's checkout),
+`git worktree remove --force <path>`, and `git branch -D see/<digest>`.
+The lane is always deleted on rollback in worktree mode (`-D`); the
+operator's checkout is untouched.
+
+### Configuration
+
+Mode selection uses CLI-flag > config-field > default precedence,
+identical to `--prompt`. The flags are `--worktree` (boolean, default
+`false`), `--auto-merge` (boolean, default `true`), and
+`--worktree-root` (string, default `~/.cache/see/worktrees`); the
+corresponding config fields are `worktree`, `auto_merge`, and
+`worktree_root`. `--worktree` overrides `worktree`, `--auto-merge`
+overrides `auto_merge`, and `--worktree-root` overrides `worktree_root`.
+`worktree_root` is tilde-expanded like `root_dir`.
+
+Validation rejects invalid combinations at startup with exit status `2`:
+
+- `auto_merge: true` (explicit) with `worktree: false`.
+- an explicit `--auto-merge` flag (either form) without `--worktree`
+  (and without `worktree: true` in config).
+- a non-empty `worktree_root` with `worktree: false`.
+
+An explicit `auto_merge: false` in branch mode is accepted as a harmless
+no-op (the field is simply not consulted), and a plain default
+branch-mode run is never rejected despite `auto_merge`'s runtime default
+of `true`.
+
+### Migration from branch mode
+
+No migration is required: operators who do not set `worktree: true` see
+no behavioral change. To opt in, add `worktree: true` (and optionally
+`auto_merge: false` / `worktree_root:`) to the config and restart `see`,
+or pass `--worktree` for a single run.
+
+The first worktree-mode run uses `git worktree add -B see/<digest>`,
+which reuses any existing `see/<digest>` branch from prior branch-mode
+runs. The operator's checkout transitions from "checked out on the
+lane" to "checked out on their own branch" because worktree mode never
+switches the checkout. Any leftover worktree directories under
+`~/.cache/see/worktrees/` (or a configured `worktree_root`) can be
+removed with `git worktree remove --force <path>` or `rm -rf` once the
+`.git/worktrees/` metadata is pruned; leftover `see/<digest>` branches
+from a manually-merged attempt can be removed with
+`git branch -D see/<digest>`.

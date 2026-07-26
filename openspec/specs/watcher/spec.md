@@ -74,7 +74,7 @@ Before creating or resuming a custom automation branch, `Watcher` SHALL verify t
 - **THEN** the watcher may create or resume the custom automation branch
 
 ### Requirement: Watcher creates or resumes a persistent custom automation branch
-For an active workflow change, `Watcher` SHALL use a branch named `see/<digest>`, where the digest is derived from the workflow name and normalized change. If the lane does not exist, it SHALL be created at the current commit. If it exists, the watcher SHALL switch to it only when the working tree is clean and SHALL resume its current tip without resetting prior commits. The watcher SHALL permit switching from another clean branch or workflow lane.
+*(Branch mode only — see lane-isolation for the worktree-mode contract.)* For an active workflow change in branch mode, `Watcher` SHALL use a branch named `see/<digest>`, where the digest is derived from the workflow name and normalized change. If the lane does not exist, it SHALL be created at the current commit. If it exists, the watcher SHALL switch to it only when the working tree is clean and SHALL resume its current tip without resetting prior commits. The watcher SHALL permit switching from another clean branch or workflow lane.
 
 #### Scenario: First custom run creates its lane
 - **WHEN** custom change `add-dark-mode` resolves to branch `see/<digest>` and that branch does not exist
@@ -110,7 +110,7 @@ For an active workflow change, `Watcher` SHALL use a branch named `see/<digest>`
 - **AND** the changes remain unchanged
 
 ### Requirement: Watcher rolls back only the failed custom attempt
-Immediately before invoking an agent, `Watcher` SHALL capture the selected workflow lane tip. If the agent fails on an existing lane, the watcher SHALL reset tracked state to that tip, remove non-ignored untracked files created by the attempt, preserve ignored files and earlier lane commits, and leave the clean lane available for subsequent workflows. If the lane was created by the attempt, the watcher SHALL return to the branch that was checked out before that workflow, restore its captured commit, and delete only the new lane.
+*(Branch mode only — see lane-isolation for the worktree-mode contract.)* Immediately before invoking an agent in branch mode, `Watcher` SHALL capture the selected workflow lane tip. If the agent fails on an existing lane, the watcher SHALL reset tracked state to that tip, remove non-ignored untracked files created by the attempt, preserve ignored files and earlier lane commits, and leave the clean lane available for subsequent workflows. If the lane was created by the attempt, the watcher SHALL return to the branch that was checked out before that workflow, restore its captured commit, and delete only the new lane.
 
 #### Scenario: Failure on an existing lane preserves history
 - **WHEN** an existing custom lane has commits `A`, `B`, and `C`
@@ -169,9 +169,9 @@ After a custom agent run succeeds, `Watcher` SHALL stage all working-tree change
 - **AND** the condition may trigger another run on the next polling pass
 
 ### Requirement: Watcher creates a per-change branch before running the agent
-In OpenSpec compatibility mode, when `Watcher.work` begins processing an active change, it SHALL capture the current commit SHA and original branch ref, then create or reuse `see/<change>`. After the branch exists, compatibility mode SHALL pin its tip to the captured SHA via `git reset --hard <sha>` so the agent starts from known state regardless of prior branch drift.
+*(Branch mode only — see lane-isolation for the worktree-mode contract.)* In OpenSpec compatibility mode running in branch mode, when `Watcher.work` begins processing an active change, it SHALL capture the current commit SHA and original branch ref, then create or reuse `see/<change>`. After the branch exists, compatibility mode SHALL pin its tip to the captured SHA via `git reset --hard <sha>` so the agent starts from known state regardless of prior branch drift.
 
-In custom mode, the watcher SHALL instead follow the persistent custom automation branch requirement in this change: create `see/<digest>` once, resume it only when it is already checked out, and never reset its prior successful commits before an attempt.
+In custom mode running in branch mode, the watcher SHALL instead follow the persistent custom automation branch requirement in this change: create `see/<digest>` once, resume it only when it is already checked out, and never reset its prior successful commits before an attempt.
 
 #### Scenario: Compatibility first run creates a branch
 - **WHEN** compatibility-mode work runs on branch `main` with active OpenSpec change `task-1`
@@ -194,7 +194,7 @@ In custom mode, the watcher SHALL instead follow the persistent custom automatio
 - **AND** it does not reset or delete the prior successful commits
 
 ### Requirement: Watcher leaves HEAD on the per-change branch after a successful run
-When the agent returns nil and the change is archived, `Watcher.work`
+*(Branch mode only — see lane-isolation for the worktree-mode contract.)* In branch mode, when the agent returns nil and the change is archived, `Watcher.work`
 SHALL run `git add -A` and `git commit -m "see: apply openspec change
 <change>"` on `see/<change>` so that any files the agent left dirty are
 absorbed into a single `see`-owned commit. `Watcher.work` SHALL then emit
@@ -225,9 +225,9 @@ failure" Requirement.
   not from `main`
 
 ### Requirement: Watcher rolls back the branch on agent failure
-In OpenSpec compatibility mode, when the agent returns a non-nil error, `Watcher.work` SHALL restore the repository to its pre-run state by switching back to the original branch ref, resetting hard to the captured commit SHA, deleting `see/<change>`, and returning the agent error.
+*(Branch mode only — see lane-isolation for the worktree-mode contract.)* In OpenSpec compatibility mode running in branch mode, when the agent returns a non-nil error, `Watcher.work` SHALL restore the repository to its pre-run state by switching back to the original branch ref, resetting hard to the captured commit SHA, deleting `see/<change>`, and returning the agent error.
 
-In custom mode, rollback SHALL follow the persistent-lane requirement in this change. A failed attempt on a pre-existing lane SHALL restore that lane to its pre-attempt tip without deleting it. A failed attempt that created a new lane SHALL restore the original branch and delete only that newly-created lane. In both modes, a detached HEAD SHALL remain unsupported and SHALL be rejected before branch mutation.
+In custom mode running in branch mode, rollback SHALL follow the persistent-lane requirement in this change. A failed attempt on a pre-existing lane SHALL restore that lane to its pre-attempt tip without deleting it. A failed attempt that created a new lane SHALL restore the original branch and delete only that newly-created lane. In both modes, a detached HEAD SHALL remain unsupported and SHALL be rejected before branch mutation.
 
 #### Scenario: Compatibility agent failure deletes the disposable branch
 - **WHEN** compatibility-mode work starts on `main` at SHA `A` and the agent errors after editing or committing on `see/<change>`
@@ -1089,7 +1089,7 @@ A condition failure, agent failure, or catch-up failure SHALL be associated with
 - **AND** it does not invoke another workflow for that repository
 
 ### Requirement: Watcher leaves the final usable workflow lane checked out
-After all workflows for a repository are processed, `Watcher` SHALL leave the most recently usable active workflow lane checked out. If no workflow was active, it SHALL leave the branch that was checked out when repository processing began. A successful workflow SHALL not merge its lane into the starting branch.
+*(Branch mode only — see lane-isolation for the worktree-mode contract.)* After all workflows for a repository are processed in branch mode, `Watcher` SHALL leave the most recently usable active workflow lane checked out. If no workflow was active, it SHALL leave the branch that was checked out when repository processing began. A successful workflow SHALL not merge its lane into the starting branch.
 
 #### Scenario: Final active workflow lane remains checked out
 - **WHEN** two workflows run successfully for one repository
@@ -1106,3 +1106,64 @@ After all workflows for a repository are processed, `Watcher` SHALL leave the mo
 - **THEN** the cleaned workflow lane remains available as the final lane when it existed before the attempt
 - **AND** no later workflow remains to run
 
+### Requirement: Watcher dispatches into the configured isolation mode
+`Watcher.work` (or its successor) SHALL select an isolation mode based
+on the resolved `(worktree, auto_merge, worktree_root)` configuration
+that `main()` constructs from CLI flags and config fields. The
+selection SHALL follow the lane-isolation capability's "Three
+isolation modes are explicit and named" requirement:
+
+- When `worktree` is false (the default), the watcher SHALL use
+  branch mode and SHALL follow the existing branch-mode requirements
+  (per-change branch creation, leave-HEAD-on-lane after success,
+  per-mode rollback, final-lane-checked-out). The `auto_merge` and
+  `worktree_root` values SHALL be ignored in branch mode.
+
+- When `worktree` is true, the watcher SHALL use worktree mode and
+  SHALL follow the lane-isolation capability's worktree-mode
+  requirements (worktree creation, lane rebased onto operator's
+  branch tip, fast-forward merge when `auto_merge` is true, rollback
+  with worktree removed and lane deleted on failure). The existing
+  branch-mode requirements SHALL NOT apply.
+
+The dispatch SHALL be evaluated once per `Watcher.work` invocation
+against the resolved configuration; runtime mode switching within a
+single `Watcher.work` call is not supported.
+
+#### Scenario: Default config selects branch mode
+- **WHEN** `see` is invoked with no `--worktree` flag and the
+  configuration has no `worktree:` field
+- **THEN** every `Watcher.work` call uses branch mode
+- **AND** the existing branch-mode requirements apply unchanged
+
+#### Scenario: --worktree flag selects worktree mode
+- **WHEN** `see` is invoked with `--worktree`
+- **THEN** every `Watcher.work` call uses worktree mode
+- **AND** the lane-isolation worktree-mode requirements apply
+- **AND** the existing branch-mode requirements do not apply
+
+#### Scenario: --worktree overrides worktree: false
+- **WHEN** the configuration sets `worktree: false` and `see` is
+  invoked with `--worktree`
+- **THEN** worktree mode is selected for every `Watcher.work` call
+- **AND** the lane-isolation worktree-mode requirements apply
+
+#### Scenario: Configuration worktree: true without flag
+- **WHEN** the configuration sets `worktree: true` and `--worktree` is
+  not passed
+- **THEN** worktree mode is selected
+- **AND** the lane-isolation worktree-mode requirements apply
+
+#### Scenario: auto_merge is ignored in branch mode
+- **WHEN** branch mode is active and `auto_merge: true` is set in the
+  configuration or `--auto-merge=true` is passed
+- **THEN** the watcher proceeds with branch mode
+- **AND** the `auto_merge` value is not consulted for behavior
+- **AND** no error is emitted for the unused value
+
+#### Scenario: worktree_root is ignored in branch mode
+- **WHEN** branch mode is active and `worktree_root: <path>` is set in
+  the configuration
+- **THEN** the watcher proceeds with branch mode
+- **AND** the `worktree_root` value is not consulted for behavior
+- **AND** no error is emitted for the unused value

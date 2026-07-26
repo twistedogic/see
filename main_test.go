@@ -3828,3 +3828,581 @@ func TestWatcherWorkflowDirtyTreeBlocksAllWorkflows(t *testing.T) {
 		t.Fatalf("operator's untracked file should be preserved; stat err = %v", err)
 	}
 }
+
+// -----------------------------------------------------------------
+// Worktree-mode helpers (ensureWorktree / rollbackWorktree /
+// rebaseWorktreeLane / mergeWorktreeLane / ffMergeLane) and the
+// Watcher.work dispatch. These pin the lane-isolation contract: the
+// operator's checkout is never switched, the lane is rebased onto the
+// operator's current branch tip, auto-merge fast-forwards and cleans
+// up, manual-merge preserves the lane, and every failure path removes
+// the worktree and deletes the lane.
+// -----------------------------------------------------------------
+
+// gitRun runs git with args in dir, failing the test on any error.
+// Shared by the worktree tests to avoid repeating the closure pattern.
+func gitRun(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+	}
+}
+
+// mkWorktreeSetup returns a clean git repo on branch main, an empty
+// worktree-root temp dir, and the change digest the worktree tests use
+// (customChangeDigest("add-foo")). Each value is isolated per test.
+func mkWorktreeSetup(t *testing.T) (repo, worktreeRoot, digest string) {
+	t.Helper()
+	repo = mkCleanCustomRepo(t)
+	worktreeRoot = t.TempDir()
+	digest = customChangeDigest("add-foo")
+	return repo, worktreeRoot, digest
+}
+
+// branchExists reports whether refs/heads/<branch> exists in repo.
+func branchExists(t *testing.T, repo, branch string) bool {
+	t.Helper()
+	return exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/"+branch).Run() == nil
+}
+
+// TestEnsureWorktreeCreatesFreshLane: with no see/<digest> lane,
+// ensureWorktree creates the branch at HEAD, materializes the
+// worktree directory, points its .git at the repo's worktree metadata,
+// reports created=true, and leaves the operator on main.
+func TestEnsureWorktreeCreatesFreshLane(t *testing.T) {
+	repo, wtRoot, digest := mkWorktreeSetup(t)
+	created, wtPath, err := ensureWorktree(repo, digest, wtRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created {
+		t.Fatal("created = false, want true")
+	}
+	wantPath := filepath.Join(wtRoot, filepath.Base(repo)+"--"+digest)
+	if wtPath != wantPath {
+		t.Fatalf("wtPath = %q, want %q", wtPath, wantPath)
+	}
+	branchTip(t, repo, "see/"+digest) // fails if the branch is absent
+	data, err := os.ReadFile(filepath.Join(wtPath, ".git"))
+	if err != nil {
+		t.Fatalf("read worktree .git: %v", err)
+	}
+	if !strings.Contains(string(data), filepath.Join(".git", "worktrees")) {
+		t.Fatalf("worktree .git does not point at repo worktree metadata:\n%s", data)
+	}
+	if got := currentBranch(t, repo); got != "main" {
+		t.Fatalf("operator branch = %q, want main", got)
+	}
+}
+
+// TestEnsureWorktreeReusesExistingLane: when see/<digest> already
+// exists with prior commits, ensureWorktree reuses it (created=false),
+// preserves its tip, and checks the worktree out from that tip.
+func TestEnsureWorktreeReusesExistingLane(t *testing.T) {
+	repo, wtRoot, digest := mkWorktreeSetup(t)
+	branch := "see/" + digest
+	gitRun(t, repo, "switch", "-c", branch)
+	if err := os.WriteFile(filepath.Join(repo, "sentinel.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, repo, "add", "-A")
+	gitRun(t, repo, "commit", "-q", "-m", "sentinel")
+	gitRun(t, repo, "switch", "main")
+	preTip := branchTip(t, repo, branch)
+
+	created, wtPath, err := ensureWorktree(repo, digest, wtRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created {
+		t.Fatal("created = true, want false (lane existed)")
+	}
+	if got := branchTip(t, repo, branch); got != preTip {
+		t.Fatalf("lane tip changed: %s -> %s", preTip, got)
+	}
+	if _, err := os.Stat(filepath.Join(wtPath, "sentinel.txt")); err != nil {
+		t.Fatalf("prior lane commit not reachable from worktree: %v", err)
+	}
+}
+
+// TestEnsureWorktreeRecoversStaleDirectory: an orphan directory at the
+// expected worktree path (not a registered worktree) is cleared and a
+// fresh worktree is created over it.
+func TestEnsureWorktreeRecoversStaleDirectory(t *testing.T) {
+	repo, wtRoot, digest := mkWorktreeSetup(t)
+	wtPath := filepath.Join(wtRoot, filepath.Base(repo)+"--"+digest)
+	if err := os.MkdirAll(wtPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtPath, "junk"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	created, _, err := ensureWorktree(repo, digest, wtRoot)
+	if err != nil {
+		t.Fatalf("ensureWorktree on stale dir: %v", err)
+	}
+	if !created {
+		t.Fatal("created = false, want true")
+	}
+	out, err := exec.Command("git", "-C", repo, "worktree", "list").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), wtPath) {
+		t.Fatalf("worktree list missing %s:\n%s", wtPath, out)
+	}
+	if _, err := os.Stat(filepath.Join(wtPath, "junk")); !os.IsNotExist(err) {
+		t.Fatalf("orphan junk file should have been cleared")
+	}
+}
+
+// TestRollbackWorktreeRemovesLaneAndWorktree: after a successful
+// ensureWorktree, rollbackWorktree removes the worktree directory,
+// deletes see/<digest>, leaves the operator on main, and returns the
+// original cause unchanged.
+func TestRollbackWorktreeRemovesLaneAndWorktree(t *testing.T) {
+	repo, wtRoot, digest := mkWorktreeSetup(t)
+	_, wtPath, err := ensureWorktree(repo, digest, wtRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cause := errors.New("boom")
+	w := Watcher{}
+	if got := w.rollbackWorktree(repo, digest, wtPath, cause); got != cause {
+		t.Fatalf("rollback returned %v, want cause %v", got, cause)
+	}
+	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+		t.Fatal("worktree directory still exists after rollback")
+	}
+	if branchExists(t, repo, "see/"+digest) {
+		t.Fatal("lane branch still exists after rollback")
+	}
+	if got := currentBranch(t, repo); got != "main" {
+		t.Fatalf("operator branch = %q, want main", got)
+	}
+}
+
+// TestMergeWorktreeLaneRebasesAndMerges: two agent commits on
+// see/<digest> are rebased onto the operator's main and fast-forward
+// merged; main advances, the lane is deleted, the worktree is gone.
+func TestMergeWorktreeLaneRebasesAndMerges(t *testing.T) {
+	repo, wtRoot, digest := mkWorktreeSetup(t)
+	branch := "see/" + digest
+	_, wtPath, err := ensureWorktree(repo, digest, wtRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, wtPath, "commit", "-q", "--allow-empty", "-m", "agent one")
+	gitRun(t, wtPath, "commit", "-q", "--allow-empty", "-m", "agent two")
+	preMain := branchTip(t, repo, "main")
+
+	w := Watcher{CommitTemplate: "see: {change}"}
+	if err := w.mergeWorktreeLane(repo, "main", wtPath, digest, "add-foo"); err != nil {
+		t.Fatalf("mergeWorktreeLane: %v", err)
+	}
+	if got := branchTip(t, repo, "main"); got == preMain {
+		t.Fatal("main did not advance after merge")
+	}
+	out, err := exec.Command("git", "-C", repo, "log", "--oneline").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(out)
+	for _, want := range []string{"agent one", "agent two"} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("%q missing from main log:\n%s", want, log)
+		}
+	}
+	if branchExists(t, repo, branch) {
+		t.Fatal("lane branch should be deleted after merge")
+	}
+	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+		t.Fatal("worktree should be removed after merge")
+	}
+}
+
+// TestMergeWorktreeLaneOnOperatorCommitDuringRun: the operator commits
+// on main during the run; the rebase target is main's new tip, so both
+// the operator's commit and the agent's commit end up reachable from
+// main (agent replayed on top).
+func TestMergeWorktreeLaneOnOperatorCommitDuringRun(t *testing.T) {
+	repo, wtRoot, digest := mkWorktreeSetup(t)
+	_, wtPath, err := ensureWorktree(repo, digest, wtRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, wtPath, "commit", "-q", "--allow-empty", "-m", "agent")
+	// Operator commits on main during the run (simulated before merge).
+	gitRun(t, repo, "commit", "-q", "--allow-empty", "-m", "operator")
+
+	w := Watcher{CommitTemplate: "see: {change}"}
+	if err := w.mergeWorktreeLane(repo, "main", wtPath, digest, "add-foo"); err != nil {
+		t.Fatalf("mergeWorktreeLane: %v", err)
+	}
+	out, err := exec.Command("git", "-C", repo, "log", "--oneline").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(out)
+	if !strings.Contains(log, "operator") {
+		t.Fatalf("operator's mid-run commit not preserved:\n%s", log)
+	}
+	if !strings.Contains(log, "agent") {
+		t.Fatalf("agent commit not rebased onto main:\n%s", log)
+	}
+	// Operator commit must precede the replayed agent commit (linear).
+	opIdx := strings.Index(log, "operator")
+	agentIdx := strings.Index(log, "agent")
+	if opIdx == -1 || agentIdx == -1 || opIdx < agentIdx {
+		t.Fatalf("expected operator before agent in log:\n%s", log)
+	}
+}
+
+// TestMergeWorktreeLaneRebaseConflictTriggersRollback: a divergent
+// operator commit conflicts with the agent's rebase; mergeWorktreeLane
+// returns the rebase error and rollback removes the worktree and lane
+// while leaving the operator's checkout untouched.
+func TestMergeWorktreeLaneRebaseConflictTriggersRollback(t *testing.T) {
+	repo, wtRoot, digest := mkWorktreeSetup(t)
+	branch := "see/" + digest
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("base"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, repo, "add", "-A")
+	gitRun(t, repo, "commit", "-q", "-m", "base")
+	_, wtPath, err := ensureWorktree(repo, digest, wtRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtPath, "file.txt"), []byte("agent"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, wtPath, "add", "-A")
+	gitRun(t, wtPath, "commit", "-q", "-m", "agent")
+	// Operator diverges on the same line.
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("operator"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, repo, "add", "-A")
+	gitRun(t, repo, "commit", "-q", "-m", "operator")
+
+	w := Watcher{CommitTemplate: "see: {change}"}
+	mergeErr := w.mergeWorktreeLane(repo, "main", wtPath, digest, "add-foo")
+	if mergeErr == nil {
+		t.Fatal("mergeWorktreeLane succeeded; want rebase conflict error")
+	}
+	if !strings.Contains(mergeErr.Error(), "rebase") {
+		t.Fatalf("err = %v, want 'rebase' in message", mergeErr)
+	}
+	if err := w.rollbackWorktree(repo, digest, wtPath, mergeErr); err != mergeErr {
+		t.Fatalf("rollback returned %v, want cause", err)
+	}
+	if branchExists(t, repo, branch) {
+		t.Fatal("lane should be deleted after conflict rollback")
+	}
+	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+		t.Fatal("worktree should be removed after conflict rollback")
+	}
+	got, err := os.ReadFile(filepath.Join(repo, "file.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "operator" {
+		t.Fatalf("operator checkout changed by conflict: file.txt = %q", got)
+	}
+	if currentBranch(t, repo) != "main" {
+		t.Fatal("operator not on main after conflict rollback")
+	}
+}
+
+// TestMergeWorktreeLaneOperatorDirtyTriggersRollback: a clean rebase
+// followed by a dirty operator tree at merge time fails ffMergeLane with
+// a dirty-merge-time error; rollback cleans up while preserving the
+// operator's uncommitted edits.
+func TestMergeWorktreeLaneOperatorDirtyTriggersRollback(t *testing.T) {
+	repo, wtRoot, digest := mkWorktreeSetup(t)
+	branch := "see/" + digest
+	_, wtPath, err := ensureWorktree(repo, digest, wtRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, wtPath, "commit", "-q", "--allow-empty", "-m", "agent")
+	w := Watcher{CommitTemplate: "see: {change}"}
+	if err := w.rebaseWorktreeLane(wtPath, "main", "add-foo"); err != nil {
+		t.Fatalf("rebaseWorktreeLane: %v", err)
+	}
+	// Operator makes the working tree dirty before the merge step.
+	if err := os.WriteFile(filepath.Join(repo, "uncommitted.txt"), []byte("wip"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mergeErr := w.ffMergeLane(repo, wtPath, digest, "add-foo")
+	if mergeErr == nil || !strings.Contains(mergeErr.Error(), "dirty") {
+		t.Fatalf("ffMergeLane err = %v, want 'dirty'", mergeErr)
+	}
+	if err := w.rollbackWorktree(repo, digest, wtPath, mergeErr); err != mergeErr {
+		t.Fatalf("rollback returned %v, want cause", err)
+	}
+	if branchExists(t, repo, branch) {
+		t.Fatal("lane should be deleted after dirty rollback")
+	}
+	if _, err := os.Stat(filepath.Join(repo, "uncommitted.txt")); err != nil {
+		t.Fatalf("operator's dirty edit should be preserved: %v", err)
+	}
+}
+
+// TestMergeWorktreeLaneFastForwardFailureTriggersRollback: after a
+// clean rebase, the operator advances main with a divergent commit so
+// the fast-forward fails; rollback runs and the operator's late commit
+// is preserved on main.
+func TestMergeWorktreeLaneFastForwardFailureTriggersRollback(t *testing.T) {
+	repo, wtRoot, digest := mkWorktreeSetup(t)
+	branch := "see/" + digest
+	_, wtPath, err := ensureWorktree(repo, digest, wtRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, wtPath, "commit", "-q", "--allow-empty", "-m", "agent")
+	w := Watcher{CommitTemplate: "see: {change}"}
+	if err := w.rebaseWorktreeLane(wtPath, "main", "add-foo"); err != nil {
+		t.Fatalf("rebaseWorktreeLane: %v", err)
+	}
+	// Operator advances main between rebase and merge.
+	gitRun(t, repo, "commit", "-q", "--allow-empty", "-m", "operator late")
+
+	mergeErr := w.ffMergeLane(repo, wtPath, digest, "add-foo")
+	if mergeErr == nil || !strings.Contains(mergeErr.Error(), "merge") {
+		t.Fatalf("ffMergeLane err = %v, want 'merge' failure", mergeErr)
+	}
+	if err := w.rollbackWorktree(repo, digest, wtPath, mergeErr); err != mergeErr {
+		t.Fatalf("rollback returned %v, want cause", err)
+	}
+	if branchExists(t, repo, branch) {
+		t.Fatal("lane should be deleted after ff-failure rollback")
+	}
+	out, err := exec.Command("git", "-C", repo, "log", "--oneline").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "operator late") {
+		t.Fatalf("operator's late commit should be preserved on main:\n%s", out)
+	}
+}
+
+// TestWorktreeModeEndToEnd: a full Watcher.work pass in worktree mode
+// with a fake agent. The agent is invoked inside the worktree, the
+// operator's checkout stays on main, main receives the rebased agent
+// commits, the worktree and lane are cleaned up, and ChangeDone fires.
+func TestWorktreeModeEndToEnd(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "proj")
+	mkRepoWithChange(t, repo, "task-1")
+	wtRoot := t.TempDir()
+	digest := customChangeDigest("task-1")
+	wantWorktree := filepath.Join(wtRoot, filepath.Base(repo)+"--"+digest)
+	agent := &fakeAgent{
+		onRun: func() error {
+			return os.WriteFile(filepath.Join(wantWorktree, "agent.txt"), []byte("done"), 0o644)
+		},
+	}
+	obs := &recordingObserver{}
+	w := Watcher{
+		agent:        agent,
+		Worktree:     true,
+		AutoMerge:    true,
+		WorktreeRoot: wtRoot,
+		RetryCount:   1,
+		Once:         true,
+		observer:     obs,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	if len(agent.runs) != 1 || agent.runs[0] != wantWorktree {
+		t.Fatalf("agent.runs = %v, want [%s] (the worktree dir)", agent.runs, wantWorktree)
+	}
+	if got := currentBranch(t, repo); got != "main" {
+		t.Fatalf("operator branch = %q, want main", got)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "agent.txt")); err != nil {
+		t.Fatalf("agent work not merged onto main: %v", err)
+	}
+	if branchExists(t, repo, "see/"+digest) {
+		t.Fatal("lane should be cleaned up after auto-merge")
+	}
+	if _, err := os.Stat(wantWorktree); !os.IsNotExist(err) {
+		t.Fatal("worktree should be removed after auto-merge")
+	}
+	var sawDone bool
+	for _, e := range obs.events {
+		if _, ok := e.(ChangeDone); ok {
+			sawDone = true
+		}
+	}
+	if !sawDone {
+		t.Fatalf("ChangeDone not emitted; events = %v", obs.eventTypes())
+	}
+}
+
+// TestWatcherDispatchesToWorktreeMode: with Worktree=true the agent is
+// invoked in the worktree directory, not the operator's checkout.
+func TestWatcherDispatchesToWorktreeMode(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "proj")
+	mkRepoWithChange(t, repo, "task-1")
+	wtRoot := t.TempDir()
+	digest := customChangeDigest("task-1")
+	wantWorktree := filepath.Join(wtRoot, filepath.Base(repo)+"--"+digest)
+	agent := &fakeAgent{} // success, no file changes
+	w := Watcher{
+		agent:        agent,
+		Worktree:     true,
+		AutoMerge:    true,
+		WorktreeRoot: wtRoot,
+		RetryCount:   1,
+		Once:         true,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	if len(agent.runs) != 1 || agent.runs[0] != wantWorktree {
+		t.Fatalf("agent.runs = %v, want [%s] (worktree)", agent.runs, wantWorktree)
+	}
+}
+
+// TestWatcherDispatchesToBranchMode: with Worktree=false the existing
+// branch-mode path is taken; the agent is invoked in the operator's
+// checkout (the repo), not a worktree.
+func TestWatcherDispatchesToBranchMode(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "proj")
+	mkRepoWithChange(t, repo, "task-1")
+	agent := &fakeAgent{}
+	w := Watcher{
+		agent:      agent,
+		Worktree:   false,
+		RetryCount: 1,
+		Once:       true,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	if len(agent.runs) != 1 || agent.runs[0] != repo {
+		t.Fatalf("agent.runs = %v, want [%s] (the repo, branch mode)", agent.runs, repo)
+	}
+}
+
+// TestCLIRaisesAutoMergeWithoutWorktree: an explicit --auto-merge (any
+// form) without --worktree, and a config auto_merge: true without
+// worktree, are both rejected by resolveLaneIsolation with an error
+// naming auto_merge (which main surfaces as an exit-status-2 failure).
+func TestCLIRaisesAutoMergeWithoutWorktree(t *testing.T) {
+	t.Run("flag_auto_merge_true_without_worktree", func(t *testing.T) {
+		cfg := Config{}
+		explicit := map[string]bool{"auto-merge": true}
+		_, _, _, err := resolveLaneIsolation(cfg, explicit, false, true, "")
+		if err == nil || !strings.Contains(err.Error(), "auto_merge") {
+			t.Fatalf("err = %v, want auto_merge rejection", err)
+		}
+	})
+	t.Run("flag_auto_merge_false_without_worktree", func(t *testing.T) {
+		cfg := Config{}
+		explicit := map[string]bool{"auto-merge": true}
+		_, _, _, err := resolveLaneIsolation(cfg, explicit, false, false, "")
+		if err == nil || !strings.Contains(err.Error(), "auto_merge") {
+			t.Fatalf("err = %v, want auto_merge rejection", err)
+		}
+	})
+	t.Run("config_auto_merge_true_without_worktree", func(t *testing.T) {
+		cfg := Config{AutoMerge: boolPtr(true)}
+		_, _, _, err := resolveLaneIsolation(cfg, map[string]bool{}, false, true, "")
+		if err == nil || !strings.Contains(err.Error(), "auto_merge") {
+			t.Fatalf("err = %v, want auto_merge rejection", err)
+		}
+	})
+	t.Run("default_branch_mode_accepted", func(t *testing.T) {
+		// No flags, no config: a plain branch-mode run must NOT be rejected
+		// even though auto_merge's runtime default is true.
+		wt, am, root, err := resolveLaneIsolation(Config{}, map[string]bool{}, false, true, "")
+		if err != nil {
+			t.Fatalf("default branch mode rejected: %v", err)
+		}
+		// auto_merge's runtime default is true but it is ignored in branch
+		// mode; the root stays empty (no default applied outside worktree mode).
+		if wt || !am || root != "" {
+			t.Fatalf("resolved (%v,%v,%q), want (false,true,\"\")", wt, am, root)
+		}
+	})
+}
+
+// TestCLIFlagsOverrideConfig: --worktree overrides worktree: false,
+// --auto-merge=false overrides auto_merge: true, and --worktree=false
+// overrides worktree: true.
+func TestCLIFlagsOverrideConfig(t *testing.T) {
+	t.Run("worktree_flag_overrides_false", func(t *testing.T) {
+		cfg := Config{Worktree: false}
+		wt, _, _, err := resolveLaneIsolation(cfg, map[string]bool{"worktree": true}, true, true, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !wt {
+			t.Fatal("--worktree did not override worktree: false")
+		}
+	})
+	t.Run("auto_merge_false_flag_overrides_true", func(t *testing.T) {
+		cfg := Config{Worktree: true, AutoMerge: boolPtr(true)}
+		_, am, _, err := resolveLaneIsolation(cfg, map[string]bool{"auto-merge": true}, true, false, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if am {
+			t.Fatal("--auto-merge=false did not override auto_merge: true")
+		}
+	})
+	t.Run("worktree_false_flag_overrides_true", func(t *testing.T) {
+		cfg := Config{Worktree: true}
+		wt, _, _, err := resolveLaneIsolation(cfg, map[string]bool{"worktree": true}, false, true, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if wt {
+			t.Fatal("--worktree=false did not override worktree: true")
+		}
+	})
+}
+
+// TestWorktreeRootDefaultAndOverride: with no --worktree-root and no
+// worktree_root config, the resolved root is the expanded default
+// (~/.cache/see/worktrees). With --worktree-root ~/custom it expands
+// to <home>/custom. An empty root stays empty in branch mode.
+func TestWorktreeRootDefaultAndOverride(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("default_root_in_worktree_mode", func(t *testing.T) {
+		_, _, root, err := resolveLaneIsolation(Config{}, map[string]bool{"worktree": true}, true, true, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := filepath.Join(home, ".cache", "see", "worktrees"); root != want {
+			t.Fatalf("root = %q, want %q", root, want)
+		}
+	})
+	t.Run("custom_root_override", func(t *testing.T) {
+		_, _, root, err := resolveLaneIsolation(Config{}, map[string]bool{"worktree": true, "worktree-root": true}, true, true, "~/custom")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := filepath.Join(home, "custom"); root != want {
+			t.Fatalf("root = %q, want %q", root, want)
+		}
+	})
+	t.Run("empty_root_in_branch_mode", func(t *testing.T) {
+		_, _, root, err := resolveLaneIsolation(Config{}, map[string]bool{}, false, true, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if root != "" {
+			t.Fatalf("root = %q, want empty in branch mode", root)
+		}
+	})
+}

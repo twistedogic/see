@@ -301,19 +301,14 @@ func (w Watcher) rollbackCustomLane(path, change, ref, commit string, created bo
 // kept in warning / event messages.
 func (w Watcher) rollbackWorkflowLane(path, change, digest, ref, commit string, created bool, cause error) error {
 	branch := "see/" + digest
-	run := func(label string, args ...string) {
-		out, err := exec.Command("git", append([]string{"-C", path}, args...)...).CombinedOutput()
-		if err != nil {
-			w.warn(path, change, fmt.Sprintf("%s failed: %v\n%s", label, err, out))
-		}
-	}
+	step := func(label string, args ...string) { w.gitStep(path, change, label, args...) }
 	if created {
-		run(fmt.Sprintf("switch back to %q", ref), "switch", ref)
+		step(fmt.Sprintf("switch back to %q", ref), "switch", ref)
 	}
-	run("reset failed custom attempt", "reset", "--hard", commit)
-	run("clean failed custom attempt", "clean", "-fd")
+	step("reset failed custom attempt", "reset", "--hard", commit)
+	step("clean failed custom attempt", "clean", "-fd")
 	if created {
-		run("delete newly-created lane "+branch, "branch", "-D", branch)
+		step("delete newly-created lane "+branch, "branch", "-D", branch)
 	}
 	return cause
 }
@@ -331,21 +326,180 @@ func (w Watcher) rollbackWorkflowLane(path, change, digest, ref, commit string, 
 // checked out when no error is returned so the next polling pass
 // resumes the same persistent branch.
 func (w Watcher) catchUpCustomCommit(path, change string) error {
-	add := exec.Command("git", "-C", path, "add", "-A")
+	return stageAndCommitIfDirty(path, w.catchUpMessage(change))
+}
+
+// catchUpMessage returns the catch-up commit message for change in
+// the active mode: the rendered CommitTemplate in custom mode (where
+// a workflow supplies its own commit subject) and the OpenSpec
+// compatibility subject otherwise. Worktree mode reuses this so both
+// modes share one message contract.
+func (w Watcher) catchUpMessage(change string) string {
+	if w.customMode() {
+		return renderTemplate(w.CommitTemplate, change)
+	}
+	return fmt.Sprintf("see: apply openspec change %s", change)
+}
+
+// stageAndCommitIfDirty stages all changes under cwd and commits them
+// with message when the staged index differs from HEAD. A matching
+// index is a warning-free no-op. Used by both branch-mode catch-up
+// (catchUpCustomCommit) and worktree-mode catch-up
+// (rebaseWorktreeLane / mergeWorktreeLane).
+func stageAndCommitIfDirty(cwd, message string) error {
+	add := exec.Command("git", "-C", cwd, "add", "-A")
 	if out, err := add.CombinedOutput(); err != nil {
 		return fmt.Errorf("see: git add failed: %w\n%s", err, out)
 	}
 	// ponytail: diff --cached --quiet exits 0 when the index matches
-	// HEAD and 1 when it differs. Skipping `git commit` on the
-	// empty case keeps an idempotent run warning-free.
-	diff := exec.Command("git", "-C", path, "diff", "--cached", "--quiet")
+	// HEAD and 1 when it differs. Skipping `git commit` on the empty
+	// case keeps an idempotent run warning-free.
+	diff := exec.Command("git", "-C", cwd, "diff", "--cached", "--quiet")
 	if err := diff.Run(); err == nil {
 		return nil
 	}
-	msg := renderTemplate(w.CommitTemplate, change)
-	if out, err := exec.Command("git", "-C", path, "commit", "-m", msg).CombinedOutput(); err != nil {
+	if out, err := exec.Command("git", "-C", cwd, "commit", "-m", message).CombinedOutput(); err != nil {
 		return fmt.Errorf("see: git commit failed: %w\n%s", err, out)
 	}
+	return nil
+}
+
+// ensureWorktree creates or reuses the worktree-mode lane for digest
+// linked to the repo at repoPath, at the directory
+// <worktreeRoot>/<repo-basename>--<digest>. It prunes stale worktree
+// metadata first, clears an orphan directory at the target path, and
+// then runs `git worktree add --force -B see/<digest> <path> <start>`.
+// The start point is the existing lane tip when the lane branch
+// already exists (preserving prior commits) and the operator's HEAD
+// otherwise. created reports whether the lane branch was newly
+// created by this call. The worktree path is returned so the caller
+// can invoke the agent and drive merge / rollback against it.
+func ensureWorktree(repoPath, digest, worktreeRoot string) (created bool, worktreePath string, err error) {
+	branch := "see/" + digest
+	worktreePath = filepath.Join(worktreeRoot, filepath.Base(repoPath)+"--"+digest)
+	if out, e := exec.Command("git", "-C", repoPath, "worktree", "prune").CombinedOutput(); e != nil {
+		return false, "", fmt.Errorf("see: git worktree prune on %s: %w\n%s", repoPath, e, out)
+	}
+	showRef := exec.Command("git", "-C", repoPath, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	branchExists := showRef.Run() == nil
+	created = !branchExists
+	start := "HEAD"
+	if branchExists {
+		start = branch
+	}
+	// An orphan directory at the target path (e.g. left by a crash or a
+	// manual rm) is not a registered worktree; git would refuse to add
+	// over it. Remove it so a fresh worktree can be created. A
+	// registered-but-stale worktree is reused via --force below.
+	if info, statErr := os.Stat(worktreePath); statErr == nil && info.IsDir() {
+		if !isRegisteredWorktree(repoPath, worktreePath) {
+			if rmErr := os.RemoveAll(worktreePath); rmErr != nil {
+				return false, "", fmt.Errorf("see: clear stale worktree dir %s: %w", worktreePath, rmErr)
+			}
+		}
+	}
+	if err := os.MkdirAll(worktreeRoot, 0o755); err != nil {
+		return false, "", fmt.Errorf("see: create worktree root %s: %w", worktreeRoot, err)
+	}
+	args := []string{"-C", repoPath, "worktree", "add", "--force", "-B", branch, worktreePath, start}
+	if out, e := exec.Command("git", args...).CombinedOutput(); e != nil {
+		return false, "", fmt.Errorf("see: git worktree add on %s: %w\n%s", repoPath, e, out)
+	}
+	return created, worktreePath, nil
+}
+
+// isRegisteredWorktree reports whether worktreePath is listed by
+// `git worktree list` for the repo at repoPath. Used by
+// ensureWorktree to distinguish a registered (reusable) worktree from
+// an orphan directory.
+func isRegisteredWorktree(repoPath, worktreePath string) bool {
+	out, err := exec.Command("git", "-C", repoPath, "worktree", "list", "--porcelain").CombinedOutput()
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "worktree ") {
+			if strings.TrimSpace(strings.TrimPrefix(line, "worktree ")) == worktreePath {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// rollbackWorktree cleans up a failed worktree-mode attempt and
+// returns the original cause unchanged. The cleanup runs every step
+// regardless of which step failed: abort any in-progress rebase (the
+// rebase state lives in the worktree) and merge (state lives in the
+// operator's checkout), remove the worktree directory, and delete
+// see/<digest> with -D — the lane must not survive a failed attempt
+// in worktree mode. The aborts are run silently because "no rebase /
+// merge in progress" is the common, expected case, not a cleanup
+// failure worth a Warning; the remove and delete emit a Warning on
+// failure so a partial cleanup is visible.
+func (w Watcher) rollbackWorktree(repoPath, digest, worktreePath string, cause error) error {
+	branch := "see/" + digest
+	if worktreePath != "" {
+		exec.Command("git", "-C", worktreePath, "rebase", "--abort").Run()
+	}
+	exec.Command("git", "-C", repoPath, "merge", "--abort").Run()
+	step := func(label string, args ...string) { w.gitStep(repoPath, digest, label, args...) }
+	step("worktree remove "+worktreePath, "worktree", "remove", "--force", worktreePath)
+	step("delete lane "+branch, "branch", "-D", branch)
+	return cause
+}
+
+// rebaseWorktreeLane runs the worktree-mode catch-up commit and
+// rebases see/<digest> onto operatorRef (the operator's current
+// branch name, resolved to its tip at rebase time). It is the
+// manual-merge success path: the lane and worktree are left in place
+// for review. A rebase conflict aborts the rebase and returns the
+// error; the caller triggers rollbackWorktree.
+func (w Watcher) rebaseWorktreeLane(worktreePath, operatorRef, change string) error {
+	if err := stageAndCommitIfDirty(worktreePath, w.catchUpMessage(change)); err != nil {
+		return err
+	}
+	if out, err := exec.Command("git", "-C", worktreePath, "rebase", operatorRef).CombinedOutput(); err != nil {
+		exec.Command("git", "-C", worktreePath, "rebase", "--abort").Run()
+		return fmt.Errorf("see: rebase %s in %s failed: %w\n%s", operatorRef, worktreePath, err, out)
+	}
+	return nil
+}
+
+// mergeWorktreeLane is the worktree + auto-merge success path: it
+// rebases see/<digest> onto operatorRef (the operator's current branch
+// name, resolved to its tip at rebase time) and then fast-forward
+// merges the lane into the operator's branch via ffMergeLane. A rebase
+// conflict returns an error (after aborting the rebase) so the caller
+// can run rollbackWorktree.
+func (w Watcher) mergeWorktreeLane(repoPath, operatorRef, worktreePath, digest, change string) error {
+	if err := w.rebaseWorktreeLane(worktreePath, operatorRef, change); err != nil {
+		return err
+	}
+	return w.ffMergeLane(repoPath, worktreePath, digest, change)
+}
+
+// ffMergeLane runs the worktree + auto-merge tail: re-check the
+// operator's checkout is clean, fast-forward merge see/<digest> into
+// the operator's branch at repoPath, then remove the worktree and
+// delete the lane. A dirty operator tree at merge time, or a
+// fast-forward failure (the operator committed between rebase and
+// merge), returns an error after aborting the in-progress merge so the
+// caller can run rollbackWorktree. Splitting the post-rebase steps
+// out makes the dirty-merge-time and fast-forward-failure rollback
+// paths deterministically testable without racing a mid-run commit.
+func (w Watcher) ffMergeLane(repoPath, worktreePath, digest, change string) error {
+	branch := "see/" + digest
+	if dirty, _ := hasUntrackedOrModified(repoPath); dirty {
+		return fmt.Errorf("see: working tree on %s is dirty; commit or stash before merge runs", repoPath)
+	}
+	if out, err := exec.Command("git", "-C", repoPath, "merge", "--ff-only", branch).CombinedOutput(); err != nil {
+		exec.Command("git", "-C", repoPath, "merge", "--abort").Run()
+		return fmt.Errorf("see: merge --ff-only %s on %s failed: %w\n%s", branch, repoPath, err, out)
+	}
+	step := func(label string, args ...string) { w.gitStep(repoPath, change, label, args...) }
+	step("worktree remove "+worktreePath, "worktree", "remove", "--force", worktreePath)
+	step("delete lane "+branch, "branch", "-d", branch)
 	return nil
 }
 
@@ -528,6 +682,20 @@ type Watcher struct {
 	// isolated lanes and log paths even when their normalized
 	// change values collide.
 	Workflows []WorkflowConfig
+	// Worktree selects worktree lane isolation. When true, the agent
+	// runs in a git worktree linked to the operator's checkout and
+	// the operator's checkout is never switched. When false (the
+	// default), the existing branch-mode path applies unchanged.
+	Worktree bool
+	// AutoMerge governs merge-back in worktree mode. When true (the
+	// default), a successful run rebases the lane onto the operator's
+	// branch tip and fast-forward merges it. When false, the rebased
+	// lane is left for manual review. Ignored in branch mode.
+	AutoMerge bool
+	// WorktreeRoot is the parent directory for new worktrees in
+	// worktree mode, already tilde-expanded and defaulted to
+	// ~/.cache/see/worktrees by main(). Ignored in branch mode.
+	WorktreeRoot string
 	// WorkflowName is set by runOnce when iterating over Workflows
 	// so laneDigest / log filenames hash the workflow name into the
 	// digest. It is empty in the legacy single-workflow mode and
@@ -541,6 +709,13 @@ type Watcher struct {
 // and operators can reference the canonical default without
 // hard-coding the literal.
 const DefaultPollInterval = 5 * time.Minute
+
+// defaultWorktreeRoot is the parent directory for new worktrees when
+// worktree mode is active and no --worktree-root / worktree_root is
+// configured. It lives outside any plausible root_dir so the
+// discovery layer never double-watches it. Expressed with a leading
+// ~ and tilde-expanded at resolution time, mirroring root_dir.
+const defaultWorktreeRoot = "~/.cache/see/worktrees"
 
 // SetPromptTemplate stores s as the effective prompt template,
 // trimming surrounding whitespace and substituting the embedded
@@ -589,6 +764,17 @@ func (w Watcher) warn(path, change, msg string) {
 	}
 }
 
+// gitStep runs git in repoPath and emits a Warning (keyed by change)
+// when it fails. Shared by the cleanup/rollback paths that must run
+// every step regardless of which one failed; a failed step must not
+// abort the remaining cleanup.
+func (w Watcher) gitStep(repoPath, change, label string, args ...string) {
+	out, e := exec.Command("git", append([]string{"-C", repoPath}, args...)...).CombinedOutput()
+	if e != nil {
+		w.warn(repoPath, change, fmt.Sprintf("%s failed: %v\n%s", label, e, out))
+	}
+}
+
 // laneDigest returns the workflow-scoped identity digest for change.
 // When WorkflowName is set the digest hashes name + NUL + change so
 // equal changes in different workflows get distinct lanes and log
@@ -600,6 +786,56 @@ func (w Watcher) laneDigest(change string) string {
 		return workflowIdentityDigest(w.WorkflowName, change)
 	}
 	return customChangeDigest(change)
+}
+
+// workResolvedWorktree drives one worktree-mode attempt. The operator's
+// checkout is never switched: the agent runs in a git worktree linked to
+// it. On success the lane is rebased onto the operator's current branch
+// tip; when w.AutoMerge is true it is then fast-forward merged and the
+// lane + worktree are removed, otherwise they are left for manual review.
+// Every failure path (dirty tree, worktree creation, agent error, rebase
+// conflict, merge failure) routes through rollbackWorktree, which removes
+// the worktree and deletes the lane. The pre-attempt dirty-tree check is
+// defense in depth against writeful condition commands; the worktree
+// itself is built from a commit, not the working tree.
+func (w Watcher) workResolvedWorktree(ctx context.Context, path, change, ref string) error {
+	digest := w.laneDigest(change)
+	if dirty, err := hasUntrackedOrModified(path); err != nil {
+		return err
+	} else if dirty {
+		return fmt.Errorf("see: working tree on %s is dirty; commit or stash before see runs", path)
+	}
+	_, worktreePath, err := ensureWorktree(path, digest, w.WorktreeRoot)
+	if err != nil {
+		return err
+	}
+	if w.observer != nil {
+		w.observer.Observe(ChangeStarted{Path: path, Workflow: w.WorkflowName, Change: change})
+	}
+	template := w.PromptTemplate
+	if template == "" {
+		template = defaultPromptTemplate
+	}
+	logPath, runErr := w.agent.Run(ctx, worktreePath, digest, renderTemplate(template, change))
+	if logPath != "" && w.observer != nil {
+		w.observer.Observe(LogPath{Path: logPath, Workflow: w.WorkflowName, Change: change})
+	}
+	if runErr != nil {
+		return w.rollbackWorktree(path, digest, worktreePath, runErr)
+	}
+	if w.AutoMerge {
+		if err := w.mergeWorktreeLane(path, ref, worktreePath, digest, change); err != nil {
+			return w.rollbackWorktree(path, digest, worktreePath, err)
+		}
+	} else {
+		if err := w.rebaseWorktreeLane(worktreePath, ref, change); err != nil {
+			return w.rollbackWorktree(path, digest, worktreePath, err)
+		}
+	}
+	if w.observer != nil {
+		w.observer.Observe(ChangeDone{Path: path, Workflow: w.WorkflowName, Change: change})
+	}
+	return nil
 }
 
 func (w Watcher) workResolved(ctx context.Context, path, change string) error {
@@ -614,6 +850,13 @@ func (w Watcher) workResolved(ctx context.Context, path, change string) error {
 	if ref == "" {
 		w.warn(path, change, "detached HEAD; switch to a branch first")
 		return fmt.Errorf("detached HEAD on %s", path)
+	}
+
+	// Lane isolation dispatch: worktree mode runs the agent in a git
+	// worktree and never switches the operator's checkout; the default
+	// branch-mode path below is unchanged when Worktree is false.
+	if w.Worktree {
+		return w.workResolvedWorktree(ctx, path, change, ref)
 	}
 
 	if w.customMode() {
@@ -687,7 +930,7 @@ func (w Watcher) workResolved(ctx context.Context, path, change string) error {
 	if err := add.Run(); err != nil {
 		w.warn(path, change, fmt.Sprintf("git add failed: %v", err))
 	}
-	msg := fmt.Sprintf("see: apply openspec change %s", change)
+	msg := w.catchUpMessage(change)
 	if err := exec.Command("git", "-C", path, "commit", "-m", msg).Run(); err != nil {
 		w.warn(path, change, fmt.Sprintf("git commit failed: %v", err))
 	}
@@ -785,8 +1028,11 @@ func main() {
 		modeFlag   = flag.String("mode", "tui", "output mode (default \"tui\"); one of: tui, log")
 		once       = flag.Bool("once", false, "run one scan and exit")
 		configFlag = flag.String("config", "", "path to config.yaml (default: ~/.config/see/config.yaml); pass \"-\" to skip")
-		promptFlag = flag.String("prompt", "", "override the agent prompt template; {change} is replaced with the active change name")
-		interval   = flag.Duration("interval", DefaultPollInterval, "delay between completed scans in continuous mode; 0 disables the delay, negative values are rejected")
+		promptFlag    = flag.String("prompt", "", "override the agent prompt template; {change} is replaced with the active change name")
+		interval      = flag.Duration("interval", DefaultPollInterval, "delay between completed scans in continuous mode; 0 disables the delay, negative values are rejected")
+		worktreeFlag  = flag.Bool("worktree", false, "run agents in a git worktree so the operator's checkout is never switched")
+		autoMergeFlag = flag.Bool("auto-merge", true, "in worktree mode, rebase and fast-forward merge the lane into the operator's branch on success; pass --auto-merge=false to leave the rebased lane for manual review")
+		worktreeRoot  = flag.String("worktree-root", "", "override the worktree location (default ~/.cache/see/worktrees); only meaningful with --worktree")
 	)
 	flag.Parse()
 
@@ -841,6 +1087,24 @@ func main() {
 		fmt.Fprintln(os.Stderr, "see:", err)
 		os.Exit(2)
 	}
+
+	// Resolve the lane-isolation triple (worktree, auto_merge,
+	// worktree_root) with CLI flag > config field > default precedence,
+	// then validate it. flag.Visit records which flags were passed
+	// explicitly so the default-true --auto-merge does not reject every
+	// default branch-mode run, and so an explicit --auto-merge (either
+	// form) in branch mode can be rejected per the lane-isolation
+	// contract.
+	explicitFlags := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { explicitFlags[f.Name] = true })
+	worktree, autoMerge, resolvedRoot, err := resolveLaneIsolation(cfg, explicitFlags, *worktreeFlag, *autoMergeFlag, *worktreeRoot)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "see:", err)
+		os.Exit(2)
+	}
+	w.Worktree = worktree
+	w.AutoMerge = autoMerge
+	w.WorktreeRoot = resolvedRoot
 
 	repos, warnings, err := resolveConfiguredTargets(cfg)
 	if err != nil {

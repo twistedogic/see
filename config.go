@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	_ "embed"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -89,7 +90,27 @@ type Config struct {
 	Include   []string         `yaml:"include"`
 	Exclude   []string         `yaml:"exclude"`
 	Workflows []WorkflowConfig `yaml:"workflows"`
+	// Worktree selects worktree lane isolation (the agent runs in a
+	// git worktree linked to the operator's checkout) instead of the
+	// default branch mode. Default false (zero value) selects branch
+	// mode, matching the historical contract.
+	Worktree bool `yaml:"worktree"`
+	// AutoMerge is a pointer so the loader can distinguish "unset,
+	// use the runtime default true" from "explicitly false". The
+	// runtime default is true (the lane is rebased and fast-forward
+	// merged); an explicit false leaves the rebased lane for manual
+	// review. It is only consulted in worktree mode.
+	AutoMerge *bool `yaml:"auto_merge"`
+	// WorktreeRoot is the parent directory for new worktrees. Empty
+	// means "use the default"; the default is resolved in main() to
+	// ~/.cache/see/worktrees only when worktree mode is active, so an
+	// empty value stays empty (and harmless) in branch mode.
+	WorktreeRoot string `yaml:"worktree_root"`
 }
+
+// boolPtr returns a pointer to b; a small helper for tests and for
+// encoding an explicitly-set bool into a Config.
+func boolPtr(b bool) *bool { return &b }
 
 // WorkflowConfig is one named entry in the ordered workflows slice.
 // Every field is required when the workflows block is configured;
@@ -180,6 +201,79 @@ func validateWorkflows(cfg Config) error {
 		seen[name] = struct{}{}
 	}
 	return nil
+}
+
+// validateWorktreeSettings enforces the lane-isolation config
+// contract: auto_merge and worktree_root are meaningful only in
+// worktree mode. An explicitly-true auto_merge without worktree, and
+// any non-empty worktree_root without worktree, are rejected with an
+// error naming the offending field so the operator can fix the
+// configuration. auto_merge: false in branch mode is accepted as a
+// harmless explicit no-op (the field is simply not consulted). The
+// caller surfaces the error via os.Stderr and exits with status 2,
+// consistent with validateWorkflows.
+func validateWorktreeSettings(cfg *Config) error {
+	if cfg.Worktree {
+		return nil
+	}
+	if cfg.AutoMerge != nil && *cfg.AutoMerge {
+		return errors.New("auto_merge requires worktree: true")
+	}
+	if strings.TrimSpace(cfg.WorktreeRoot) != "" {
+		return errors.New("worktree_root requires worktree: true")
+	}
+	return nil
+}
+
+// resolveLaneIsolation combines the loaded config with the parsed CLI
+// flags into the effective lane-isolation triple (worktree, auto_merge,
+// worktree_root) and validates it. Precedence is CLI flag > config field
+// > default. explicitFlags records the flags that were passed on the
+// command line (built via flag.Visit) for two reasons: (1) the
+// default-true --auto-merge must not reject a default branch-mode run,
+// and (2) an explicitly passed --auto-merge (or --auto-merge=false)
+// without --worktree is rejected per the lane-isolation contract.
+// worktree_root is tilde-expanded; the default ~/.cache/see/worktrees
+// applies only when worktree mode is active and no root was set, so an
+// empty root stays empty (and harmless) in branch mode. An invalid
+// combination returns an error suitable for an exit-status-2 startup
+// failure.
+func resolveLaneIsolation(cfg Config, explicitFlags map[string]bool, worktreeFlag, autoMergeFlag bool, worktreeRootFlag string) (worktree, autoMerge bool, worktreeRoot string, err error) {
+	worktree = cfg.Worktree
+	if explicitFlags["worktree"] {
+		worktree = worktreeFlag
+	}
+	switch {
+	case explicitFlags["auto-merge"]:
+		autoMerge = autoMergeFlag
+	case cfg.AutoMerge != nil:
+		autoMerge = *cfg.AutoMerge
+	default:
+		autoMerge = true
+	}
+	if explicitFlags["worktree-root"] {
+		worktreeRoot = worktreeRootFlag
+	} else if cfg.WorktreeRoot != "" {
+		worktreeRoot = cfg.WorktreeRoot
+	}
+	if worktreeRoot != "" {
+		if worktreeRoot, err = expandTilde(worktreeRoot); err != nil {
+			return false, false, "", err
+		}
+	}
+	if worktree && worktreeRoot == "" {
+		if worktreeRoot, err = expandTilde(defaultWorktreeRoot); err != nil {
+			return false, false, "", err
+		}
+	}
+	valCfg := Config{Worktree: worktree, WorktreeRoot: worktreeRoot}
+	if !worktree && ((cfg.AutoMerge != nil && *cfg.AutoMerge) || explicitFlags["auto-merge"]) {
+		valCfg.AutoMerge = boolPtr(true)
+	}
+	if verr := validateWorktreeSettings(&valCfg); verr != nil {
+		return false, false, "", verr
+	}
+	return worktree, autoMerge, worktreeRoot, nil
 }
 
 // loadConfig reads path and returns a strict-decoded Config. Missing

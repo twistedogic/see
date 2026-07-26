@@ -862,3 +862,104 @@ func TestLoadStartupConfigBootstrapFailureNonFatal(t *testing.T) {
 		t.Fatalf("stderr line %q does not name the failure reason", line)
 	}
 }
+
+// TestConfigRejectsAutoMergeWithoutWorktree: a config that sets
+// auto_merge: true without worktree: true is invalid in branch mode.
+// The error names auto_merge so the operator can fix the field.
+func TestConfigRejectsAutoMergeWithoutWorktree(t *testing.T) {
+	cfg := Config{Worktree: false, AutoMerge: boolPtr(true)}
+	err := validateWorktreeSettings(&cfg)
+	if err == nil {
+		t.Fatal("validateWorktreeSettings returned nil; want error")
+	}
+	if !strings.Contains(err.Error(), "auto_merge") {
+		t.Fatalf("err = %v, want 'auto_merge' in message", err)
+	}
+	if !strings.Contains(err.Error(), "worktree") {
+		t.Fatalf("err = %v, want 'worktree' in message", err)
+	}
+}
+
+// TestConfigRejectsWorktreeRootWithoutWorktree: a non-empty
+// worktree_root without worktree: true is rejected; the error names
+// worktree_root.
+func TestConfigRejectsWorktreeRootWithoutWorktree(t *testing.T) {
+	cfg := Config{Worktree: false, WorktreeRoot: "/somewhere"}
+	err := validateWorktreeSettings(&cfg)
+	if err == nil {
+		t.Fatal("validateWorktreeSettings returned nil; want error")
+	}
+	if !strings.Contains(err.Error(), "worktree_root") {
+		t.Fatalf("err = %v, want 'worktree_root' in message", err)
+	}
+}
+
+// TestConfigAcceptsValidCombinations: the three valid shapes the
+// contract must accept. (a) branch mode with auto_merge explicitly
+// false is a harmless no-op, not an error. (b) worktree mode with
+// auto_merge true and the default (empty) root. (c) worktree mode
+// with manual-merge and a custom root.
+func TestConfigAcceptsValidCombinations(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  Config
+	}{
+		{
+			name: "branch_mode_auto_merge_false",
+			cfg:  Config{Worktree: false, AutoMerge: boolPtr(false)},
+		},
+		{
+			name: "worktree_auto_merge_default_root",
+			cfg:  Config{Worktree: true, AutoMerge: boolPtr(true), WorktreeRoot: ""},
+		},
+		{
+			name: "worktree_manual_merge_custom_root",
+			cfg:  Config{Worktree: true, AutoMerge: boolPtr(false), WorktreeRoot: "~/custom"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateWorktreeSettings(&tc.cfg); err != nil {
+				t.Fatalf("validateWorktreeSettings returned %v; want nil", err)
+			}
+		})
+	}
+}
+
+// TestConfigAcceptsAbsentAutoMerge: a fully default branch-mode config
+// (no auto_merge pointer at all) is valid; the absent field must not
+// trip the validator.
+func TestConfigAcceptsAbsentAutoMerge(t *testing.T) {
+	cfg := Config{Worktree: false, AutoMerge: nil}
+	if err := validateWorktreeSettings(&cfg); err != nil {
+		t.Fatalf("validateWorktreeSettings returned %v; want nil", err)
+	}
+}
+
+// TestLoadConfigParsesWorktreeFields: the strict decoder accepts the
+// three new top-level fields. auto_merge: false decodes into a non-nil
+// *bool so the resolver can distinguish explicit false from unset.
+func TestLoadConfigParsesWorktreeFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := "worktree: true\nauto_merge: false\nworktree_root: ~/wt\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if !cfg.Worktree {
+		t.Fatalf("Worktree = false, want true")
+	}
+	if cfg.AutoMerge == nil {
+		t.Fatal("AutoMerge = nil, want non-nil *bool")
+	}
+	if *cfg.AutoMerge {
+		t.Fatalf("*AutoMerge = true, want false")
+	}
+	if cfg.WorktreeRoot != "~/wt" {
+		t.Fatalf("WorktreeRoot = %q, want ~/wt", cfg.WorktreeRoot)
+	}
+}

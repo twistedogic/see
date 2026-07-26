@@ -20,6 +20,14 @@
 # exclude:                 # matched against each candidate's basename
 #   - "bin"
 
+# Lane isolation. "branch" (the default) runs the agent in the
+# operator's checkout; "worktree" runs it in a git worktree so the
+# operator's checkout is never switched. auto_merge and worktree_root
+# are only meaningful with worktree: true and are rejected otherwise.
+# worktree: false
+# auto_merge: true                 # rebase + fast-forward merge on success (default)
+# worktree_root: "~/.cache/see/worktrees"
+
 # workflows:
 #   - name: openspec
 #     prompt: |-
