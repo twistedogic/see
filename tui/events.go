@@ -14,31 +14,36 @@ type RepoSeenMsg struct {
 }
 
 type ChangeStartedMsg struct {
-	Path   string
-	Change string
+	Path     string
+	Workflow string
+	Change   string
 }
 
 type RetryAttemptMsg struct {
-	Path   string
-	Change string
-	N, Max int
-	Err    string
+	Path     string
+	Workflow string
+	Change   string
+	N, Max   int
+	Err      string
 }
 
 type ChangeDoneMsg struct {
-	Path   string
-	Change string
+	Path     string
+	Workflow string
+	Change   string
 }
 
 type ChangeFailedMsg struct {
-	Path   string
-	Change string
-	Err    string
+	Path     string
+	Workflow string
+	Change   string
+	Err      string
 }
 
 type LogPathMsg struct {
-	Path   string
-	Change string
+	Path     string
+	Workflow string
+	Change   string
 }
 
 // WarningMsg reports a per-repo cleanup or pre-run check step that
@@ -46,9 +51,10 @@ type LogPathMsg struct {
 // counts the row in the footer's warning counter until the next
 // ChangeStartedMsg for the same repo clears it.
 type WarningMsg struct {
-	Path   string
-	Change string
-	Msg    string
+	Path     string
+	Workflow string
+	Change   string
+	Msg      string
 }
 
 // InfraErrorMsg reports a process-level failure surfaced by runTUI

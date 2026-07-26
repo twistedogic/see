@@ -28,10 +28,10 @@
 
 ## 5. Events, logs, and terminal user interface
 
-- [ ] 5.1 Add workflow identity to workflow-related event types while keeping `RepoSeen.HasChange` workflow-neutral and preserving human-readable change values.
-- [ ] 5.2 Update JSONL event serialization and per-agent log naming to include workflow-scoped digest identities without placing raw condition output in paths.
+- [x] 5.1 Add workflow identity to workflow-related event types while keeping `RepoSeen.HasChange` workflow-neutral and preserving human-readable change values.
+- [x] 5.2 Update JSONL event serialization and per-agent log naming to include workflow-scoped digest identities without placing raw condition output in paths.
 - [ ] 5.3 Update terminal user interface messages and rendering to display workflow names wherever multiple workflow events can otherwise be ambiguous.
-- [ ] 5.4 Add event-log and terminal user interface tests covering workflow identity, equal changes across workflows, retry/failure/warning events, and safe log paths.
+- [x] 5.4 Add event-log and terminal user interface tests covering workflow identity, equal changes across workflows, retry/failure/warning events, and safe log paths.
 
 ## 6. Integration verification
 

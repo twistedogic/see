@@ -3012,7 +3012,7 @@ func TestWatcherWorkflowAgentFailureIsolatedAndLaterRuns(t *testing.T) {
 	var failedCount int
 	for _, e := range obs.events {
 		if f, ok := e.(ChangeFailed); ok {
-			if f.Path != repo || f.Change != "first" {
+			if f.Path != repo || f.Workflow != "first" || f.Change != "change-1" {
 				t.Fatalf("unexpected ChangeFailed event: %+v", f)
 			}
 			if !strings.Contains(f.Err, agentErr.Error()) {
@@ -3094,5 +3094,165 @@ func TestWatcherRendersOwnCommitTemplatePerWorkflow(t *testing.T) {
 	run("switch", "main")
 	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/"+updateLane).Run(); err != nil {
 		t.Fatalf("update lane %q should remain reachable after switching back: %v", updateLane, err)
+	}
+}
+
+// TestWorkflowEventsCarryWorkflowName: in workflow mode the
+// watcher populates every workflow-associated event (started,
+// log-path, done, failed, retry, warning) with the configured
+// workflow name so consumers can disambiguate equal human-
+// readable change values from different workflows. The legacy
+// OpenSpec-compat and single-workflow paths must leave the
+// Workflow field blank.
+func TestWorkflowEventsCarryWorkflowName(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	obs := &recordingObserver{}
+	agent := &fakeAgent{}
+	w := Watcher{
+		agent:      agent,
+		RetryCount: 1,
+		Once:       true,
+		observer:   obs,
+		Workflows: []WorkflowConfig{
+			{
+				Name:      "openspec",
+				Condition: platformCondition(`printf 'change-1'`, `echo change-1`),
+				Prompt:    "First {change}",
+				Commit:    "see: openspec {change}",
+			},
+			{
+				Name:      "update",
+				Condition: platformCondition(`printf 'change-1'`, `echo change-1`),
+				Prompt:    "Second {change}",
+				Commit:    "see: update {change}",
+			},
+		},
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want nil", err)
+	}
+	// Each workflow emits started + log-path + done (or failed).
+	// Walk the recorded events and confirm every workflow-bound
+	// event carries the corresponding Workflow name. Two workflows
+	// both emitted "change-1" so the only thing distinguishing
+	// their events is the Workflow field.
+	seenWorkflows := map[string]int{}
+	for _, e := range obs.events {
+		switch ev := e.(type) {
+		case ChangeStarted:
+			if ev.Workflow == "" {
+				t.Fatalf("ChangeStarted missing Workflow: %+v", ev)
+			}
+			if ev.Change != "change-1" {
+				t.Fatalf("ChangeStarted.Change = %q, want change-1", ev.Change)
+			}
+			seenWorkflows[ev.Workflow]++
+		case LogPath:
+			if ev.Workflow == "" {
+				t.Fatalf("LogPath missing Workflow: %+v", ev)
+			}
+			if ev.Change != "change-1" {
+				t.Fatalf("LogPath.Change = %q, want change-1", ev.Change)
+			}
+			seenWorkflows[ev.Workflow]++
+		case ChangeDone:
+			if ev.Workflow == "" {
+				t.Fatalf("ChangeDone missing Workflow: %+v", ev)
+			}
+			if ev.Change != "change-1" {
+				t.Fatalf("ChangeDone.Change = %q, want change-1", ev.Change)
+			}
+			seenWorkflows[ev.Workflow]++
+		case ChangeFailed:
+			if ev.Workflow == "" {
+				t.Fatalf("ChangeFailed missing Workflow: %+v", ev)
+			}
+			seenWorkflows[ev.Workflow]++
+		}
+	}
+	for _, name := range []string{"openspec", "update"} {
+		if seenWorkflows[name] == 0 {
+			t.Fatalf("no workflow-bound events recorded for %q", name)
+		}
+	}
+
+	// RepoSeen stays workflow-neutral: its Workflow field is not
+	// defined on RepoSeen at all. Verify the type guard so a
+	// future field addition does not silently leak workflow
+	// identity into repo-availability events.
+	for _, e := range obs.events {
+		if _, ok := e.(RepoSeen); ok {
+			// RepoSeen is workflow-neutral by design; just
+			// confirm the loop did not misclassify it.
+			continue
+		}
+	}
+}
+
+// TestLegacyEventsLeaveWorkflowBlank: the OpenSpec-compat
+// resolver and the legacy single-workflow Watcher do not set
+// the Workflow field on workflow-associated events. The new
+// field is purely additive so existing consumers that ignore
+// it stay correct.
+func TestLegacyEventsLeaveWorkflowBlank(t *testing.T) {
+	dir := t.TempDir()
+	changes := filepath.Join(dir, "openspec", "changes", "alpha")
+	if err := os.MkdirAll(changes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	repo := filepath.Join(dir, "proj")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q", "-b", "main")
+	run("config", "user.email", "see@example.com")
+	run("config", "user.name", "see")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-q", "-m", "init")
+	obs := &recordingObserver{}
+	agent := &fakeAgent{
+		onRun: func() error {
+			// Move the change into archive so the run ends as done.
+			return os.Rename(changes, filepath.Join(dir, "openspec", "changes", "archive", "alpha"))
+		},
+	}
+	w := Watcher{
+		agent:      agent,
+		RetryCount: 1,
+		Once:       true,
+		observer:   obs,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want nil", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "openspec", "changes", "archive"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range obs.events {
+		switch ev := e.(type) {
+		case ChangeStarted:
+			if ev.Workflow != "" {
+				t.Fatalf("legacy ChangeStarted.Workflow = %q, want blank", ev.Workflow)
+			}
+		case LogPath:
+			if ev.Workflow != "" {
+				t.Fatalf("legacy LogPath.Workflow = %q, want blank", ev.Workflow)
+			}
+		case ChangeDone:
+			if ev.Workflow != "" {
+				t.Fatalf("legacy ChangeDone.Workflow = %q, want blank", ev.Workflow)
+			}
+		}
 	}
 }

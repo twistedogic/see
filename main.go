@@ -357,7 +357,7 @@ func (w Watcher) runWithRetry(ctx context.Context, repo string) (string, error) 
 	for attempt := 1; attempt <= w.RetryCount; attempt++ {
 		if prevErr != nil && w.observer != nil {
 			w.observer.Observe(RetryAttempt{
-				Path: repo, Change: lastChange, N: attempt, Max: w.RetryCount,
+				Path: repo, Workflow: w.WorkflowName, Change: lastChange, N: attempt, Max: w.RetryCount,
 				Err: prevErr.Error(),
 			})
 		}
@@ -413,39 +413,51 @@ type RepoSeen struct {
 func (RepoSeen) isEvent() {}
 
 type ChangeStarted struct {
-	Path   string
-	Change string
+	Path string
+	// Workflow is the configured workflow name when this event
+	// originates from a `workflows` entry. Empty in OpenSpec
+	// compatibility mode and in the legacy single-workflow
+	// path; nonblank when the watcher iterates the ordered
+	// workflow sequence so JSONL consumers can disambiguate
+	// equal human-readable change values from different
+	// workflows.
+	Workflow string
+	Change   string
 }
 
 func (ChangeStarted) isEvent() {}
 
 type RetryAttempt struct {
-	Path   string
-	Change string
-	N, Max int
-	Err    string
+	Path     string
+	Workflow string
+	Change   string
+	N, Max   int
+	Err      string
 }
 
 func (RetryAttempt) isEvent() {}
 
 type ChangeDone struct {
-	Path   string
-	Change string
+	Path     string
+	Workflow string
+	Change   string
 }
 
 func (ChangeDone) isEvent() {}
 
 type ChangeFailed struct {
-	Path   string
-	Change string
-	Err    string
+	Path     string
+	Workflow string
+	Change   string
+	Err      string
 }
 
 func (ChangeFailed) isEvent() {}
 
 type LogPath struct {
-	Path   string
-	Change string
+	Path     string
+	Workflow string
+	Change   string
 }
 
 func (LogPath) isEvent() {}
@@ -455,9 +467,10 @@ func (LogPath) isEvent() {}
 // The Msg field carries the human-readable detail; the JSONL is the
 // source of truth for the message text.
 type Warning struct {
-	Path   string
-	Change string
-	Msg    string
+	Path     string
+	Workflow string
+	Change   string
+	Msg      string
 }
 
 func (Warning) isEvent() {}
@@ -565,10 +578,13 @@ func NewWatcher(binary, logDir string, retry int, once bool) Watcher {
 
 // warn emits a Warning event to the observer when one is wired.
 // Centralised so cleanup-step call sites read as `w.warn(...)` and
-// stay silent in log mode without an observer.
+// stay silent in log mode without an observer. The Workflow field
+// carries the active workflow name when the warning originates
+// from a workflow-mode run; the OpenSpec-compat and legacy
+// single-workflow paths leave it blank.
 func (w Watcher) warn(path, change, msg string) {
 	if w.observer != nil {
-		w.observer.Observe(Warning{Path: path, Change: change, Msg: msg})
+		w.observer.Observe(Warning{Path: path, Workflow: w.WorkflowName, Change: change, Msg: msg})
 	}
 }
 
@@ -610,7 +626,7 @@ func (w Watcher) workResolved(ctx context.Context, path, change string) error {
 			return err
 		}
 		if w.observer != nil {
-			w.observer.Observe(ChangeStarted{Path: path, Change: change})
+			w.observer.Observe(ChangeStarted{Path: path, Workflow: w.WorkflowName, Change: change})
 		}
 		template := w.PromptTemplate
 		if template == "" {
@@ -618,14 +634,14 @@ func (w Watcher) workResolved(ctx context.Context, path, change string) error {
 		}
 		logPath, runErr := w.agent.Run(ctx, path, digest, renderTemplate(template, change))
 		if logPath != "" && w.observer != nil {
-			w.observer.Observe(LogPath{Path: logPath, Change: change})
+			w.observer.Observe(LogPath{Path: logPath, Workflow: w.WorkflowName, Change: change})
 		}
 		if runErr != nil {
 			return w.rollbackWorkflowLane(path, change, digest, ref, attemptTip, created, runErr)
 		}
 		w.catchUpCustomCommit(path, change)
 		if w.observer != nil {
-			w.observer.Observe(ChangeDone{Path: path, Change: change})
+			w.observer.Observe(ChangeDone{Path: path, Workflow: w.WorkflowName, Change: change})
 		}
 		return nil
 	}
@@ -635,7 +651,7 @@ func (w Watcher) workResolved(ctx context.Context, path, change string) error {
 		return err
 	}
 	if w.observer != nil {
-		w.observer.Observe(ChangeStarted{Path: path, Change: change})
+		w.observer.Observe(ChangeStarted{Path: path, Workflow: w.WorkflowName, Change: change})
 	}
 	template := w.PromptTemplate
 	if template == "" {
@@ -643,7 +659,7 @@ func (w Watcher) workResolved(ctx context.Context, path, change string) error {
 	}
 	logPath, runErr := w.agent.Run(ctx, path, change, renderTemplate(template, change))
 	if logPath != "" && w.observer != nil {
-		w.observer.Observe(LogPath{Path: logPath, Change: change})
+		w.observer.Observe(LogPath{Path: logPath, Workflow: w.WorkflowName, Change: change})
 	}
 	if runErr != nil {
 		// ponytail: rollback runs every cleanup step regardless of the previous failure so a partial undo doesn't strand the branch.
@@ -672,7 +688,7 @@ func (w Watcher) workResolved(ctx context.Context, path, change string) error {
 		w.warn(path, change, fmt.Sprintf("git commit failed: %v", err))
 	}
 	if w.observer != nil {
-		w.observer.Observe(ChangeDone{Path: path, Change: change})
+		w.observer.Observe(ChangeDone{Path: path, Workflow: w.WorkflowName, Change: change})
 	}
 	return nil
 }
@@ -694,8 +710,9 @@ func (w Watcher) runOnce(ctx context.Context, repos []string) error {
 				// rolled back before the error reaches here, so the next
 				// workflow can safely run from a clean checkout.
 				for _, wf := range w.Workflows {
-					if _, err := w.runOneWorkflow(ctx, repo, wf); err != nil && w.observer != nil {
-						w.observer.Observe(ChangeFailed{Path: repo, Change: wf.Name, Err: err.Error()})
+					changeName, err := w.runOneWorkflow(ctx, repo, wf)
+					if err != nil && w.observer != nil {
+						w.observer.Observe(ChangeFailed{Path: repo, Workflow: wf.Name, Change: changeName, Err: err.Error()})
 					}
 				}
 				continue
@@ -885,17 +902,17 @@ func (o tuiObserver) Observe(e Event) {
 	case RepoSeen:
 		o.obs.Send(tui.RepoSeenMsg{Path: e.Path, HasChange: e.HasChange})
 	case ChangeStarted:
-		o.obs.Send(tui.ChangeStartedMsg{Path: e.Path, Change: e.Change})
+		o.obs.Send(tui.ChangeStartedMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change})
 	case RetryAttempt:
-		o.obs.Send(tui.RetryAttemptMsg{Path: e.Path, Change: e.Change, N: e.N, Max: e.Max, Err: e.Err})
+		o.obs.Send(tui.RetryAttemptMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change, N: e.N, Max: e.Max, Err: e.Err})
 	case ChangeDone:
-		o.obs.Send(tui.ChangeDoneMsg{Path: e.Path, Change: e.Change})
+		o.obs.Send(tui.ChangeDoneMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change})
 	case ChangeFailed:
-		o.obs.Send(tui.ChangeFailedMsg{Path: e.Path, Change: e.Change, Err: e.Err})
+		o.obs.Send(tui.ChangeFailedMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change, Err: e.Err})
 	case LogPath:
-		o.obs.Send(tui.LogPathMsg{Path: e.Path, Change: e.Change})
+		o.obs.Send(tui.LogPathMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change})
 	case Warning:
-		o.obs.Send(tui.WarningMsg{Path: e.Path, Change: e.Change, Msg: e.Msg})
+		o.obs.Send(tui.WarningMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change, Msg: e.Msg})
 	case InfraError:
 		o.obs.Send(tui.InfraErrorMsg{Where: e.Where, Err: e.Err})
 	}
