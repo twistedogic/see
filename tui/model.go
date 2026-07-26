@@ -46,6 +46,7 @@ func (p Phase) Glyph() string {
 
 type RepoRow struct {
 	Name        string
+	Workflow    string
 	Change      string
 	Phase       Phase
 	RetryN      int
@@ -121,6 +122,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		r := m.ensureRow(msg.Path)
 		m.markActivity(r)
 		r.Phase = PhaseWorking
+		r.Workflow = msg.Workflow
 		r.Change = msg.Change
 		r.StartedAt = time.Now()
 		r.LastErr = ""
@@ -131,6 +133,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		r := m.ensureRow(msg.Path)
 		m.markActivity(r)
 		r.Phase = PhaseWorking
+		r.Workflow = msg.Workflow
 		r.Change = msg.Change
 		r.RetryN = msg.N
 		r.RetryMax = msg.Max
@@ -139,6 +142,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		r := m.ensureRow(msg.Path)
 		m.markActivity(r)
 		r.Phase = PhaseDone
+		r.Workflow = msg.Workflow
 		r.Change = msg.Change
 		r.LastErr = ""
 		r.RetryN = 0
@@ -147,11 +151,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		r := m.ensureRow(msg.Path)
 		m.markActivity(r)
 		r.Phase = PhaseFailed
+		r.Workflow = msg.Workflow
 		r.Change = msg.Change
 		r.LastErr = msg.Err
 	case LogPathMsg:
 		r := m.ensureRow(msg.Path)
 		r.LogPath = msg.Path
+		if msg.Workflow != "" {
+			r.Workflow = msg.Workflow
+		}
 		if r.Change == "" {
 			r.Change = msg.Change
 		}
@@ -159,6 +167,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		r := m.ensureRow(msg.Path)
 		m.markActivity(r)
 		r.Warning = true
+		if msg.Workflow != "" {
+			r.Workflow = msg.Workflow
+		}
 	case InfraErrorMsg:
 		m.infraErr = msg.Err
 	case tickMsg:

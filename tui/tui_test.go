@@ -328,6 +328,18 @@ func TestViewOmitsLogPathWhenUnset(t *testing.T) {
 	}
 }
 
+func TestViewRendersWorkflowNameWithChange(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	m = driveMessages(m,
+		RepoSeenMsg{Path: "/tmp/proj", HasChange: true},
+		ChangeStartedMsg{Path: "/tmp/proj", Workflow: "dependencies", Change: "package-update"},
+	)
+	if view := m.View(); !strings.Contains(view, "dependencies: package-update") {
+		t.Fatalf("view missing workflow and change:\n%s", view)
+	}
+}
+
 // Regression for add-custom-workflows task 5.3: the TUI CHANGE
 // column must render the normalized custom condition value
 // (e.g. "add-dark-mode"), not its SHA-256 digest. The watcher

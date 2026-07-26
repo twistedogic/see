@@ -180,6 +180,9 @@ func (m *Model) renderRow(r *RepoRow, showAge bool) string {
 	// Repos without an openspec/ get an em-dash change column so the
 	// grid stays readable without a dedicated phase.
 	change := r.Change
+	if r.Workflow != "" {
+		change = r.Workflow + ": " + change
+	}
 	if !r.HasChange {
 		change = "—"
 	}
