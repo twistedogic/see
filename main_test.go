@@ -2071,10 +2071,10 @@ func branchTip(t *testing.T, repo, branch string) string {
 
 // Custom-mode branch lifecycle: the lane `see/<digest>` is created
 // at the captured commit on the first run, preserved across runs
-// when already checked out, and refused when the lane exists on a
-// different branch. A dirty working tree blocks all three. These
-// tests pin the four behaviors the watcher must satisfy before
-// invoking the agent.
+// when already checked out, and switched to from a clean branch
+// (matching the multi-workflow contract). A dirty working tree
+// blocks the transition. These tests pin the behaviors the
+// watcher must satisfy before invoking the agent.
 
 // TestCustomLaneRejectsDirtyWorkingTree: custom mode must refuse a
 // dirty tree before any branching. The agent never runs, the lane is
@@ -2189,11 +2189,12 @@ func TestCustomLaneResumesWithoutReset(t *testing.T) {
 	}
 }
 
-// TestCustomLaneRefusesWhenLaneNotCheckedOut: when see/<digest>
-// exists but the operator has checked out a different branch, the
-// watcher must refuse without switching or mutating either branch.
-// `created` reports false and the agent never runs.
-func TestCustomLaneRefusesWhenLaneNotCheckedOut(t *testing.T) {
+// TestCustomLaneSwitchesFromCleanCheckout: when see/<digest>
+// exists but the operator has checked out a different clean branch,
+// the watcher switches to the lane without resetting or mutating
+// either branch. `created` reports false and the lane tip stays
+// where prior successful runs left it.
+func TestCustomLaneSwitchesFromCleanCheckout(t *testing.T) {
 	repo := mkCleanCustomRepo(t)
 	digest := customChangeDigest("add-foo")
 	branch := "see/" + digest
@@ -2216,27 +2217,60 @@ func TestCustomLaneRefusesWhenLaneNotCheckedOut(t *testing.T) {
 	run("switch", "main")
 
 	created, err := ensureCustomLane(repo, "add-foo")
-	if err == nil {
-		t.Fatal("ensureCustomLane accepted lane on different branch; want error")
+	if err != nil {
+		t.Fatalf("ensureCustomLane rejected clean checkout: %v", err)
 	}
 	if created {
-		t.Fatal("created = true on refusal, want false")
-	}
-	if !strings.Contains(err.Error(), branch) {
-		t.Fatalf("err = %v, want lane name %q in message", err, branch)
+		t.Fatal("created = true on existing lane, want false")
 	}
 	if tip := branchTip(t, repo, branch); tip != preLaneTip {
-		t.Fatalf("lane tip moved on refusal: pre=%s post=%s", preLaneTip, tip)
+		t.Fatalf("lane tip moved on switch: pre=%s post=%s", preLaneTip, tip)
 	}
 	if tip := branchTip(t, repo, "main"); tip != preMainTip {
-		t.Fatalf("main moved on refusal: pre=%s post=%s", preMainTip, tip)
+		t.Fatalf("main moved on switch: pre=%s post=%s", preMainTip, tip)
+	}
+	branchOut, err := exec.Command("git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(branchOut)); got != branch {
+		t.Fatalf("HEAD on %q, want lane %q after clean switch", got, branch)
+	}
+}
+
+// TestCustomLaneStillRefusesDirtyTree: a tracked or non-ignored
+// untracked change blocks the lane transition even when the lane
+// exists. The dirty-tree guard is the only constraint left now
+// that we permit clean cross-branch switching.
+func TestCustomLaneStillRefusesDirtyTree(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	digest := customChangeDigest("add-foo")
+	branch := "see/" + digest
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("switch", "-c", branch)
+	run("switch", "main")
+	if err := os.WriteFile(filepath.Join(repo, "dirty.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureCustomLane(repo, "add-foo"); err == nil {
+		t.Fatal("ensureCustomLane accepted dirty checkout; want error")
+	}
+	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/"+branch).Run(); err != nil {
+		t.Fatalf("lane missing after dirty rejection: %v", err)
 	}
 	branchOut, err := exec.Command("git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD").CombinedOutput()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.TrimSpace(string(branchOut)); got != "main" {
-		t.Fatalf("HEAD on %q, want main (refusal must not switch)", got)
+		t.Fatalf("HEAD on %q, want main (dirty rejection must not switch)", got)
 	}
 }
 
@@ -2796,6 +2830,54 @@ func TestWorkflowIdentityDigestAvoidsBoundaryCollision(t *testing.T) {
 	if left == right {
 		t.Fatalf("digests collided: %q == %q", left, right)
 	}
+}
+
+// TestWorkflowLogPathUsesScopedDigest: when two workflows emit the
+// same normalized change, the watcher hands each agent a
+// workflow-scoped digest so the per-invocation log filenames stay
+// distinct. Raw condition output never appears as a path component;
+// the digest drives the file name under the shared log dir.
+func TestWorkflowLogPathUsesScopedDigest(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	agent := &digestAgent{}
+	obs := &recordingObserver{}
+	w := Watcher{
+		agent:      agent,
+		RetryCount: 1,
+		Once:       true,
+		observer:   obs,
+		Workflows: []WorkflowConfig{
+			{Name: "openspec", Condition: platformCondition(`printf 'shared'`, `echo shared`), Prompt: "A {change}", Commit: "see: a {change}"},
+			{Name: "update", Condition: platformCondition(`printf 'shared'`, `echo shared`), Prompt: "B {change}", Commit: "see: b {change}"},
+		},
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want nil", err)
+	}
+	if len(agent.digests) != 2 {
+		t.Fatalf("agent.Run digests = %d, want 2 (one per workflow)", len(agent.digests))
+	}
+	if agent.digests[0] != workflowIdentityDigest("openspec", "shared") {
+		t.Fatalf("openspec digest = %q, want %q", agent.digests[0], workflowIdentityDigest("openspec", "shared"))
+	}
+	if agent.digests[1] != workflowIdentityDigest("update", "shared") {
+		t.Fatalf("update digest = %q, want %q", agent.digests[1], workflowIdentityDigest("update", "shared"))
+	}
+	if _, err := os.Stat(filepath.Join(repo, "shared")); err == nil {
+		t.Fatalf("a literal %q artifact appeared in the repo; that name should never reach the filesystem", "shared")
+	}
+}
+
+// digestAgent returns a unique log path per call derived from the
+// digest argument so callers can assert on the digest handed to
+// each invocation.
+type digestAgent struct {
+	digests []string
+}
+
+func (d *digestAgent) Run(_ context.Context, _, digest, _ string) (string, error) {
+	d.digests = append(d.digests, digest)
+	return "/tmp/see--" + digest + ".jsonl", nil
 }
 
 // TestWatcherLaneDigestUsesWorkflowName: the watcher picks the
@@ -3470,5 +3552,279 @@ func TestWatcherIteratesRepositoriesInOrder(t *testing.T) {
 		if got := currentBranch(t, repo); got != "see/"+workflowIdentityDigest("only", "change") {
 			t.Fatalf("repo %s branch = %q, want workflow lane checked out", repo, got)
 		}
+	}
+}
+
+// TestWatcherExistingWorkflowLaneFailurePreservesHistory: when a
+// workflow lane exists with prior successful commits and the agent
+// fails on the next attempt, rollback resets the lane to its
+// pre-attempt tip and preserves history. The watcher must remain
+// on the cleaned lane so later workflows can run.
+func TestWatcherExistingWorkflowLaneFailurePreservesHistory(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	firstLane := "see/" + workflowIdentityDigest("first", "change-1")
+	run("switch", "-c", firstLane)
+	if err := os.WriteFile(filepath.Join(repo, "prior.txt"), []byte("drift"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-q", "-m", "prior commit")
+	preTip := branchTip(t, repo, firstLane)
+	run("switch", "main")
+
+	agentErr := errors.New("existing lane failed")
+	agent := &fakeAgent{
+		onRun: func() error {
+			if err := os.WriteFile(filepath.Join(repo, "failed.txt"), []byte("x"), 0o644); err != nil {
+				return err
+			}
+			run("add", "-A")
+			if err := exec.Command("git", "-C", repo, "commit", "-q", "-m", "failed").Run(); err != nil {
+				return err
+			}
+			return agentErr
+		},
+	}
+	obs := &recordingObserver{}
+	w := Watcher{
+		agent:      agent,
+		RetryCount: 1,
+		Once:       true,
+		observer:   obs,
+		Workflows: []WorkflowConfig{
+			{
+				Name:      "first",
+				Condition: platformCondition(`printf 'change-1'`, `echo change-1`),
+				Prompt:    "First {change}",
+				Commit:    "see: first {change}",
+			},
+		},
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want nil after rollback", err)
+	}
+	if got := currentBranch(t, repo); got != firstLane {
+		t.Fatalf("current branch = %q, want first lane %q (cleaned lane remains checked out)", got, firstLane)
+	}
+	if tip := branchTip(t, repo, firstLane); tip != preTip {
+		t.Fatalf("lane tip after rollback = %s, want %s", tip, preTip)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "failed.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed file should have been rolled back, stat err = %v", err)
+	}
+	logOut, err := exec.Command("git", "-C", repo, "log", "--oneline", firstLane).CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logOut), "prior commit") || strings.Contains(string(logOut), "failed") {
+		t.Fatalf("lane history after rollback is wrong:\n%s", logOut)
+	}
+	var sawFailed bool
+	for _, e := range obs.events {
+		if f, ok := e.(ChangeFailed); ok && f.Workflow == "first" && f.Change == "change-1" {
+			sawFailed = true
+		}
+	}
+	if !sawFailed {
+		t.Fatalf("expected ChangeFailed for first workflow; events = %v", obs.eventTypes())
+	}
+}
+
+// TestWatcherSwitchesBetweenExistingWorkflowLanes: when two
+// workflows already have lanes with prior commits and the
+// checkout is clean, the watcher switches from the source lane
+// (or main) to each workflow lane in turn. Each lane's prior
+// commits remain reachable and neither is reset.
+func TestWatcherSwitchesBetweenExistingWorkflowLanes(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	openspecLane := "see/" + workflowIdentityDigest("openspec", "change-1")
+	updateLane := "see/" + workflowIdentityDigest("update", "change-2")
+	run("switch", "-c", openspecLane)
+	for _, name := range []string{"first-a", "first-b"} {
+		if err := os.WriteFile(filepath.Join(repo, name+".txt"), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		run("add", "-A")
+		run("commit", "-q", "-m", name)
+	}
+	run("switch", "-c", updateLane)
+	if err := os.WriteFile(filepath.Join(repo, "second.txt"), []byte("u"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-q", "-m", "update-prior")
+	run("switch", "main")
+
+	agent := &fakeAgent{
+		onRun: func() error {
+			return os.WriteFile(filepath.Join(repo, "agent-touched.txt"), []byte("work"), 0o644)
+		},
+	}
+	if err := (Watcher{
+		agent:      agent,
+		RetryCount: 1,
+		Once:       true,
+		Workflows: []WorkflowConfig{
+			{
+				Name:      "openspec",
+				Condition: platformCondition(`printf 'change-1'`, `echo change-1`),
+				Prompt:    "First {change}",
+				Commit:    "see: openspec {change}",
+			},
+			{
+				Name:      "update",
+				Condition: platformCondition(`printf 'change-2'`, `echo change-2`),
+				Prompt:    "Second {change}",
+				Commit:    "see: update {change}",
+			},
+		},
+	}).Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want nil", err)
+	}
+	if got := currentBranch(t, repo); got != updateLane {
+		t.Fatalf("current branch = %q, want update lane %q (final usable lane)", got, updateLane)
+	}
+	if len(agent.runs) != 2 {
+		t.Fatalf("agent runs = %d, want 2 (one per workflow)", len(agent.runs))
+	}
+	for branch, wants := range map[string][]string{
+		openspecLane: {"first-a.txt", "first-b.txt"},
+		updateLane:   {"second.txt"},
+	} {
+		if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/"+branch).Run(); err != nil {
+			t.Fatalf("lane %q missing: %v", branch, err)
+		}
+		nameOut, err := exec.Command("git", "-C", repo, "log", "--name-only", "--format=", branch).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git log %s: %v", branch, err)
+		}
+		for _, prior := range wants {
+			if !strings.Contains(string(nameOut), prior) {
+				t.Fatalf("lane %q lost prior file %q:\n%s", branch, prior, nameOut)
+			}
+		}
+		lsOut, lerr := exec.Command("git", "-C", repo, "ls-tree", "--name-only", branch).CombinedOutput()
+		if lerr != nil || !strings.Contains(string(lsOut), "agent-touched.txt") {
+			t.Fatalf("lane %q missing agent-touched capture:\n%s", branch, lsOut)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(repo, "agent-touched.txt")); err != nil {
+		t.Fatalf("agent-touched file should exist on the final lane: %v", err)
+	}
+}
+
+// TestWatcherWorkflowIgnoresIgnoredFiles: in workflow mode an
+// agent run produces only ignored untracked output. The lane
+// accepts the change (ignored files don't count toward dirtiness)
+// and the run is a warning-free no-op so far as commits go.
+func TestWatcherWorkflowIgnoresIgnoredFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Gitignore-based ignored file test uses POSIX semantics")
+	}
+	repo := mkCleanCustomRepo(t)
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("ignored/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-q", "-m", "ignore ignored")
+	obs := &recordingObserver{}
+	agent := &fakeAgent{
+		onRun: func() error {
+			if err := os.MkdirAll(filepath.Join(repo, "ignored"), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(repo, "ignored", "cache"), []byte("x"), 0o644)
+		},
+	}
+	w := Watcher{
+		agent:      agent,
+		RetryCount: 1,
+		Once:       true,
+		observer:   obs,
+		Workflows: []WorkflowConfig{
+			{
+				Name:      "only",
+				Condition: platformCondition(`printf 'change'`, `echo change`),
+				Prompt:    "Apply {change}",
+				Commit:    "see: apply {change}",
+			},
+		},
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want nil", err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "ignored", "cache")); err != nil {
+		t.Fatalf("ignored file did not survive the run: %v", err)
+	}
+	if got := currentBranch(t, repo); got != "see/"+workflowIdentityDigest("only", "change") {
+		t.Fatalf("current branch = %q, want workflow lane", got)
+	}
+}
+
+// TestWatcherWorkflowDirtyTreeBlocksAllWorkflows: when the working
+// tree is dirty, the workflow loop must refuse the run entirely
+// and leave the workflow on the safe branch (main). No agent is
+// invoked and no lane is created.
+func TestWatcherWorkflowDirtyTreeBlocksAllWorkflows(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "untracked.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agent := &fakeAgent{}
+	w := Watcher{
+		agent:      agent,
+		RetryCount: 1,
+		Once:       true,
+		Workflows: []WorkflowConfig{
+			{
+				Name:      "only",
+				Condition: platformCondition(`printf 'change'`, `echo change`),
+				Prompt:    "Apply {change}",
+				Commit:    "see: apply {change}",
+			},
+		},
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want nil for dirty-tree refusal", err)
+	}
+	if len(agent.runs) != 0 {
+		t.Fatalf("agent runs = %d, want 0 when working tree is dirty", len(agent.runs))
+	}
+	if got := currentBranch(t, repo); got != "main" {
+		t.Fatalf("current branch = %q, want main (dirty refusal must not switch)", got)
+	}
+	listOut, err := exec.Command("git", "-C", repo, "branch", "--list", "see/*").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(listOut)) != "" {
+		t.Fatalf("expected no see/ branches after dirty refusal; got:\n%s", listOut)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "untracked.txt")); err != nil {
+		t.Fatalf("operator's untracked file should be preserved; stat err = %v", err)
 	}
 }

@@ -230,9 +230,10 @@ func ensureBranch(path, sha, name string) error {
 //   - Lane exists and HEAD is on it: preserved as-is (no reset);
 //     `created` reports false so the rollback path knows to reset to
 //     the pre-run tip on failure.
-//   - Lane exists but HEAD is on another branch: refused with an
-//     actionable error and no mutation, since switching based on a
-//     stale condition would mutate the operator's working tree.
+//   - Lane exists and HEAD is on a clean branch or lane: switched
+//     via `git switch`, preserving prior commits. The dirty-tree
+//     guard at the top of ensureWorkflowLane is the only safety
+//     check on this transition.
 //
 // The legacy OpenSpec branch path (ensureBranch) is left untouched:
 // this helper only governs the custom-mode lane.
@@ -248,7 +249,9 @@ func ensureWorkflowLane(path, digest string) (created bool, err error) {
 	branch := "see/" + digest
 
 	// Dirty working tree blocks all three success paths. A clean
-	// tree is also the rollback baseline for failed attempts.
+	// tree is also the rollback baseline for failed attempts. The
+	// guard exists so a downstream `git switch` cannot lose tracked
+	// or non-ignored untracked edits the operator has staged.
 	if dirty, derr := hasUntrackedOrModified(path); derr != nil {
 		return false, derr
 	} else if dirty {
@@ -265,15 +268,12 @@ func ensureWorkflowLane(path, digest string) (created bool, err error) {
 		return true, nil
 	}
 
-	// Lane exists: refuse when the operator has checked out a
-	// different branch — switching based on a stale condition would
-	// mutate their working tree and could overwrite either branch.
-	cur, rerr := originalRef(path)
-	if rerr != nil {
-		return false, rerr
-	}
-	if cur != branch {
-		return false, fmt.Errorf("see: lane %s exists on branch %q; check it out (or remove/rename the lane) before see runs", branch, cur)
+	// Lane exists: switch to it. The dirty-tree guard above is
+	// the only safety check; a clean working tree means there is
+	// nothing to lose by leaving the current branch. `git switch`
+	// without `--hard` keeps the lane's existing commits intact.
+	if out, gerr := exec.Command("git", "-C", path, "switch", branch).CombinedOutput(); gerr != nil {
+		return false, fmt.Errorf("see: git switch %s on %s: %w\n%s", branch, path, gerr, out)
 	}
 	return false, nil
 }

@@ -309,9 +309,10 @@ then:
 - **Lane does not exist** — created at the current commit.
 - **Lane exists and HEAD is on it** — preserved as-is; no reset,
   prior commits stay in place.
-- **Lane exists but HEAD is on another branch** — refused with an
-  actionable message and no mutation. Switching based on a stale
-  condition would overwrite either branch.
+- **Lane exists and HEAD is on a clean branch or another lane** —
+  switched to the lane via `git switch`, leaving its commits
+  intact. The dirty-tree guard above is the only safety check on
+  the transition.
 
 Rollback is mode-aware:
 
@@ -326,6 +327,12 @@ Cleanup steps are best-effort: each failure emits a `Warning` event
 without replacing the agent error. Ignored files (per the
 `.gitignore`) are outside the rollback guarantee to avoid deleting
 caches or local configuration that predated the run.
+
+After all workflows for a repository are processed, the final
+usable active workflow lane stays checked out so the next
+polling pass resumes from there. A run where every condition
+exits with status `1` leaves the branch that was originally
+checked out untouched.
 
 ### Catch-up commit
 

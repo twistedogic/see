@@ -1,9 +1,5 @@
-# workflow-condition
+## MODIFIED Requirements
 
-## Purpose
-
-Define how custom workflow configuration resolves one work item, derives its stable identity, renders templates, and repeats work while its condition remains true.
-## Requirements
 ### Requirement: Configuration selects a custom workflow
 The strict configuration schema SHALL accept an optional sequence of named workflow mappings under `workflows`. Each workflow SHALL define nonblank `name`, `prompt`, `condition`, and `commit` strings. A workflow condition containing at least one non-whitespace character SHALL select that workflow for evaluation; the workflow's prompt and commit SHALL be used only for that workflow. The old top-level custom fields SHALL no longer be accepted.
 
@@ -72,29 +68,6 @@ For each configured workflow and watched repository, `see` SHALL execute that wo
 - **THEN** that workflow reports a condition error
 - **AND** later workflows are still evaluated if the checkout remains safe
 
-### Requirement: Condition stdout is normalized into one change value
-After a condition exits with status `0`, `see` SHALL remove trailing carriage-return and line-feed characters from its standard output. The remaining value SHALL contain at least one non-whitespace character and SHALL NOT contain another carriage return or line feed. The resulting single-line value, including any non-newline leading or trailing whitespace, SHALL be the normalized change used by every downstream custom-workflow operation.
-
-#### Scenario: Conventional trailing newline is removed
-- **WHEN** a successful condition writes `add-dark-mode\n`
-- **THEN** the normalized change is exactly `add-dark-mode`
-
-#### Scenario: Windows trailing newline is removed
-- **WHEN** a successful condition writes `add-dark-mode\r\n`
-- **THEN** the normalized change is exactly `add-dark-mode`
-
-#### Scenario: Empty or whitespace-only successful output is rejected
-- **WHEN** a condition exits with status `0` and writes no standard output or only whitespace
-- **THEN** the attempt fails with an actionable empty-change error
-- **AND** no branch is created
-- **AND** the agent is not invoked
-
-#### Scenario: Multiline output is rejected
-- **WHEN** a successful condition writes two nonempty lines
-- **THEN** the attempt fails with an actionable single-line requirement error
-- **AND** no branch is created
-- **AND** the agent is not invoked
-
 ### Requirement: Normalized change determines custom branch and log identity
 `see` SHALL compute the full lowercase Secure Hash Algorithm 256-bit (SHA-256) digest of `workflow.name + "\x00" + normalizedChange` and use `see/<digest>` as the workflow lane. Per-agent log filenames SHALL use the same digest. The same workflow name and normalized change SHALL produce the same identity across polling passes and process restarts, while different workflow names SHALL produce different identities even for equal change values.
 
@@ -150,23 +123,3 @@ For an active workflow, `see` SHALL replace every literal `{change}` occurrence 
 - **THEN** its agent prompt uses the `openspec` prompt with `{change}` replaced
 - **AND** its catch-up commit uses the `openspec` commit template with `{change}` replaced
 - **AND** the `update` templates are not used
-
-### Requirement: Custom conditions are level-triggered
-`see` SHALL evaluate the custom condition again on every polling pass. Every pass on which it exits with status `0` and emits a valid change SHALL invoke the agent, including when the normalized change is identical to the previous pass. `see` SHALL NOT persist false-to-true edge state or treat a prior successful run as completion while the condition remains true.
-
-#### Scenario: True condition repeats work
-- **WHEN** the condition emits `add-dark-mode` on two consecutive polling passes
-- **THEN** the agent is invoked once on each pass
-- **AND** both invocations use the same persistent automation branch
-
-#### Scenario: Condition becomes false
-- **WHEN** a condition emits a valid change on one pass and exits with status `1` on the next
-- **THEN** the first pass invokes the agent
-- **AND** the second pass leaves the repository idle without invoking the agent
-
-#### Scenario: Retry re-resolves the condition
-- **WHEN** a custom attempt fails and the retry count permits another attempt
-- **THEN** the watcher executes the condition again before the retry
-- **AND** exit status `1` makes that retry a successful idle no-op
-- **AND** a different valid stdout value selects the branch, prompt, and commit message for that newly resolved change
-
