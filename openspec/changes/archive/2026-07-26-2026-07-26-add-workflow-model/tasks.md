@@ -62,18 +62,18 @@
 - [x] 4.2 Update the embedded `config.example.yaml` template to include a
       commented `model:` line under one of the workflow examples so the
       field is discoverable on first run.
-- [ ] 4.3 Run `openspec validate --change 2026-07-26-add-workflow-model`
+- [x] 4.3 Run `openspec validate --change 2026-07-26-add-workflow-model`
       and confirm no issues.
 
 ## 5. Spec sync
 
-- [ ] 5.1 Add a new requirement to
+- [x] 5.1 Add a new requirement to
       `openspec/changes/2026-07-26-add-workflow-model/specs/workflow-condition/spec.md`
       covering the optional per-workflow `model` selector, with two
       scenarios: a workflow with `model` passes `--model` to `pi`; a
       workflow without `model` (or with a blank one) does not.
-- [ ] 5.2 Run `openspec sync-specs --change 2026-07-26-add-workflow-model`
+- [x] 5.2 Run `openspec sync-specs --change 2026-07-26-add-workflow-model`
       to promote the delta spec into
       `openspec/specs/workflow-condition/spec.md`.
-- [ ] 5.3 Re-run `openspec validate --change 2026-07-26-add-workflow-model`
+- [x] 5.3 Re-run `openspec validate --change 2026-07-26-add-workflow-model`
       after the sync.

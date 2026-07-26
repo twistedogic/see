@@ -1,10 +1,4 @@
-# workflow-condition delta — add per-workflow `model` selector
-
-## Purpose
-
-Allow each configured workflow to pin the model `pi` uses for its runs while keeping the field optional and the OpenSpec-compatibility path unchanged.
-
-## Requirements
+## ADDED Requirements
 
 ### Requirement: Workflow MAY select a model passed to `pi` as `--model`
 
