@@ -2767,3 +2767,166 @@ func TestCustomCatchUpCommitIsWarningFreeNoOpWhenUnchanged(t *testing.T) {
 		}
 	}
 }
+
+// TestWorkflowIdentityDigestStableAndDistinct: the new workflow
+// digest hashes name + NUL + change so different names produce
+// different identities even when the change value is identical,
+// while the same name + change pair is stable across calls.
+func TestWorkflowIdentityDigestStableAndDistinct(t *testing.T) {
+	a := workflowIdentityDigest("openspec", "add-foo")
+	b := workflowIdentityDigest("openspec", "add-foo")
+	if a != b {
+		t.Fatalf("repeated digest = %q, want stable %q", b, a)
+	}
+	if len(a) != 64 {
+		t.Fatalf("digest length = %d, want full 64-char SHA-256", len(a))
+	}
+	c := workflowIdentityDigest("update", "add-foo")
+	if c == a {
+		t.Fatalf("different names produced same digest %q", a)
+	}
+}
+
+// TestWorkflowIdentityDigestAvoidsBoundaryCollision: the NUL
+// separator between name and change must prevent collisions
+// across (a, bc) and (ab, c) pairs.
+func TestWorkflowIdentityDigestAvoidsBoundaryCollision(t *testing.T) {
+	left := workflowIdentityDigest("a", "bc")
+	right := workflowIdentityDigest("ab", "c")
+	if left == right {
+		t.Fatalf("digests collided: %q == %q", left, right)
+	}
+}
+
+// TestWatcherLaneDigestUsesWorkflowName: the watcher picks the
+// workflow-scoped digest when WorkflowName is set and falls back
+// to the legacy change-only digest when it is empty.
+func TestWatcherLaneDigestUsesWorkflowName(t *testing.T) {
+	withName := Watcher{WorkflowName: "openspec"}
+	nameDigest := withName.laneDigest("add-foo")
+	if want := workflowIdentityDigest("openspec", "add-foo"); nameDigest != want {
+		t.Fatalf("laneDigest with name = %q, want %q", nameDigest, want)
+	}
+	legacy := Watcher{}
+	legacyDigest := legacy.laneDigest("add-foo")
+	if want := customChangeDigest("add-foo"); legacyDigest != want {
+		t.Fatalf("laneDigest without name = %q, want legacy %q", legacyDigest, want)
+	}
+}
+
+// TestWatcherIteratesWorkflowsInOrder: when configured with two
+// workflows that both report active work, the watcher evaluates
+// the first workflow before the second and the agent runs once
+// per workflow. The agent receives each workflow's prompt
+// rendered with the active change.
+func TestWatcherIteratesWorkflowsInOrder(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	var calls []string
+	agent := &fakeAgent{
+		onRun: func() error {
+			calls = append(calls, "agent")
+			return nil
+		},
+	}
+	w := Watcher{
+		agent:      agent,
+		RetryCount: 1,
+		Once:       true,
+		Workflows: []WorkflowConfig{
+			{
+				Name:      "openspec",
+				Condition: platformCondition(`printf 'change-1'`, `echo change-1`),
+				Prompt:    "Apply first {change}",
+				Commit:    "see: first {change}",
+			},
+			{
+				Name:      "update",
+				Condition: platformCondition(`printf 'change-2'`, `echo change-2`),
+				Prompt:    "Update second {change}",
+				Commit:    "see: second {change}",
+			},
+		},
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want nil", err)
+	}
+	if len(agent.runs) != 2 {
+		t.Fatalf("agent runs = %d, want 2 for two active workflows", len(agent.runs))
+	}
+	// Workflows run sequentially, so the first prompt corresponds
+	// to the first workflow and the second to the second.
+	if want := "Apply first change-1"; agent.prompts[0] != want {
+		t.Fatalf("agent.prompts[0] = %q, want %q", agent.prompts[0], want)
+	}
+	if want := "Update second change-2"; agent.prompts[1] != want {
+		t.Fatalf("agent.prompts[1] = %q, want %q", agent.prompts[1], want)
+	}
+}
+
+// TestWatcherDifferentWorkflowsSameChangeDifferentLanes: when two
+// workflows both emit the same normalized change, the watcher
+// uses the workflow-scoped digest so the persistent lanes stay
+// isolated. Equal collisions in the change alone must not produce
+// the same branch.
+func TestWatcherDifferentWorkflowsSameChangeDifferentLanes(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	agent := &fakeAgent{}
+	w := Watcher{
+		agent:      agent,
+		RetryCount: 1,
+		Once:       true,
+		Workflows: []WorkflowConfig{
+			{Name: "openspec", Condition: platformCondition(`printf 'shared'`, `echo shared`), Prompt: "A {change}", Commit: "see: a {change}"},
+			{Name: "update", Condition: platformCondition(`printf 'shared'`, `echo shared`), Prompt: "B {change}", Commit: "see: b {change}"},
+		},
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want nil", err)
+	}
+	openspec := "see/" + workflowIdentityDigest("openspec", "shared")
+	update := "see/" + workflowIdentityDigest("update", "shared")
+	if openspec == update {
+		t.Fatalf("lane collision: %q == %q", openspec, update)
+	}
+	for _, branch := range []string{openspec, update} {
+		if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/"+branch).Run(); err != nil {
+			t.Fatalf("missing lane %q: %v", branch, err)
+		}
+	}
+}
+
+// TestWatcherWorkflowExitOneSkipsThatWorkflow: a workflow
+// condition that exits with status 1 marks that workflow as idle
+// while the next workflow in configuration order is still
+// evaluated. The agent does not run for the idle workflow.
+func TestWatcherWorkflowExitOneSkipsThatWorkflow(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	var calls []string
+	agent := &fakeAgent{
+		onRun: func() error {
+			calls = append(calls, "agent")
+			return nil
+		},
+	}
+	w := Watcher{
+		agent:      agent,
+		RetryCount: 1,
+		Once:       true,
+		Workflows: []WorkflowConfig{
+			{Name: "idle", Condition: platformCondition("exit 1", "exit /b 1"), Prompt: "Idle {change}", Commit: "see: idle {change}"},
+			{Name: "active", Condition: platformCondition(`printf 'change'`, `echo change`), Prompt: "Active {change}", Commit: "see: active {change}"},
+		},
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch returned %v, want nil", err)
+	}
+	if len(agent.runs) != 1 {
+		t.Fatalf("agent runs = %d, want exactly 1 for one active workflow", len(agent.runs))
+	}
+	if len(agent.prompts) != 1 || agent.prompts[0] != "Active change" {
+		t.Fatalf("agent.prompts = %v, want [\"Active change\"]", agent.prompts)
+	}
+	if got := currentBranch(t, repo); got != "see/"+workflowIdentityDigest("active", "change") {
+		t.Fatalf("current branch = %q, want active workflow lane", got)
+	}
+}

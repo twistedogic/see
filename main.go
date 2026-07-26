@@ -45,6 +45,20 @@ func customChangeDigest(change string) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(change)))
 }
 
+// workflowIdentityDigest returns the full lowercase SHA-256 digest
+// of `name + "\x00" + change`. The null separator prevents two
+// pairs like (a, bc) and (ab, c) from colliding. The same name and
+// change always produce the same digest across processes and
+// polling passes; different names yield different digests even for
+// equal change values.
+func workflowIdentityDigest(name, change string) string {
+	h := sha256.New()
+	h.Write([]byte(name))
+	h.Write([]byte{0})
+	h.Write([]byte(change))
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
 // resolveCustomCondition runs the configured predicate in the platform
 // shell. A status of 1 is the normal idle result; successful stdout is
 // normalized into the single-line custom change identity.
@@ -223,7 +237,14 @@ func ensureBranch(path, sha, name string) error {
 // The legacy OpenSpec branch path (ensureBranch) is left untouched:
 // this helper only governs the custom-mode lane.
 func ensureCustomLane(path, change string) (created bool, err error) {
-	digest := customChangeDigest(change)
+	return ensureWorkflowLane(path, customChangeDigest(change))
+}
+
+// ensureWorkflowLane is the workflow-aware variant. The digest is
+// supplied by the caller so a workflow can hash its own name plus
+// the change while the legacy single-workflow path keeps using
+// customChangeDigest for backward compat.
+func ensureWorkflowLane(path, digest string) (created bool, err error) {
 	branch := "see/" + digest
 
 	// Dirty working tree blocks all three success paths. A clean
@@ -272,7 +293,14 @@ func hasUntrackedOrModified(path string) (bool, error) {
 // lanes created by this attempt are removed after returning to the source
 // branch. git clean intentionally omits -x so ignored files survive.
 func (w Watcher) rollbackCustomLane(path, change, ref, commit string, created bool, cause error) error {
-	branch := "see/" + customChangeDigest(change)
+	return w.rollbackWorkflowLane(path, change, customChangeDigest(change), ref, commit, created, cause)
+}
+
+// rollbackWorkflowLane is the workflow-aware variant: the digest
+// identifies the lane to remove, while the human-readable change is
+// kept in warning / event messages.
+func (w Watcher) rollbackWorkflowLane(path, change, digest, ref, commit string, created bool, cause error) error {
+	branch := "see/" + digest
 	run := func(label string, args ...string) {
 		out, err := exec.Command("git", append([]string{"-C", path}, args...)...).CombinedOutput()
 		if err != nil {
@@ -477,6 +505,20 @@ type Watcher struct {
 	// to carry a nonblank value. Use SetCommitTemplate to apply the
 	// trimming rule rather than assigning directly.
 	CommitTemplate string
+	// Workflows is the ordered multi-workflow configuration. When
+	// non-empty, Watcher iterates over each workflow for every
+	// repository instead of falling through to the legacy
+	// single-workflow path. The combined workflow identity is
+	// workflow-scoped (name + change) so different workflows get
+	// isolated lanes and log paths even when their normalized
+	// change values collide.
+	Workflows []WorkflowConfig
+	// WorkflowName is set by runOnce when iterating over Workflows
+	// so laneDigest / log filenames hash the workflow name into the
+	// digest. It is empty in the legacy single-workflow mode and
+	// for OpenSpec compatibility, preserving the change-only digest
+	// that earlier tests and operators depend on.
+	WorkflowName string
 }
 
 // DefaultPollInterval is the post-success-pass delay Watch applies in
@@ -529,6 +571,19 @@ func (w Watcher) warn(path, change, msg string) {
 	}
 }
 
+// laneDigest returns the workflow-scoped identity digest for change.
+// When WorkflowName is set the digest hashes name + NUL + change so
+// equal changes in different workflows get distinct lanes and log
+// paths; when WorkflowName is empty (legacy single-workflow mode
+// and OpenSpec compatibility) the digest hashes the change alone so
+// existing tests and on-disk branches keep working.
+func (w Watcher) laneDigest(change string) string {
+	if w.WorkflowName != "" {
+		return workflowIdentityDigest(w.WorkflowName, change)
+	}
+	return customChangeDigest(change)
+}
+
 func (w Watcher) workResolved(ctx context.Context, path, change string) error {
 	current, err := GetCurrentCommit(path)
 	if err != nil {
@@ -544,7 +599,8 @@ func (w Watcher) workResolved(ctx context.Context, path, change string) error {
 	}
 
 	if w.customMode() {
-		created, err := ensureCustomLane(path, change)
+		digest := w.laneDigest(change)
+		created, err := ensureWorkflowLane(path, digest)
 		if err != nil {
 			return err
 		}
@@ -559,13 +615,12 @@ func (w Watcher) workResolved(ctx context.Context, path, change string) error {
 		if template == "" {
 			template = defaultPromptTemplate
 		}
-		logChange := customChangeDigest(change)
-		logPath, runErr := w.agent.Run(ctx, path, logChange, renderTemplate(template, change))
+		logPath, runErr := w.agent.Run(ctx, path, digest, renderTemplate(template, change))
 		if logPath != "" && w.observer != nil {
 			w.observer.Observe(LogPath{Path: logPath, Change: change})
 		}
 		if runErr != nil {
-			return w.rollbackCustomLane(path, change, ref, attemptTip, created, runErr)
+			return w.rollbackWorkflowLane(path, change, digest, ref, attemptTip, created, runErr)
 		}
 		w.catchUpCustomCommit(path, change)
 		if w.observer != nil {
@@ -633,6 +688,17 @@ func (w Watcher) runOnce(ctx context.Context, repos []string) error {
 			if _, err := GetCurrentCommit(repo); err != nil {
 				continue
 			}
+			if len(w.Workflows) > 0 {
+				// ponytail: a workflow failure is contained — the lane is
+				// rolled back before the error reaches here, so the next
+				// workflow can safely run from a clean checkout.
+				for _, wf := range w.Workflows {
+					if _, err := w.runOneWorkflow(ctx, repo, wf); err != nil && w.observer != nil {
+						w.observer.Observe(ChangeFailed{Path: repo, Change: wf.Name, Err: err.Error()})
+					}
+				}
+				continue
+			}
 			lastChange, err := w.runWithRetry(ctx, repo)
 			if err != nil {
 				if w.observer != nil {
@@ -643,6 +709,22 @@ func (w Watcher) runOnce(ctx context.Context, repos []string) error {
 		}
 	}
 	return nil
+}
+
+// runOneWorkflow runs a single workflow against repo. The
+// watcher copy carries the workflow's condition, prompt, commit
+// template, and name so the existing runWithRetry path picks up
+// the right identity. Retry scope is the workflow, not the
+// repository: a retry failure for one workflow cannot block
+// later workflows.
+func (w Watcher) runOneWorkflow(ctx context.Context, repo string, wf WorkflowConfig) (string, error) {
+	child := w
+	child.Workflows = nil
+	child.Condition = wf.Condition
+	child.CommitTemplate = wf.Commit
+	child.WorkflowName = wf.Name
+	child.SetPromptTemplate(wf.Prompt)
+	return child.runWithRetry(ctx, repo)
 }
 
 func (w Watcher) Watch(ctx context.Context, repos []string) error {
