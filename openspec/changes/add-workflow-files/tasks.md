@@ -4,13 +4,13 @@
       `config.go`. No new validation logic in `validateConfig` beyond the
       existing `expandTilde` and `**` rejection pattern; the rest happens in
       the loader step.
-- [ ] 1.2 Resolve the effective `workflows_dir` in a new helper
+- [x] 1.2 Resolve the effective `workflows_dir` in a new helper
       `resolveWorkflowsDir(cfg Config) (string, error)`: tilde-expand the
       configured value when nonblank; fall back to the default
       `~/.config/see/workflows/`; stat the path and return an actionable
       error if it exists but is not a directory; return the path unchanged
       if it does not exist.
-- [ ] 1.3 Add a config_test.go case asserting `WorkflowsDir` round-trips
+- [x] 1.3 Add a config_test.go case asserting `WorkflowsDir` round-trips
       through the strict decoder and that `**` is rejected.
 
 ## 2. Frontmatter and body parser

@@ -166,7 +166,66 @@ func validateConfig(cfg *Config) error {
 			(*group.patterns)[i] = expanded
 		}
 	}
+	if strings.TrimSpace(cfg.WorkflowsDir) == "" {
+		cfg.WorkflowsDir = ""
+	} else {
+		if strings.Contains(cfg.WorkflowsDir, "**") {
+			return fmt.Errorf("workflows_dir: '**' is not supported")
+		}
+		expanded, err := expandTilde(cfg.WorkflowsDir)
+		if err != nil {
+			return fmt.Errorf("workflows_dir: %w", err)
+		}
+		cfg.WorkflowsDir = expanded
+	}
 	return nil
+}
+
+// defaultWorkflowsDir is the directory `see` reads workflow `.md`
+// files from when no explicit `workflows_dir` is configured. Tilde
+// is literal here; callers go through expandTilde when they resolve
+// the default.
+const defaultWorkflowsDir = "~/.config/see/workflows/"
+
+// resolveWorkflowsDir returns the effective directory `see` reads
+// workflow `.md` files from, plus a stat-based verdict on whether
+// the directory is usable. cfg.WorkflowsDir wins when nonblank;
+// otherwise the default ~/.config/see/workflows/ is tilde-expanded
+// and returned. The path is always returned; the error is the
+// verdict:
+//
+//	nil         → path does not exist (silent no-op) or is a
+//	              usable directory
+//	non-nil     → path exists but is not a directory, or stat
+//	              failed for some other reason; the error names
+//	              the path so the operator can fix it
+//
+// `**` rejection and the initial tilde-expansion of a configured
+// value happen earlier in validateConfig; resolveWorkflowsDir only
+// handles the fallback and the disk-side checks described in the
+// spec scenarios.
+func resolveWorkflowsDir(cfg Config) (string, error) {
+	var dir string
+	if strings.TrimSpace(cfg.WorkflowsDir) == "" {
+		expanded, err := expandTilde(defaultWorkflowsDir)
+		if err != nil {
+			return "", fmt.Errorf("workflows_dir default %q: %w", defaultWorkflowsDir, err)
+		}
+		dir = expanded
+	} else {
+		dir = cfg.WorkflowsDir
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return dir, nil
+		}
+		return dir, fmt.Errorf("workflows_dir %q: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return dir, fmt.Errorf("workflows_dir %q: not a directory", dir)
+	}
+	return dir, nil
 }
 
 // validateWorkflows enforces the multi-workflow contract for the

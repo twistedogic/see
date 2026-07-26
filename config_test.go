@@ -965,6 +965,8 @@ func TestLoadConfigParsesWorktreeFields(t *testing.T) {
 }
 
 func TestLoadConfigParsesWorkflowsDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(path, []byte("workflows_dir: ~/workflows\n"), 0o644); err != nil {
@@ -974,7 +976,95 @@ func TestLoadConfigParsesWorkflowsDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
 	}
-	if cfg.WorkflowsDir != "~/workflows" {
-		t.Fatalf("WorkflowsDir = %q, want ~/workflows", cfg.WorkflowsDir)
+	want := filepath.Join(home, "workflows")
+	if cfg.WorkflowsDir != want {
+		t.Fatalf("WorkflowsDir = %q, want %q", cfg.WorkflowsDir, want)
+	}
+}
+
+func TestLoadConfigRejectsWorkflowsDirDoubleStar(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("workflows_dir: /tmp/**\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadConfig(path)
+	if err == nil {
+		t.Fatalf("loadConfig: want '**' rejection, got nil")
+	}
+	if !strings.Contains(err.Error(), "workflows_dir") || !strings.Contains(err.Error(), "**") {
+		t.Fatalf("loadConfig error = %q, want it to name workflows_dir and **", err)
+	}
+}
+
+func TestValidateConfigExpandsWorkflowsDirTilde(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := Config{WorkflowsDir: "~/wf"}
+	if err := validateConfig(&cfg); err != nil {
+		t.Fatalf("validateConfig: %v", err)
+	}
+	if cfg.WorkflowsDir != filepath.Join(home, "wf") {
+		t.Fatalf("WorkflowsDir = %q, want %q", cfg.WorkflowsDir, filepath.Join(home, "wf"))
+	}
+}
+
+func TestResolveWorkflowsDirFallsBackToDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir, err := resolveWorkflowsDir(Config{})
+	if err != nil {
+		t.Fatalf("resolveWorkflowsDir: %v", err)
+	}
+	want := filepath.Join(home, ".config", "see", "workflows")
+	if dir != want {
+		t.Fatalf("resolveWorkflowsDir = %q, want %q", dir, want)
+	}
+}
+
+func TestResolveWorkflowsDirReturnsConfiguredWhenSet(t *testing.T) {
+	cfg := Config{WorkflowsDir: "/etc/see/workflows"}
+	dir, err := resolveWorkflowsDir(cfg)
+	if err != nil {
+		t.Fatalf("resolveWorkflowsDir: %v", err)
+	}
+	if dir != "/etc/see/workflows" {
+		t.Fatalf("resolveWorkflowsDir = %q, want /etc/see/workflows", dir)
+	}
+}
+
+func TestResolveWorkflowsDirMissingIsNoOp(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "nope")
+	dir, err := resolveWorkflowsDir(Config{WorkflowsDir: missing})
+	if err != nil {
+		t.Fatalf("resolveWorkflowsDir: %v", err)
+	}
+	if dir != missing {
+		t.Fatalf("resolveWorkflowsDir = %q, want %q", dir, missing)
+	}
+}
+
+func TestResolveWorkflowsDirErrorsWhenPathIsFile(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := resolveWorkflowsDir(Config{WorkflowsDir: file})
+	if err == nil {
+		t.Fatalf("resolveWorkflowsDir: want not-a-directory error, got nil")
+	}
+	if !strings.Contains(err.Error(), file) || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("resolveWorkflowsDir error = %q, want it to name %q and 'not a directory'", err, file)
+	}
+}
+
+func TestResolveWorkflowsDirHappyPathDirectory(t *testing.T) {
+	dir := t.TempDir()
+	got, err := resolveWorkflowsDir(Config{WorkflowsDir: dir})
+	if err != nil {
+		t.Fatalf("resolveWorkflowsDir: %v", err)
+	}
+	if got != dir {
+		t.Fatalf("resolveWorkflowsDir = %q, want %q", got, dir)
 	}
 }
