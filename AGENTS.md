@@ -116,7 +116,9 @@ workflows:
   contributes no file workflows; a path that exists but is not a directory
   fails startup.
 - `workflows` is an ordered sequence. Each entry requires a unique nonblank
-  `name`, `prompt`, `condition`, and `commit`. Entries run in configuration
+  `name`, `prompt`, `condition`, and `commit`. The optional `model` string is
+  passed to `pi` as `--model` for that workflow's runs when nonblank;
+  otherwise the agent's default model is used. Entries run in configuration
   order for every discovered repository; workflows are not run concurrently.
 - A workflow `prompt` is a string. Literal-block scalars (`|`, `|-`, `|+`)
   preserve interior line breaks; use `|-` to strip the trailing newline. The

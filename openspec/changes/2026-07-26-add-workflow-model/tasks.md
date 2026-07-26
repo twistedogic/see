@@ -55,11 +55,11 @@
 
 ## 4. Documentation
 
-- [ ] 4.1 Update `AGENTS.md` workflow schema with one bullet: "`model` is
+- [x] 4.1 Update `AGENTS.md` workflow schema with one bullet: "`model` is
       an optional string. When nonblank, it is passed to `pi` as
       `--model` for that workflow's runs; otherwise the agent's default
       model is used."
-- [ ] 4.2 Update the embedded `config.example.yaml` template to include a
+- [x] 4.2 Update the embedded `config.example.yaml` template to include a
       commented `model:` line under one of the workflow examples so the
       field is discoverable on first run.
 - [ ] 4.3 Run `openspec validate --change 2026-07-26-add-workflow-model`
