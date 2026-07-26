@@ -494,6 +494,176 @@ func TestValidateCustomModeAcceptsWhitespaceConditionAsBlank(t *testing.T) {
 	}
 }
 
+// --- multi-workflow schema: support-multiple-workflows (task 1.2) -------
+
+// TestLoadConfigWithWorkflows proves the new `workflows` sequence
+// decodes in order and every per-workflow field round-trips. The
+// schema is opt-in: when the key is absent, the slice is nil and
+// OpenSpec compatibility remains in effect.
+func TestLoadConfigWithWorkflows(t *testing.T) {
+	base := t.TempDir()
+	body := `workflows:
+  - name: openspec
+    prompt: "Apply {change}"
+    condition: "echo openspec-change"
+    commit: "see: apply openspec {change}"
+  - name: update
+    prompt: "Bump {change}"
+    condition: "echo package-update"
+    commit: "see: bump {change}"
+`
+	path := writeConfigYAML(t, base, body)
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if len(cfg.Workflows) != 2 {
+		t.Fatalf("len(Workflows) = %d, want 2", len(cfg.Workflows))
+	}
+	if cfg.Workflows[0] != (WorkflowConfig{
+		Name: "openspec", Prompt: "Apply {change}",
+		Condition: "echo openspec-change", Commit: "see: apply openspec {change}",
+	}) {
+		t.Fatalf("Workflows[0] = %+v, want openspec entry", cfg.Workflows[0])
+	}
+	if cfg.Workflows[1] != (WorkflowConfig{
+		Name: "update", Prompt: "Bump {change}",
+		Condition: "echo package-update", Commit: "see: bump {change}",
+	}) {
+		t.Fatalf("Workflows[1] = %+v, want update entry", cfg.Workflows[1])
+	}
+}
+
+// TestLoadConfigWorkflowsMultilinePrompt pins the literal-block-scalar
+// behavior for per-workflow prompts so multiline prompts survive the
+// decoder round-trip.
+func TestLoadConfigWorkflowsMultilinePrompt(t *testing.T) {
+	base := t.TempDir()
+	body := "workflows:\n  - name: openspec\n    prompt: |-\n      First line\n      Second line\n    condition: \"echo x\"\n    commit: \"see: {change}\"\n"
+	path := writeConfigYAML(t, base, body)
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if got, want := cfg.Workflows[0].Prompt, "First line\nSecond line"; got != want {
+		t.Fatalf("Workflows[0].Prompt = %q, want %q", got, want)
+	}
+}
+
+// TestLoadConfigWorkflowsWrongType proves the strict schema rejects
+// non-string fields inside a workflow entry.
+func TestLoadConfigWorkflowsWrongType(t *testing.T) {
+	base := t.TempDir()
+	path := writeConfigYAML(t, base, "workflows:\n  - name: openspec\n    prompt: [not, a, string]\n    condition: \"echo x\"\n    commit: \"see: {change}\"\n")
+	if _, err := loadConfig(path); err == nil {
+		t.Fatal("err = nil, want non-nil for wrong prompt type")
+	}
+}
+
+// TestLoadConfigWorkflowsUnknownField proves per-workflow entries
+// inherit the strict known-field contract: an unknown sub-field is
+// rejected so a typo does not silently disable a workflow.
+func TestLoadConfigWorkflowsUnknownField(t *testing.T) {
+	base := t.TempDir()
+	path := writeConfigYAML(t, base, "workflows:\n  - name: openspec\n    promt: \"oops\"\n    condition: \"echo x\"\n    commit: \"see: {change}\"\n")
+	if _, err := loadConfig(path); err == nil {
+		t.Fatal("err = nil, want non-nil for unknown workflow sub-field")
+	}
+}
+
+// TestLoadConfigWorkflowsEmptyIsCompatibility proves omitting the
+// `workflows` key leaves the slice nil so OpenSpec compatibility
+// remains active.
+func TestLoadConfigWorkflowsEmptyIsCompatibility(t *testing.T) {
+	base := t.TempDir()
+	path := writeConfigYAML(t, base, "prompt: \"Apply {change}\"\n")
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if cfg.Workflows != nil {
+		t.Fatalf("Workflows = %+v, want nil for omitted workflows key", cfg.Workflows)
+	}
+}
+
+// TestValidateWorkflowsAcceptsComplete proves a non-empty workflows
+// slice with valid entries passes validation.
+func TestValidateWorkflowsAcceptsComplete(t *testing.T) {
+	cfg := Config{Workflows: []WorkflowConfig{
+		{Name: "openspec", Prompt: "Apply {change}", Condition: "echo x", Commit: "see: {change}"},
+		{Name: "update", Prompt: "Bump {change}", Condition: "echo y", Commit: "see: bump {change}"},
+	}}
+	if err := validateWorkflows(cfg); err != nil {
+		t.Fatalf("err = %v, want nil for complete workflows", err)
+	}
+}
+
+// TestValidateWorkflowsRejectsBlankField proves every required
+// field is enforced; the error names the offending index and field.
+func TestValidateWorkflowsRejectsBlankField(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*WorkflowConfig)
+		wantErr string
+	}{
+		{"blank name", func(w *WorkflowConfig) { w.Name = "  " }, "name"},
+		{"blank prompt", func(w *WorkflowConfig) { w.Prompt = "" }, "prompt"},
+		{"blank condition", func(w *WorkflowConfig) { w.Condition = "\n\t" }, "condition"},
+		{"blank commit", func(w *WorkflowConfig) { w.Commit = "" }, "commit"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{Workflows: []WorkflowConfig{
+				{Name: "openspec", Prompt: "Apply {change}", Condition: "echo x", Commit: "see: {change}"},
+			}}
+			tc.mutate(&cfg.Workflows[0])
+			err := validateWorkflows(cfg)
+			if err == nil {
+				t.Fatal("err = nil, want non-nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %q, want it to mention %q", err.Error(), tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), "workflows[0]") {
+				t.Fatalf("err = %q, want it to identify workflows[0]", err.Error())
+			}
+		})
+	}
+}
+
+// TestValidateWorkflowsRejectsDuplicateName proves uniqueness is
+// enforced so two workflows with the same name cannot produce the
+// same branch and log identity.
+func TestValidateWorkflowsRejectsDuplicateName(t *testing.T) {
+	cfg := Config{Workflows: []WorkflowConfig{
+		{Name: "openspec", Prompt: "Apply {change}", Condition: "echo x", Commit: "see: {change}"},
+		{Name: "openspec", Prompt: "Bump {change}", Condition: "echo y", Commit: "see: bump {change}"},
+	}}
+	err := validateWorkflows(cfg)
+	if err == nil {
+		t.Fatal("err = nil, want non-nil for duplicate workflow names")
+	}
+	if !strings.Contains(err.Error(), "duplicate") || !strings.Contains(err.Error(), "openspec") {
+		t.Fatalf("err = %q, want it to mention duplicate and the name", err.Error())
+	}
+}
+
+// TestValidateWorkflowsEmptyIsCompatibility proves an empty slice
+// is the OpenSpec compatibility path; validation returns nil so
+// startup proceeds without forcing the operator to declare a
+// workflow.
+func TestValidateWorkflowsEmptyIsCompatibility(t *testing.T) {
+	for _, c := range []Config{
+		{},
+		{Workflows: nil},
+		{Workflows: []WorkflowConfig{}},
+	} {
+		if err := validateWorkflows(c); err != nil {
+			t.Fatalf("err = %v, want nil for empty workflows", err)
+		}
+	}
+}
+
 // --- selectPromptTemplate: task 1.4 --------------------------------------
 
 // TestSelectPromptTemplateCLIOverridesConfigured: a nonblank CLI

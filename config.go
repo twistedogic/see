@@ -77,13 +77,32 @@ func expandTilde(p string) (string, error) {
 // Include / Exclude slices include every immediate child and exclude none,
 // an empty Prompt falls through to the embedded default, and Condition /
 // Commit belong to the custom workflow.
+//
+// Workflows is the multi-workflow schema introduced by the
+// `support-multiple-workflows` change. When non-empty, every entry
+// must carry nonblank Name, Prompt, Condition, and Commit; names must
+// be unique. The legacy top-level Prompt / Condition / Commit fields
+// remain decoded for now and will be removed once the watcher is
+// fully migrated to iterate over Workflows.
 type Config struct {
-	RootDir   string   `yaml:"root_dir"`
-	Include   []string `yaml:"include"`
-	Exclude   []string `yaml:"exclude"`
-	Prompt    string   `yaml:"prompt"`
-	Condition string   `yaml:"condition"`
-	Commit    string   `yaml:"commit"`
+	RootDir   string           `yaml:"root_dir"`
+	Include   []string         `yaml:"include"`
+	Exclude   []string         `yaml:"exclude"`
+	Prompt    string           `yaml:"prompt"`
+	Condition string           `yaml:"condition"`
+	Commit    string           `yaml:"commit"`
+	Workflows []WorkflowConfig `yaml:"workflows"`
+}
+
+// WorkflowConfig is one named entry in the ordered workflows slice.
+// Every field is required when the workflows block is configured;
+// validateWorkflows enforces the nonblank, unique-name contract
+// before the watcher starts.
+type WorkflowConfig struct {
+	Name      string `yaml:"name"`
+	Prompt    string `yaml:"prompt"`
+	Condition string `yaml:"condition"`
+	Commit    string `yaml:"commit"`
 }
 
 func validateConfig(cfg *Config) error {
@@ -150,6 +169,44 @@ func validateCustomConfig(cfg Config, cliPrompt string) error {
 	}
 	if strings.TrimSpace(cfg.Commit) == "" {
 		return fmt.Errorf("see: custom condition requires a `commit` template in config.yaml")
+	}
+	return nil
+}
+
+// validateWorkflows enforces the multi-workflow contract for the
+// Workflows slice: an empty slice is the OpenSpec compatibility
+// path and returns nil; a non-empty slice requires every entry to
+// have nonblank Name / Prompt / Condition / Commit, and every Name
+// to be unique within the slice. The first failure wins; the error
+// names the offending workflow index and field so the operator can
+// fix the configuration without reading the source. This validator
+// is independent of validateCustomConfig because the legacy
+// top-level fields and the new workflows slice coexist during the
+// migration; both checks run at startup.
+func validateWorkflows(cfg Config) error {
+	if len(cfg.Workflows) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(cfg.Workflows))
+	for i, wf := range cfg.Workflows {
+		path := fmt.Sprintf("workflows[%d]", i)
+		for _, f := range []struct {
+			field, value string
+		}{
+			{"name", wf.Name},
+			{"prompt", wf.Prompt},
+			{"condition", wf.Condition},
+			{"commit", wf.Commit},
+		} {
+			if strings.TrimSpace(f.value) == "" {
+				return fmt.Errorf("%s: %s is required", path, f.field)
+			}
+		}
+		name := strings.TrimSpace(wf.Name)
+		if _, dup := seen[name]; dup {
+			return fmt.Errorf("%s: duplicate workflow name %q", path, wf.Name)
+		}
+		seen[name] = struct{}{}
 	}
 	return nil
 }
