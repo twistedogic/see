@@ -75,22 +75,19 @@ func expandTilde(p string) (string, error) {
 // Config is the decoded contents of config.yaml. All fields are optional:
 // a blank RootDir preserves the current-working-directory fallback, empty
 // Include / Exclude slices include every immediate child and exclude none,
-// an empty Prompt falls through to the embedded default, and Condition /
-// Commit belong to the custom workflow.
+// and omitting Workflows keeps the OpenSpec compatibility path active.
 //
 // Workflows is the multi-workflow schema introduced by the
 // `support-multiple-workflows` change. When non-empty, every entry
 // must carry nonblank Name, Prompt, Condition, and Commit; names must
-// be unique. The legacy top-level Prompt / Condition / Commit fields
-// remain decoded for now and will be removed once the watcher is
-// fully migrated to iterate over Workflows.
+// be unique. The previous top-level `prompt`, `condition`, and
+// `commit` fields are rejected by the strict decoder: migrate each
+// old custom configuration into one named workflow under
+// `workflows` (see AGENTS.md for the schema and the migration path).
 type Config struct {
 	RootDir   string           `yaml:"root_dir"`
 	Include   []string         `yaml:"include"`
 	Exclude   []string         `yaml:"exclude"`
-	Prompt    string           `yaml:"prompt"`
-	Condition string           `yaml:"condition"`
-	Commit    string           `yaml:"commit"`
 	Workflows []WorkflowConfig `yaml:"workflows"`
 }
 
@@ -150,39 +147,13 @@ func validateConfig(cfg *Config) error {
 	return nil
 }
 
-// validateCustomConfig checks that custom workflow mode (triggered
-// by a nonblank Condition) has both an effective prompt template
-// and a nonblank Commit template before the watcher starts. The
-// effective prompt is the post-precedence value computed from
-// cliPrompt (the --prompt flag) and cfg.Prompt using the same
-// rule as selectPromptTemplate. Returns nil for compatibility mode
-// (blank Condition) regardless of the other fields — the OpenSpec
-// resolver does not need a commit template. Errors name the missing
-// field so the operator can fix the configuration without reading
-// the source.
-func validateCustomConfig(cfg Config, cliPrompt string) error {
-	if strings.TrimSpace(cfg.Condition) == "" {
-		return nil
-	}
-	if strings.TrimSpace(selectPromptTemplate(cliPrompt, cfg.Prompt)) == "" {
-		return fmt.Errorf("see: custom condition requires a prompt (configure `prompt` or pass --prompt)")
-	}
-	if strings.TrimSpace(cfg.Commit) == "" {
-		return fmt.Errorf("see: custom condition requires a `commit` template in config.yaml")
-	}
-	return nil
-}
-
 // validateWorkflows enforces the multi-workflow contract for the
 // Workflows slice: an empty slice is the OpenSpec compatibility
 // path and returns nil; a non-empty slice requires every entry to
 // have nonblank Name / Prompt / Condition / Commit, and every Name
 // to be unique within the slice. The first failure wins; the error
 // names the offending workflow index and field so the operator can
-// fix the configuration without reading the source. This validator
-// is independent of validateCustomConfig because the legacy
-// top-level fields and the new workflows slice coexist during the
-// migration; both checks run at startup.
+// fix the configuration without reading the source.
 func validateWorkflows(cfg Config) error {
 	if len(cfg.Workflows) == 0 {
 		return nil

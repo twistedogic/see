@@ -499,11 +499,12 @@ type Watcher struct {
 	// Condition selects custom workflow mode when nonblank.
 	Condition string
 	// CommitTemplate is the catch-up commit message rendered with
-	// {change} substitution in custom mode. The startup validator
-	// (validateCustomConfig) rejects a blank CommitTemplate whenever
-	// Condition is nonblank, so a Watcher in custom mode is expected
-	// to carry a nonblank value. Use SetCommitTemplate to apply the
-	// trimming rule rather than assigning directly.
+	// {change} substitution in custom mode. The startup workflow
+	// validator (validateWorkflows) rejects a blank Commit whenever a
+	// workflows entry is configured, so a Watcher driving any
+	// workflow is expected to carry a nonblank CommitTemplate. Use
+	// SetCommitTemplate to apply the trimming rule rather than
+	// assigning directly.
 	CommitTemplate string
 	// Workflows is the ordered multi-workflow configuration. When
 	// non-empty, Watcher iterates over each workflow for every
@@ -813,10 +814,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, "see:", err)
 		os.Exit(2)
 	}
-	w.SetPromptTemplate(selectPromptTemplate(*promptFlag, cfg.Prompt))
-	w.SetCommitTemplate(cfg.Commit)
-	w.Condition = cfg.Condition
-	if err := validateCustomConfig(cfg, *promptFlag); err != nil {
+	w.SetPromptTemplate(selectPromptTemplate(*promptFlag, ""))
+	w.Workflows = cfg.Workflows
+	if err := validateWorkflows(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "see:", err)
 		os.Exit(2)
 	}

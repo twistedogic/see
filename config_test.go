@@ -33,7 +33,7 @@ func writeConfigYAML(t *testing.T, base, body string) string {
 // and root_dir is validated before the configuration is returned.
 func TestLoadConfigValid(t *testing.T) {
 	base := t.TempDir()
-	path := writeConfigYAML(t, base, "root_dir: \""+base+"\"\ninclude:\n  - playground-*\nexclude:\n  - playground-old\nprompt: |\n  Apply the change {change}.\n")
+	path := writeConfigYAML(t, base, "root_dir: \""+base+"\"\ninclude:\n  - playground-*\nexclude:\n  - playground-old\n")
 	cfg, err := loadConfig(path)
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
@@ -46,27 +46,6 @@ func TestLoadConfigValid(t *testing.T) {
 	}
 	if want := []string{"playground-old"}; !reflect.DeepEqual(cfg.Exclude, want) {
 		t.Fatalf("Exclude = %v, want %v", cfg.Exclude, want)
-	}
-	// Block scalar with clip chomping ("|"): trailing newline preserved.
-	if got, want := cfg.Prompt, "Apply the change {change}.\n"; got != want {
-		t.Fatalf("Prompt = %q, want %q", got, want)
-	}
-}
-
-// TestLoadConfigMultilinePrompt pins the literal-block-scalar behavior
-// that the design depends on for editable multiline prompts. The strip
-// chomper ("|-") is the most useful form: trailing newline removed,
-// interior line breaks preserved.
-func TestLoadConfigMultilinePrompt(t *testing.T) {
-	base := t.TempDir()
-	path := writeConfigYAML(t, base, "prompt: |-\n  First line\n  Second line\n  Third line\n")
-	cfg, err := loadConfig(path)
-	if err != nil {
-		t.Fatalf("err = %v, want nil", err)
-	}
-	want := "First line\nSecond line\nThird line"
-	if cfg.Prompt != want {
-		t.Fatalf("Prompt = %q, want %q (block scalar line breaks must be preserved)", cfg.Prompt, want)
 	}
 }
 
@@ -150,6 +129,42 @@ func TestLoadConfigRejectsLegacyWatchesField(t *testing.T) {
 	_, err := loadConfig(path)
 	if err == nil || !strings.Contains(err.Error(), "watches") {
 		t.Fatalf("err = %v, want unknown watches field", err)
+	}
+}
+
+// --- legacy top-level field rejection: support-multiple-workflows (1.1) --
+
+// TestLoadConfigRejectsLegacyPromptField proves the top-level
+// `prompt` is no longer accepted: the strict decoder must surface
+// an unknown-field error so a migrated config that still carries
+// the old key fails fast instead of silently ignoring it.
+func TestLoadConfigRejectsLegacyPromptField(t *testing.T) {
+	path := writeConfigYAML(t, t.TempDir(), "prompt: \"Apply {change}\"\n")
+	_, err := loadConfig(path)
+	if err == nil || !strings.Contains(err.Error(), "prompt") {
+		t.Fatalf("err = %v, want unknown prompt field", err)
+	}
+}
+
+// TestLoadConfigRejectsLegacyConditionField proves the top-level
+// `condition` is no longer accepted; the new schema requires the
+// field inside a named workflows entry.
+func TestLoadConfigRejectsLegacyConditionField(t *testing.T) {
+	path := writeConfigYAML(t, t.TempDir(), "condition: \"echo add-dark-mode\"\n")
+	_, err := loadConfig(path)
+	if err == nil || !strings.Contains(err.Error(), "condition") {
+		t.Fatalf("err = %v, want unknown condition field", err)
+	}
+}
+
+// TestLoadConfigRejectsLegacyCommitField proves the top-level
+// `commit` is no longer accepted; the new schema requires the
+// field inside a named workflows entry.
+func TestLoadConfigRejectsLegacyCommitField(t *testing.T) {
+	path := writeConfigYAML(t, t.TempDir(), "commit: \"see: apply {change}\"\n")
+	_, err := loadConfig(path)
+	if err == nil || !strings.Contains(err.Error(), "commit") {
+		t.Fatalf("err = %v, want unknown commit field", err)
 	}
 }
 
@@ -262,7 +277,7 @@ func TestLoadStartupConfigUnsetLoadsDefaultPath(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte("root_dir: \""+base+"\"\nprompt: from default\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("root_dir: \""+base+"\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	origHome := os.Getenv("HOME")
@@ -278,9 +293,6 @@ func TestLoadStartupConfigUnsetLoadsDefaultPath(t *testing.T) {
 	if cfg.RootDir != base {
 		t.Fatalf("RootDir = %q, want %q", cfg.RootDir, base)
 	}
-	if cfg.Prompt != "from default" {
-		t.Fatalf("Prompt = %q, want %q", cfg.Prompt, "from default")
-	}
 }
 
 // TestLoadStartupConfigExplicitPath proves that a non-empty
@@ -294,7 +306,7 @@ func TestLoadStartupConfigExplicitPath(t *testing.T) {
 	// Valid explicit file at a separate path.
 	explicit := filepath.Join(t.TempDir(), "explicit.yaml")
 	explicitRoot := t.TempDir()
-	if err := os.WriteFile(explicit, []byte("root_dir: \""+explicitRoot+"\"\nprompt: from explicit\n"), 0o644); err != nil {
+	if err := os.WriteFile(explicit, []byte("root_dir: \""+explicitRoot+"\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	origHome := os.Getenv("HOME")
@@ -309,9 +321,6 @@ func TestLoadStartupConfigExplicitPath(t *testing.T) {
 	}
 	if cfg.RootDir != explicitRoot {
 		t.Fatalf("RootDir = %q, want %q", cfg.RootDir, explicitRoot)
-	}
-	if cfg.Prompt != "from explicit" {
-		t.Fatalf("Prompt = %q, want %q", cfg.Prompt, "from explicit")
 	}
 }
 
@@ -341,7 +350,7 @@ func TestLoadStartupConfigSkipSentinel(t *testing.T) {
 func TestLoadStartupConfigTildeExpansion(t *testing.T) {
 	home := t.TempDir()
 	explicit := filepath.Join(home, "see.yaml")
-	if err := os.WriteFile(explicit, []byte("root_dir: \"~\"\nprompt: from tilde\n"), 0o644); err != nil {
+	if err := os.WriteFile(explicit, []byte("root_dir: \"~\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	origHome := os.Getenv("HOME")
@@ -357,142 +366,12 @@ func TestLoadStartupConfigTildeExpansion(t *testing.T) {
 	if cfg.RootDir != home {
 		t.Fatalf("RootDir = %q, want %q", cfg.RootDir, home)
 	}
-	if cfg.Prompt != "from tilde" {
-		t.Fatalf("Prompt = %q, want %q", cfg.Prompt, "from tilde")
-	}
 }
 
 // --- custom workflow fields: add-custom-workflows (task 1.1) -------------
 
 // TestLoadConfigWithConditionAndCommit proves that the strict schema
-// decodes the new custom-workflow fields. Both fields are optional;
-// a configured condition + commit must round-trip through the loader.
-func TestLoadConfigWithConditionAndCommit(t *testing.T) {
-	base := t.TempDir()
-	path := writeConfigYAML(t, base, "prompt: Apply {change}\ncondition: \"echo add-dark-mode\"\ncommit: \"see: apply {change}\"\n")
-	cfg, err := loadConfig(path)
-	if err != nil {
-		t.Fatalf("err = %v, want nil", err)
-	}
-	if got, want := cfg.Condition, "echo add-dark-mode"; got != want {
-		t.Fatalf("Condition = %q, want %q", got, want)
-	}
-	if got, want := cfg.Commit, "see: apply {change}"; got != want {
-		t.Fatalf("Commit = %q, want %q", got, want)
-	}
-	if got, want := cfg.Prompt, "Apply {change}"; got != want {
-		t.Fatalf("Prompt = %q, want %q", got, want)
-	}
-}
-
-// TestLoadConfigWrongTypeCondition proves the schema rejects wrong
-// field types for the custom-workflow fields: condition and commit
-// must be strings.
-func TestLoadConfigWrongTypeCondition(t *testing.T) {
-	base := t.TempDir()
-	path := writeConfigYAML(t, base, "condition: {not: a string}\n")
-	_, err := loadConfig(path)
-	if err == nil {
-		t.Fatal("err = nil, want non-nil for wrong condition type")
-	}
-}
-
-func TestLoadConfigWrongTypeCommit(t *testing.T) {
-	base := t.TempDir()
-	path := writeConfigYAML(t, base, "commit: [not, a, string]\n")
-	_, err := loadConfig(path)
-	if err == nil {
-		t.Fatal("err = nil, want non-nil for wrong commit type")
-	}
-}
-
-// --- custom-mode startup validation: add-custom-workflows (task 1.2) -----
-
-// TestValidateCustomModeAcceptsCompleteConfig: a configured condition
-// with nonblank prompt and commit is a valid startup state.
-func TestValidateCustomModeAcceptsCompleteConfig(t *testing.T) {
-	cfg := Config{
-		Condition: "echo add-dark-mode",
-		Prompt:    "Apply {change}",
-		Commit:    "see: apply {change}",
-	}
-	if err := validateCustomConfig(cfg, ""); err != nil {
-		t.Fatalf("err = %v, want nil for complete custom config", err)
-	}
-}
-
-// TestValidateCustomModeAcceptsCLIOverridesPrompt: a configured
-// condition with a CLI-supplied prompt (effective prompt nonblank)
-// is valid even when the configured prompt is blank.
-func TestValidateCustomModeAcceptsCLIOverridesPrompt(t *testing.T) {
-	cfg := Config{
-		Condition: "echo add-dark-mode",
-		Commit:    "see: apply {change}",
-	}
-	if err := validateCustomConfig(cfg, "Apply {change} from CLI"); err != nil {
-		t.Fatalf("err = %v, want nil (CLI prompt should complete the config)", err)
-	}
-}
-
-// TestValidateCustomModeRejectsBlankPrompt: condition + commit but no
-// effective prompt is rejected. The error names the missing field.
-func TestValidateCustomModeRejectsBlankPrompt(t *testing.T) {
-	cfg := Config{
-		Condition: "echo add-dark-mode",
-		Commit:    "see: apply {change}",
-	}
-	err := validateCustomConfig(cfg, "")
-	if err == nil {
-		t.Fatal("err = nil, want non-nil when custom mode has no prompt")
-	}
-	if !strings.Contains(err.Error(), "prompt") {
-		t.Fatalf("err = %q, want it to mention the missing prompt", err.Error())
-	}
-}
-
-// TestValidateCustomModeRejectsBlankCommit: condition + effective
-// prompt but no commit template is rejected. The error names the
-// missing field.
-func TestValidateCustomModeRejectsBlankCommit(t *testing.T) {
-	cfg := Config{
-		Condition: "echo add-dark-mode",
-		Prompt:    "Apply {change}",
-	}
-	err := validateCustomConfig(cfg, "")
-	if err == nil {
-		t.Fatal("err = nil, want non-nil when custom mode has no commit template")
-	}
-	if !strings.Contains(err.Error(), "commit") {
-		t.Fatalf("err = %q, want it to mention the missing commit template", err.Error())
-	}
-}
-
-// TestValidateCustomModeRejectsBlankConditionIsCompatibility:
-// a blank condition disables custom mode regardless of prompt/commit;
-// validation returns nil so startup proceeds in OpenSpec
-// compatibility mode.
-func TestValidateCustomModeBlankConditionIsCompatibility(t *testing.T) {
-	cfg := Config{
-		Prompt: "Apply {change}",
-		Commit: "see: apply {change}",
-	}
-	if err := validateCustomConfig(cfg, ""); err != nil {
-		t.Fatalf("err = %v, want nil (blank condition = compatibility mode)", err)
-	}
-}
-
-// TestValidateCustomModeAcceptsWhitespaceConditionAsBlank: a
-// whitespace-only condition is treated as blank for the purpose
-// of selecting custom mode.
-func TestValidateCustomModeAcceptsWhitespaceConditionAsBlank(t *testing.T) {
-	cfg := Config{
-		Condition: "   \n\t",
-		Prompt:    "Apply {change}",
-	}
-	if err := validateCustomConfig(cfg, ""); err != nil {
-		t.Fatalf("err = %v, want nil (whitespace condition = compatibility mode)", err)
-	}
-}
+// --- multi-workflow schema: support-multiple-workflows (task 1.2) -------
 
 // --- multi-workflow schema: support-multiple-workflows (task 1.2) -------
 
@@ -576,7 +455,7 @@ func TestLoadConfigWorkflowsUnknownField(t *testing.T) {
 // remains active.
 func TestLoadConfigWorkflowsEmptyIsCompatibility(t *testing.T) {
 	base := t.TempDir()
-	path := writeConfigYAML(t, base, "prompt: \"Apply {change}\"\n")
+	path := writeConfigYAML(t, base, "root_dir: \""+base+"\"\n")
 	cfg, err := loadConfig(path)
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
@@ -796,7 +675,7 @@ func TestLoadStartupConfigDoesNotOverwriteExisting(t *testing.T) {
 	}{
 		{"empty", ""},
 		{"comments-only", "# this is a comment, nothing else\n"},
-		{"valid", "prompt: keep me\n"},
+		{"valid", "include:\n  - playground-*\n"},
 		{"malformed", "not: [valid\n"},
 	}
 	for _, tc := range cases {
