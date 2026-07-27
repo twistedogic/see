@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-07-27
+goal: Stop the TUI from rendering the per-invocation agent log path, which wraps
+  on narrow terminals and corrupts the grid.
