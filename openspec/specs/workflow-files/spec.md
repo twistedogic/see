@@ -5,9 +5,7 @@
 Define how `see` discovers and parses Markdown workflow files under `workflows_dir`
 and merges them with `config.yaml` `workflows:` entries into a single ordered
 list evaluated per repository.
-
 ## Requirements
-
 ### Requirement: workflows_dir selects the workflow file source
 
 The configuration schema SHALL accept an optional `workflows_dir` string field. A non-empty value SHALL be tilde-expanded and used as the directory `see` reads at startup. A blank or absent value SHALL fall back to the default `~/.config/see/workflows/`. The recursive `**` glob pattern SHALL NOT be accepted in the path. A path that exists but is not a directory SHALL cause startup to fail with an actionable error naming the path. A path that does not exist SHALL be treated as "no `.md` workflows" and SHALL NOT cause startup to fail.
@@ -82,7 +80,7 @@ Each discovered file SHALL produce one workflow whose `name` is the file's basen
 
 ### Requirement: Frontmatter holds condition, commit, model, and an ignored name
 
-Each workflow file SHALL consist of two parts: a YAML frontmatter block delimited by lines containing exactly `---`, and a body that follows the closing delimiter. The frontmatter SHALL be decoded with the strict YAML decoder. The decoded frontmatter SHALL accept exactly these keys: `name`, `condition`, `commit`, `model`. Any other key SHALL cause startup to fail with an actionable error naming the file path and the unknown key. The `name` key SHALL be parsed but ignored; the workflow's name is the filename as described above. The `model` key SHALL be optional; an absent or blank `model` SHALL be treated as "unset" and SHALL NOT be passed to the agent. The `condition` and `commit` keys SHALL be required; their values, after trimming whitespace, SHALL contain at least one non-whitespace character.
+Each workflow file SHALL consist of two parts: a YAML frontmatter block delimited by lines containing exactly `---`, and a body that follows the closing delimiter. The frontmatter SHALL be decoded with the strict YAML decoder. The decoded frontmatter SHALL accept exactly these keys: `name`, `condition`, `commit`, `model`, `disable`. Any other key SHALL cause startup to fail with an actionable error naming the file path and the unknown key. The `name` key SHALL be parsed but ignored; the workflow's name is the filename as described above. The `model` key SHALL be optional; an absent or blank `model` SHALL be treated as "unset" and SHALL NOT be passed to the agent. The `disable` key SHALL be an optional boolean; an absent `disable` SHALL be treated as `false` (enabled). The `condition` and `commit` keys SHALL be required; their values, after trimming whitespace, SHALL contain at least one non-whitespace character.
 
 #### Scenario: All four keys present
 
@@ -122,6 +120,19 @@ Each workflow file SHALL consist of two parts: a YAML frontmatter block delimite
 - **WHEN** a file's frontmatter has a blank or absent `model`
 - **THEN** the workflow's effective `model` is the empty string
 - **AND** the agent is invoked without a `--model` flag
+
+#### Scenario: Absent disable is treated as enabled
+
+- **WHEN** a file's frontmatter has no `disable` key
+- **THEN** the workflow's effective `disable` is `false`
+- **AND** the workflow is evaluated normally
+
+#### Scenario: Frontmatter disable parks the file workflow
+
+- **WHEN** `openspec.md` contains frontmatter with `disable: true`
+- **THEN** the workflow is loaded and passes validation
+- **AND** the workflow is removed from the evaluated list before the run loop
+- **AND** the workflow does not run for any watched repository
 
 ### Requirement: Body is the prompt
 
@@ -174,3 +185,4 @@ The portion of the file following the closing `---` line SHALL be the workflow's
 - **AND** `config.yaml` contains `workflows:` with two entries
 - **THEN** the merged list contains the two `config.yaml` entries in declared order
 - **AND** startup succeeds
+

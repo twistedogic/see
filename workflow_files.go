@@ -24,6 +24,10 @@ type workflowFileFrontmatter struct {
 	Condition string `yaml:"condition"` // required, nonblank
 	Commit    string `yaml:"commit"`    // required, nonblank
 	Model     string `yaml:"model"`     // optional; blank falls back to agent default
+	// Disable is an optional boolean; absent means enabled. Threaded
+	// onto the produced WorkflowConfig like Model. The strict decoder
+	// still rejects any sixth key.
+	Disable bool `yaml:"disable"`
 }
 
 // parseWorkflowFile reads path as a workflow file: a YAML
@@ -78,6 +82,7 @@ func parseWorkflowFile(path string) (WorkflowConfig, error) {
 		Condition: fm.Condition,
 		Commit:    fm.Commit,
 		Model:     fm.Model,
+		Disable:   fm.Disable,
 	}, nil
 }
 

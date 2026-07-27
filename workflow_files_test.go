@@ -72,6 +72,46 @@ func TestParseWorkflowFileIgnoresFrontmatterName(t *testing.T) {
 	}
 }
 
+// TestParseWorkflowFileDisableRoundTrip proves frontmatter disable
+// threads onto the produced WorkflowConfig, and that an absent
+// disable decodes to false. The strict decoder accepts the fifth key;
+// a sixth key continues to be rejected (covered by the unknown-key test).
+func TestParseWorkflowFileDisableRoundTrip(t *testing.T) {
+	t.Run("disable true", func(t *testing.T) {
+		path := writeWorkflowFile(t, "parked.md", strings.Join([]string{
+			"---",
+			"condition: \"echo add-dark-mode\"",
+			"commit: \"see: apply {change}\"",
+			"disable: true",
+			"---",
+			"Apply the change.",
+		}, "\n"))
+		wf, err := parseWorkflowFile(path)
+		if err != nil {
+			t.Fatalf("parseWorkflowFile: %v", err)
+		}
+		if !wf.Disable {
+			t.Fatalf("Disable = false, want true")
+		}
+	})
+	t.Run("absent disable", func(t *testing.T) {
+		path := writeWorkflowFile(t, "live.md", strings.Join([]string{
+			"---",
+			"condition: \"echo add-dark-mode\"",
+			"commit: \"see: apply {change}\"",
+			"---",
+			"Apply the change.",
+		}, "\n"))
+		wf, err := parseWorkflowFile(path)
+		if err != nil {
+			t.Fatalf("parseWorkflowFile: %v", err)
+		}
+		if wf.Disable {
+			t.Fatalf("Disable = true, want false for absent field")
+		}
+	})
+}
+
 func TestParseWorkflowFileMissingOpeningDelimiter(t *testing.T) {
 	path := writeWorkflowFile(t, "openspec.md", strings.Join([]string{
 		"condition: \"echo add-dark-mode\"",

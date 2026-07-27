@@ -1095,11 +1095,14 @@ func main() {
 	}
 
 	w.SetPromptTemplate(selectPromptTemplate(*promptFlag, ""))
-	w.Workflows = cfg.Workflows
 	if err := validateWorkflows(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "see:", err)
 		os.Exit(2)
 	}
+	// Drop parked (disable: true) workflows after validateWorkflows has
+	// already run on the full merged list. The watcher iterates this
+	// filtered slice unchanged; an empty slice restores OpenSpec mode.
+	w.Workflows = filterDisabledWorkflows(cfg.Workflows)
 
 	// Resolve the lane-isolation triple (worktree, auto_merge,
 	// worktree_root) with CLI flag > config field > default precedence,

@@ -442,6 +442,35 @@ func TestLoadConfigWorkflowModelBlankIsUnset(t *testing.T) {
 	}
 }
 
+// TestLoadConfigWorkflowDisableRoundTrip proves the disable field
+// round-trips through the strict decoder onto WorkflowConfig.Disable,
+// and that an omitted disable decodes to false (enabled), identical to
+// the pre-field behavior.
+func TestLoadConfigWorkflowDisableRoundTrip(t *testing.T) {
+	base := t.TempDir()
+	body := `workflows:
+  - name: parked
+    prompt: "Apply {change}"
+    condition: "echo parked"
+    commit: "see: apply {change}"
+    disable: true
+  - name: live
+    prompt: "Apply {change}"
+    condition: "echo live"
+    commit: "see: apply {change}"
+`
+	cfg, err := loadConfig(writeConfigYAML(t, base, body))
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if !cfg.Workflows[0].Disable {
+		t.Fatalf("Workflows[0].Disable = false, want true")
+	}
+	if cfg.Workflows[1].Disable {
+		t.Fatalf("Workflows[1].Disable = true, want false for omitted field")
+	}
+}
+
 // TestLoadConfigWorkflowsMultilinePrompt pins the literal-block-scalar
 // behavior for per-workflow prompts so multiline prompts survive the
 // decoder round-trip.
@@ -569,6 +598,63 @@ func TestValidateWorkflowsEmptyIsCompatibility(t *testing.T) {
 		if err := validateWorkflows(c); err != nil {
 			t.Fatalf("err = %v, want nil for empty workflows", err)
 		}
+	}
+}
+
+// TestValidateWorkflowsChecksDisabledEntries proves the load-time filter
+// runs AFTER validation: a disabled entry with a blank required field,
+// and a disabled duplicate name, both still fail validateWorkflows on
+// the full merged list before any entry is removed. This is the
+// validate-then-filter ordering invariant.
+func TestValidateWorkflowsChecksDisabledEntries(t *testing.T) {
+	t.Run("blank field on disabled entry", func(t *testing.T) {
+		cfg := Config{Workflows: []WorkflowConfig{
+			{Name: "parked", Prompt: "Apply {change}", Condition: "", Commit: "see: {change}", Disable: true},
+		}}
+		err := validateWorkflows(cfg)
+		if err == nil || !strings.Contains(err.Error(), "workflows[0]") || !strings.Contains(err.Error(), "condition") {
+			t.Fatalf("err = %v, want workflows[0] condition required", err)
+		}
+	})
+	t.Run("disabled duplicate name", func(t *testing.T) {
+		cfg := Config{Workflows: []WorkflowConfig{
+			{Name: "openspec", Prompt: "Apply {change}", Condition: "echo x", Commit: "see: {change}"},
+			{Name: "openspec", Prompt: "Bump {change}", Condition: "echo y", Commit: "see: bump {change}", Disable: true},
+		}}
+		err := validateWorkflows(cfg)
+		if err == nil || !strings.Contains(err.Error(), "duplicate") || !strings.Contains(err.Error(), "openspec") {
+			t.Fatalf("err = %v, want duplicate openspec", err)
+		}
+	})
+}
+
+// TestFilterDisabledWorkflowsKeepsEnabled proves the load-time filter drops
+// only Disable==true entries and preserves the enabled entries in their
+// original relative order.
+func TestFilterDisabledWorkflowsKeepsEnabled(t *testing.T) {
+	in := []WorkflowConfig{
+		{Name: "live-1", Condition: "echo a"},
+		{Name: "parked", Condition: "echo b", Disable: true},
+		{Name: "live-2", Condition: "echo c"},
+	}
+	got := filterDisabledWorkflows(in)
+	if len(got) != 2 || got[0].Name != "live-1" || got[1].Name != "live-2" {
+		t.Fatalf("got = %+v, want [live-1, live-2]", got)
+	}
+}
+
+// TestFilterDisabledWorkflowsAllDisabledEmpty proves disabling every
+// workflow collapses the evaluated list to empty (the watcher then runs
+// in OpenSpec compatibility mode), which is the documented tail of
+// "disabled means not present".
+func TestFilterDisabledWorkflowsAllDisabledEmpty(t *testing.T) {
+	in := []WorkflowConfig{
+		{Name: "a", Condition: "echo a", Disable: true},
+		{Name: "b", Condition: "echo b", Disable: true},
+	}
+	got := filterDisabledWorkflows(in)
+	if len(got) != 0 {
+		t.Fatalf("got = %+v, want empty slice", got)
 	}
 }
 
@@ -1041,6 +1127,73 @@ func TestLoadStartupConfigRejectsWorkflowFileCollision(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), filepath.Join(dir, "openspec.md")) || !strings.Contains(err.Error(), "workflows[0]") {
 		t.Fatalf("error = %q, want file path and workflows[0]", err)
+	}
+}
+
+// TestLoadStartupConfigFiltersDisabledFileWorkflow proves a disabled .md
+// workflow is absent from the evaluated list after the load-time filter,
+// while an enabled config.yaml entry survives the merge. File workflows
+// run before config entries, so the disabled file workflow is first and
+// is removed, leaving only the enabled config entry in relative order.
+func TestLoadStartupConfigFiltersDisabledFileWorkflow(t *testing.T) {
+	dir := t.TempDir()
+	fileBody := strings.Join([]string{
+		"---",
+		"condition: \"echo file-work\"",
+		"commit: \"see-file\"",
+		"disable: true",
+		"---",
+		"Apply the change.",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(dir, "openspec.md"), []byte(fileBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(t.TempDir(), "config.yaml")
+	cfgBody := "workflows_dir: \"" + dir + "\"\nworkflows:\n" +
+		"  - name: release\n" +
+		"    prompt: Release {change}\n" +
+		"    condition: echo release\n" +
+		"    commit: see-release-{change}\n"
+	if err := os.WriteFile(config, []byte(cfgBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadStartupConfig(config)
+	if err != nil {
+		t.Fatalf("loadStartupConfig: %v", err)
+	}
+	if err := validateWorkflows(cfg); err != nil {
+		t.Fatalf("validateWorkflows: %v", err)
+	}
+	got := filterDisabledWorkflows(cfg.Workflows)
+	if len(got) != 1 || got[0].Name != "release" {
+		t.Fatalf("evaluated = %+v, want only [release]", got)
+	}
+}
+
+// TestLoadStartupConfigRejectsDisabledFileWithBlankField proves a disabled
+// .md workflow is still validated at parse time: a blank commit fails load,
+// naming the file path and the missing field. Disabling does not bypass the
+// per-file completeness contract.
+func TestLoadStartupConfigRejectsDisabledFileWithBlankField(t *testing.T) {
+	dir := t.TempDir()
+	fileBody := strings.Join([]string{
+		"---",
+		"condition: \"echo file-work\"",
+		"commit: \"   \"",
+		"disable: true",
+		"---",
+		"Apply the change.",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(dir, "openspec.md"), []byte(fileBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(config, []byte("workflows_dir: \""+dir+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadStartupConfig(config)
+	if err == nil || !strings.Contains(err.Error(), filepath.Join(dir, "openspec.md")) || !strings.Contains(err.Error(), "commit") {
+		t.Fatalf("err = %v, want file path and commit", err)
 	}
 }
 

@@ -40,6 +40,7 @@
 
 # workflows:
 #   - name: openspec
+#     disable: false            # optional; true parks this workflow (still validated)
 #     model: "openai/gpt-5-mini" # optional; otherwise use pi's default
 #     prompt: |-
 #       Apply the OpenSpec change "{change}".

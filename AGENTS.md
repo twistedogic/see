@@ -94,6 +94,7 @@ workflows_dir: "~/.config/see/workflows/"
 
 workflows:
   - name: openspec
+    # disable: false        # optional; true parks this workflow (still validated)
     prompt: |-
       Apply the OpenSpec change "{change}".
     condition: "git rev-parse --abbrev-ref HEAD"
@@ -125,6 +126,14 @@ workflows:
   passed to `pi` as `--model` for that workflow's runs when nonblank;
   otherwise the agent's default model is used. Entries run in configuration
   order for every discovered repository; workflows are not run concurrently.
+- Each workflow entry accepts an optional `disable` boolean (default
+  `false`). An entry with `disable: true` is still fully validated but
+  removed from the evaluated list after validation, so the run loop,
+  TUI, and event stream never see it. This parks a fully-configured,
+  known-good workflow in place for a one-key toggle. Disabling every
+  workflow empties the list, which reverts the watcher to OpenSpec
+  compatibility mode (identical to commenting out the whole `workflows`
+  block).
 - A workflow `prompt` is a string. Literal-block scalars (`|`, `|-`, `|+`)
   preserve interior line breaks; use `|-` to strip the trailing newline. The
   single token `{change}` is replaced with that workflow's active change name;
@@ -304,7 +313,8 @@ Custom workflows may also be direct, non-hidden `.md` children of
 `workflows_dir`. The filename without `.md` is the workflow name and determines
 alphabetical execution order; a frontmatter `name` key is accepted but ignored.
 YAML frontmatter supplies required `condition` and `commit` values and an
-optional `model`, while the Markdown body is the prompt. File workflows run
+optional `model` and `disable` (default `false`, parks the workflow), while
+the Markdown body is the prompt. File workflows run
 before `config.yaml` workflows, and a name collision between the sources fails
 startup.
 

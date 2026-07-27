@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -155,6 +156,11 @@ type WorkflowConfig struct {
 	Condition string `yaml:"condition"`
 	Commit    string `yaml:"commit"`
 	Model     string `yaml:"model"`
+	// Disable parks a fully-configured workflow in place: it is still
+	// validated but removed from the evaluated list so the run loop, TUI,
+	// and event stream never see it. Defaults to false (enabled); an
+	// omitted field is identical to today. See filterDisabledWorkflows.
+	Disable bool `yaml:"disable"`
 }
 
 func validateConfig(cfg *Config) error {
@@ -295,6 +301,14 @@ func validateWorkflows(cfg Config) error {
 		seen[name] = struct{}{}
 	}
 	return nil
+}
+
+// filterDisabledWorkflows drops parked (disable: true) entries as the
+// last step of configuration load, after validateWorkflows has run on
+// the full merged list. An empty result reverts the watcher to OpenSpec
+// compatibility mode, identical to an absent workflows: block.
+func filterDisabledWorkflows(workflows []WorkflowConfig) []WorkflowConfig {
+	return slices.DeleteFunc(workflows, func(wf WorkflowConfig) bool { return wf.Disable })
 }
 
 // validateWorktreeSettings enforces the lane-isolation config
