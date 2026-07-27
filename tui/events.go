@@ -40,12 +40,6 @@ type ChangeFailedMsg struct {
 	Err      string
 }
 
-type LogPathMsg struct {
-	Path     string
-	Workflow string
-	Change   string
-}
-
 // WarningMsg reports a per-repo cleanup or pre-run check step that
 // failed. The TUI renders a ⚠ glyph next to the repo's row and
 // counts the row in the footer's warning counter until the next

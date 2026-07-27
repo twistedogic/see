@@ -290,20 +290,42 @@ func TestViewHidesAgeColumnBelow80Cols(t *testing.T) {
 	}
 }
 
-func TestViewRendersLogPathWhenSet(t *testing.T) {
+// Regression for remove-tui-log-path: the per-invocation agent log
+// path is never rendered in the grid, so every row occupies exactly
+// one physical line regardless of terminal width, and no .jsonl
+// fragment ever reaches the frame. fitToHeight must keep the rendered
+// row count within the one-line-per-row height budget.
+func TestViewOmitsLogPathAndKeepsRowOneLine(t *testing.T) {
 	m := NewModel()
-	m.width = 120
+	m.width = 60
+	m.height = 24
 	repo := "/tmp/proj"
-	lp := "/tmp/see/task-1--20260714T153022--12345.jsonl"
 	m = driveMessages(m,
 		RepoSeenMsg{Path: repo, HasChange: true},
-		ChangeStartedMsg{Path: repo, Change: "task-1"},
-		ChangeDoneMsg{Path: repo, Change: "task-1"},
-		LogPathMsg{Path: lp, Change: "task-1"},
+		ChangeStartedMsg{Path: repo, Change: "add-dark-mode"},
+		ChangeDoneMsg{Path: repo, Change: "add-dark-mode"},
 	)
 	view := m.View()
-	if !strings.Contains(view, lp) {
-		t.Fatalf("view missing log path %q:\n%s", lp, view)
+	if strings.Contains(view, ".jsonl") {
+		t.Fatalf("view must not contain any jsonl path fragment:\n%s", view)
+	}
+	// Each retained row is exactly one physical line, so the view is
+	// summary + header + one-line-per-row + footer.
+	lines := strings.Split(view, "\n")
+	if want := 3 + len(m.rows); len(lines) != want {
+		t.Fatalf("every row must be one line; got %d lines, want %d (3 fixed + %d rows):\n%s", len(lines), want, len(m.rows), view)
+	}
+	// fitToHeight never returns more rows than the budget allows at
+	// one line each, and never more than the input slice.
+	for _, avail := range []int{0, 1, 2, 3, 5, 100} {
+		prio := m.prioritizedRows()
+		got := fitToHeight(prio, avail)
+		if len(got) > len(prio) {
+			t.Fatalf("fitToHeight(avail=%d) returned %d rows, more than %d input", avail, len(got), len(prio))
+		}
+		if len(got) > avail {
+			t.Fatalf("fitToHeight(avail=%d) returned %d rows, exceeding the one-line budget", avail, len(got))
+		}
 	}
 }
 

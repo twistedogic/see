@@ -1193,8 +1193,6 @@ func (o tuiObserver) Observe(e Event) {
 		o.obs.Send(tui.ChangeDoneMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change})
 	case ChangeFailed:
 		o.obs.Send(tui.ChangeFailedMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change, Err: e.Err})
-	case LogPath:
-		o.obs.Send(tui.LogPathMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change})
 	case Warning:
 		o.obs.Send(tui.WarningMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change, Msg: e.Msg})
 	case InfraError:

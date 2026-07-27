@@ -54,7 +54,6 @@ type RepoRow struct {
 	StartedAt   time.Time
 	LastErr     string
 	HasChange   bool
-	LogPath     string
 	Warning     bool
 	DiscoverSeq uint64 // assigned on first RepoSeen; stable fallback order
 	ActivitySeq uint64 // advanced on meaningful lifecycle events
@@ -154,15 +153,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		r.Workflow = msg.Workflow
 		r.Change = msg.Change
 		r.LastErr = msg.Err
-	case LogPathMsg:
-		r := m.ensureRow(msg.Path)
-		r.LogPath = msg.Path
-		if msg.Workflow != "" {
-			r.Workflow = msg.Workflow
-		}
-		if r.Change == "" {
-			r.Change = msg.Change
-		}
 	case WarningMsg:
 		r := m.ensureRow(msg.Path)
 		m.markActivity(r)

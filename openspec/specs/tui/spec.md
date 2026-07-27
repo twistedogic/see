@@ -155,7 +155,7 @@ Each visible row SHALL display, in order:
 - **RETRY** — `n/max` while retrying, `—` otherwise.
 - **AGE** — elapsed time since the current phase started, or `—`.
 
-The existing log-path continuation SHALL remain associated with its repository row when present. The TUI SHALL render fewer than ten entries when the terminal height cannot fit the summary, table header, footer, infrastructure error, and complete row entries. It SHALL NOT render more than ten entries or split a repository entry because of the height budget.
+The TUI SHALL NOT render the per-invocation agent log path anywhere in the grid. Each repository row SHALL occupy exactly one physical line, regardless of terminal width or the length of any path the watcher emits. The path remains available in the batch-level JavaScript Object Notation Lines (JSONL) event file and, under `--mode=log` with piped stdout, on the stdout mirror; the TUI is not a consumer of it. The TUI SHALL render fewer than ten entries when the terminal height cannot fit the summary, table header, footer, infrastructure error, and complete one-line row entries, and SHALL NOT render more than ten entries because of the height budget.
 
 The phase and warning counts SHALL appear in the top summary rather than being duplicated in the footer. The footer SHALL retain the `[q] quit` key hint. A `Warning` SHALL be cleared on the next `ChangeStarted` event for the same repo. The TUI SHALL own signal handling: pressing `q` or sending `SIGINT` SHALL exit the program and restore the terminal.
 
@@ -221,8 +221,14 @@ The phase and warning counts SHALL appear in the top summary rather than being d
 #### Scenario: Short terminals render complete entries without exceeding the cap
 - **WHEN** the terminal height cannot fit the summary, header, footer, and ten complete repository entries
 - **THEN** the TUI renders only the number of complete entries that fit
-- **THEN** a log-path continuation is rendered together with its repository row or omitted with that row
 - **THEN** no more than ten repository entries are rendered
+
+#### Scenario: The agent log path is not rendered in any row
+- **WHEN** a repository's run emits a `LogPath` event whose path is longer than the terminal width
+- **THEN** the rendered row for that repository occupies exactly one physical line
+- **AND** the path string does not appear anywhere in the rendered grid
+- **AND** the row's REPO, CHANGE, PHASE, RETRY, and AGE columns render unchanged
+- **AND** the path still reaches the batch-level JSONL file and the `--mode=log` stdout mirror
 
 #### Scenario: `q` and SIGINT share the same exit-status rule
 - **WHEN** the user presses `q` while the TUI is running, OR `SIGINT` is delivered to a running `see --tui` process

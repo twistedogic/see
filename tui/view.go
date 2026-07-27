@@ -56,9 +56,8 @@ func (m *Model) prioritizedRows() []*RepoRow {
 }
 
 // fitToHeight shrinks the prioritized slice to the number of
-// rows that fit in the available height. A row with a log-path
-// continuation consumes two physical lines and is kept as a unit
-// (or dropped entirely, never split).
+// rows that fit in the available height. Every row occupies exactly
+// one physical line, so the budget is one line per retained row.
 func fitToHeight(rows []*RepoRow, avail int) []*RepoRow {
 	if avail <= 0 {
 		return nil
@@ -66,15 +65,11 @@ func fitToHeight(rows []*RepoRow, avail int) []*RepoRow {
 	out := make([]*RepoRow, 0, len(rows))
 	budget := avail
 	for _, r := range rows {
-		rowLines := 1
-		if r.LogPath != "" {
-			rowLines = 2
-		}
-		if budget < rowLines {
+		if budget < 1 {
 			break
 		}
 		out = append(out, r)
-		budget -= rowLines
+		budget--
 	}
 	return out
 }
@@ -197,11 +192,7 @@ func (m *Model) renderRow(r *RepoRow, showAge bool) string {
 	if showAge {
 		parts = append(parts, colAge.Render(age))
 	}
-	row := lipgloss.JoinHorizontal(lipgloss.Left, parts...)
-	if r.LogPath != "" {
-		row += "\n      " + r.LogPath
-	}
-	return row
+	return lipgloss.JoinHorizontal(lipgloss.Left, parts...)
 }
 
 func phaseString(r *RepoRow) string {
