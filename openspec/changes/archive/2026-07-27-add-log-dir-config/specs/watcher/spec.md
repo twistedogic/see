@@ -1,5 +1,10 @@
 # watcher delta — add-log-dir-config
 
+## RENAMED Requirements
+
+- FROM: `### Requirement: Default log location is the OS cache directory`
+- TO: `### Requirement: Log directory resolves from env, config, or a default`
+
 ## MODIFIED Requirements
 
 ### Requirement: Log directory resolves from env, config, or a default
@@ -44,7 +49,7 @@ create the directory and SHALL NOT fall back to running the agent
 without capture (unchanged from the prior contract; only the
 resolution source and default location change).
 
-#### Scenario: Default is the home cache directory
+#### Scenario: No env var uses default
 
 - **WHEN** `SEE_LOG_DIR` is unset or empty
 - **AND** `config.yaml` omits `log_dir` or sets it to a blank value
@@ -59,7 +64,7 @@ resolution source and default location change).
 - **THEN** the log directory is `/home/alice/Dev/.see-logs`
 - **AND** no `see/logs/` segment is appended
 
-#### Scenario: SEE_LOG_DIR overrides the config field
+#### Scenario: Env var overrides default
 
 - **WHEN** `SEE_LOG_DIR` is set to `/var/log/see`
 - **AND** `config.yaml` sets `log_dir: "~/Dev/.see-logs"`

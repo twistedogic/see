@@ -127,7 +127,7 @@ func selectRunMode(mode string, isTTY bool) (runMode, error) {
 // before the agent was invoked) so the caller can surface it via
 // the LogPath event. After the silent-tui change, a non-empty
 // logPath is the rule rather than the exception — the log directory
-// is validated up front by ensureLogDir.
+// is validated up front by resolveLogDir.
 type Agent interface {
 	Run(ctx context.Context, path, change, prompt, model string) (string, error)
 }
@@ -1058,7 +1058,18 @@ func main() {
 		os.Exit(2)
 	}
 
-	logDir, err := ensureLogDir()
+	// Load configuration once so log-directory resolution, prompt, and
+	// watch resolution see the same snapshot. --config=- bypasses both
+	// the file read and the configured paths; the embedded default
+	// still applies. Config loads before the log directory is resolved
+	// so a configured log_dir can take effect.
+	cfg, err := loadStartupConfig(*configFlag)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "see:", err)
+		os.Exit(2)
+	}
+
+	logDir, err := resolveLogDir(cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "see:", err)
 		os.Exit(2)
@@ -1083,14 +1094,6 @@ func main() {
 		events.SetMirror(os.Stdout)
 	}
 
-	// Load configuration once so prompt and watch resolution see the
-	// same snapshot. --config=- bypasses both the file read and the
-	// configured-prompt path; the embedded default still applies.
-	cfg, err := loadStartupConfig(*configFlag)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "see:", err)
-		os.Exit(2)
-	}
 	w.SetPromptTemplate(selectPromptTemplate(*promptFlag, ""))
 	w.Workflows = cfg.Workflows
 	if err := validateWorkflows(cfg); err != nil {

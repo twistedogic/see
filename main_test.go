@@ -353,10 +353,125 @@ func TestPiAgentRunSurfacesFileCreateError(t *testing.T) {
 	}
 }
 
-func TestEnsureLogDirFailsWhenPathBlocked(t *testing.T) {
+func TestResolveLogDirUsesDefaultWhenUnset(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SEE_LOG_DIR", "")
+	dir, err := resolveLogDir(Config{})
+	if err != nil {
+		t.Fatalf("resolveLogDir: %v", err)
+	}
+	want := filepath.Join(home, ".cache", "see", "logs")
+	if dir != want {
+		t.Fatalf("dir = %q, want %q", dir, want)
+	}
+	if _, statErr := os.Stat(dir); statErr != nil {
+		t.Fatalf("default dir not created: %v", statErr)
+	}
+}
+
+func TestResolveLogDirConfigOverridesDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SEE_LOG_DIR", "")
+	cfg := Config{LogDir: filepath.Join(home, "cfg-logs")}
+	dir, err := resolveLogDir(cfg)
+	if err != nil {
+		t.Fatalf("resolveLogDir: %v", err)
+	}
+	if dir != cfg.LogDir {
+		t.Fatalf("dir = %q, want configured %q", dir, cfg.LogDir)
+	}
+	if _, statErr := os.Stat(dir); statErr != nil {
+		t.Fatalf("configured dir not created: %v", statErr)
+	}
+}
+
+func TestResolveLogDirWhitespaceConfigFallsThroughToDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SEE_LOG_DIR", "")
+	dir, err := resolveLogDir(Config{LogDir: "   "})
+	if err != nil {
+		t.Fatalf("resolveLogDir: %v", err)
+	}
+	if want := filepath.Join(home, ".cache", "see", "logs"); dir != want {
+		t.Fatalf("dir = %q, want default %q", dir, want)
+	}
+}
+
+func TestResolveLogDirEnvOverridesConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	envDir := filepath.Join(home, "env-logs")
+	t.Setenv("SEE_LOG_DIR", envDir)
+	dir, err := resolveLogDir(Config{LogDir: filepath.Join(home, "cfg-logs")})
+	if err != nil {
+		t.Fatalf("resolveLogDir: %v", err)
+	}
+	if dir != envDir {
+		t.Fatalf("dir = %q, want env-overridden %q", dir, envDir)
+	}
+}
+
+func TestResolveLogDirExpandsTildeInEnv(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SEE_LOG_DIR", "~/env-logs")
+	dir, err := resolveLogDir(Config{})
+	if err != nil {
+		t.Fatalf("resolveLogDir: %v", err)
+	}
+	want := filepath.Join(home, "env-logs")
+	if dir != want {
+		t.Fatalf("dir = %q, want tilde-expanded %q; no literal ~ allowed", dir, want)
+	}
+	if strings.Contains(dir, "~") {
+		t.Fatalf("dir %q contains a literal ~", dir)
+	}
+}
+
+func TestResolveLogDirExpandsTildeInConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SEE_LOG_DIR", "")
+	// A literal-tilde LogDir that validateConfig would have expanded;
+	// resolveLogDir must still expand any source it consults.
+	dir, err := resolveLogDir(Config{LogDir: "~/cfg-logs"})
+	if err != nil {
+		t.Fatalf("resolveLogDir: %v", err)
+	}
+	want := filepath.Join(home, "cfg-logs")
+	if dir != want {
+		t.Fatalf("dir = %q, want tilde-expanded %q", dir, want)
+	}
+}
+
+func TestResolveLogDirCreatesMissingDirectory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SEE_LOG_DIR", "")
+	missing := filepath.Join(home, "nested", "deep", "logs")
+	if _, statErr := os.Stat(missing); !os.IsNotExist(statErr) {
+		t.Fatalf("precondition: %q must not exist", missing)
+	}
+	dir, err := resolveLogDir(Config{LogDir: missing})
+	if err != nil {
+		t.Fatalf("resolveLogDir: %v", err)
+	}
+	info, statErr := os.Stat(dir)
+	if statErr != nil {
+		t.Fatalf("dir not created: %v", statErr)
+	}
+	if !info.IsDir() {
+		t.Fatalf("%q is not a directory", dir)
+	}
+}
+
+func TestResolveLogDirFailsWhenPathBlocked(t *testing.T) {
 	dir := t.TempDir()
 	// SEE_LOG_DIR points at a path under a regular file -> MkdirAll
-	// of the leaf directory fails. ensureLogDir returns a wrapped
+	// of the leaf directory fails. resolveLogDir returns a wrapped
 	// error; main() turns that into exit-2 with a stderr line.
 	rogue := filepath.Join(dir, "file")
 	if err := os.WriteFile(rogue, []byte("x"), 0o644); err != nil {
@@ -364,9 +479,9 @@ func TestEnsureLogDirFailsWhenPathBlocked(t *testing.T) {
 	}
 	t.Setenv("SEE_LOG_DIR", filepath.Join(rogue, "logs"))
 
-	_, err := ensureLogDir()
+	_, err := resolveLogDir(Config{})
 	if err == nil {
-		t.Fatal("ensureLogDir returned nil, want error")
+		t.Fatal("resolveLogDir returned nil, want error")
 	}
 	if !strings.Contains(err.Error(), "log dir") {
 		t.Fatalf("error = %v, want wrapped 'log dir' marker", err)

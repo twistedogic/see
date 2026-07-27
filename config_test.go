@@ -1133,6 +1133,46 @@ func TestValidateConfigExpandsWorkflowsDirTilde(t *testing.T) {
 	}
 }
 
+func TestValidateConfigLogDirBlankIsUntreated(t *testing.T) {
+	cfg := Config{LogDir: ""}
+	if err := validateConfig(&cfg); err != nil {
+		t.Fatalf("validateConfig: %v", err)
+	}
+	if cfg.LogDir != "" {
+		t.Fatalf("LogDir = %q, want blank left untouched", cfg.LogDir)
+	}
+}
+
+func TestValidateConfigLogDirWhitespaceOnlyIsBlank(t *testing.T) {
+	cfg := Config{LogDir: "   "}
+	if err := validateConfig(&cfg); err != nil {
+		t.Fatalf("validateConfig: %v", err)
+	}
+	if cfg.LogDir != "" {
+		t.Fatalf("LogDir = %q, want whitespace treated as blank", cfg.LogDir)
+	}
+}
+
+func TestValidateConfigExpandsLogDirTilde(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := Config{LogDir: "~/logs"}
+	if err := validateConfig(&cfg); err != nil {
+		t.Fatalf("validateConfig: %v", err)
+	}
+	if cfg.LogDir != filepath.Join(home, "logs") {
+		t.Fatalf("LogDir = %q, want %q", cfg.LogDir, filepath.Join(home, "logs"))
+	}
+}
+
+func TestValidateConfigRejectsDoubleStarLogDir(t *testing.T) {
+	cfg := Config{LogDir: "/var/**"}
+	err := validateConfig(&cfg)
+	if err == nil || !strings.Contains(err.Error(), "log_dir: '**' is not supported") {
+		t.Fatalf("err = %v, want log_dir double-star error", err)
+	}
+}
+
 func TestResolveWorkflowsDirFallsBackToDefault(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

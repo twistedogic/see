@@ -6,23 +6,32 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
-// ensureLogDir returns the directory under which all log files for
-// this `see` process should be created. It honors SEE_LOG_DIR when
-// set; otherwise it falls back to os.UserCacheDir()/see/logs/. The
+// resolveLogDir returns the directory under which all log files for
+// this `see` process are created, applying a three-source precedence:
+// SEE_LOG_DIR (non-empty) wins; otherwise a non-blank cfg.LogDir wins;
+// otherwise defaultLogDir (~/.cache/see/logs). The chosen candidate is
+// tilde-expanded using the same rule as root_dir, so SEE_LOG_DIR=~/logs
+// resolves to <home>/logs rather than a literal '~' directory. The
 // directory is created (MkdirAll 0o755) before return. Failure to
-// create the directory is a fatal startup error — the watcher must
-// not run, because per-invocation JSONL files have nowhere to land.
-func ensureLogDir() (string, error) {
-	dir := os.Getenv("SEE_LOG_DIR")
-	if dir == "" {
-		base, err := os.UserCacheDir()
-		if err != nil {
-			return "", fmt.Errorf("log dir: %w", err)
-		}
-		dir = filepath.Join(base, "see", "logs")
+// create the directory is a fatal startup error — the watcher must not
+// run, because per-invocation JSONL files have nowhere to land.
+func resolveLogDir(cfg Config) (string, error) {
+	var candidate string
+	if env := os.Getenv("SEE_LOG_DIR"); env != "" {
+		candidate = env
+	} else {
+		candidate = cfg.LogDir
+	}
+	if strings.TrimSpace(candidate) == "" {
+		candidate = defaultLogDir
+	}
+	dir, err := expandTilde(candidate)
+	if err != nil {
+		return "", fmt.Errorf("log dir: %w", err)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("log dir: %w", err)

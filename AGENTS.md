@@ -83,6 +83,11 @@ auto_merge: true
 # worktrees; tilde-expanded. Defaults to ~/.cache/see/worktrees.
 worktree_root: "~/.cache/see/worktrees"
 
+# Log directory for the batch-level event log and per-invocation
+# agent logs. SEE_LOG_DIR (when non-empty) overrides this field,
+# which overrides the default below. ~ is expanded like root_dir.
+log_dir: "~/.cache/see/logs"
+
 # Markdown workflow files are loaded before workflows below.
 # Defaults to ~/.config/see/workflows/ when omitted.
 workflows_dir: "~/.config/see/workflows/"
@@ -149,6 +154,19 @@ workflows:
   `<worktree_root>/<repo-basename>--<digest>/`; if you place
   `worktree_root` inside `root_dir`, add an `exclude` glob so discovery
   does not double-watch the worktree directory.
+- `log_dir` (string, default `~/.cache/see/logs`) is the directory `see`
+  writes its batch-level event log and per-invocation agent logs to.
+  It resolves with the precedence `SEE_LOG_DIR` (non-empty) > `log_dir`
+  (non-blank) > `~/.cache/see/logs`: the environment variable stays the
+  hard override, the config field is the common path. A whitespace-only
+  value is treated as unset. `~` and `~/path` are expanded using the same
+  rule as `root_dir` (so `SEE_LOG_DIR=~/logs` and `log_dir: "~/logs"`
+  both resolve to `<home>/logs` rather than a literal directory named
+  `~`); environment-variable expansion (`$VAR`) is not performed. The
+  resolved directory is created (`MkdirAll` mode `0o755`) if absent; a
+  failure to create it (permission denied, a path component that is a
+  file, a read-only parent) is a fatal startup error that exits with
+  status `2` before the watcher starts. Old logs are not migrated.
 
 All fields are optional except the fields inside a configured workflow entry.
 Omitting `workflows` when `workflows_dir` contributes no files preserves
@@ -158,6 +176,17 @@ prompt and the default commit subject. The former top-level `prompt`,
 configuration into one named workflow.
 
 The former `watches` field and `--watch` command-line flag are not accepted.
+
+### Migration of the default log directory (macOS)
+
+The default log directory moved from `os.UserCacheDir()/see/logs/`
+(`~/Library/Caches/see/logs/` on macOS, `~/.cache/see/logs` on Linux)
+to the home-relative constant `~/.cache/see/logs`, matching
+`worktree_root`'s shape so `~/.cache/see/` is the single root for
+`see`'s ephemeral artifacts. Linux is unchanged. Old logs are not
+touched (JSONL is observability, not data); copy or symlink them by
+hand if you want to keep history. Operators who set `SEE_LOG_DIR` or
+configure `log_dir` are unaffected.
 
 ### Migration from legacy custom workflow configuration
 

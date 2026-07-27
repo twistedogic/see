@@ -73,6 +73,28 @@ func expandTilde(p string) (string, error) {
 	return filepath.Join(home, p[2:]), nil
 }
 
+// validateTildePath normalizes one tilde-expandable path field shared
+// by workflows_dir and log_dir: whitespace-only is cleared to "unset",
+// '**' is rejected, and a leading ~ is expanded in place. name is the
+// field path used in errors (e.g. "log_dir"), matching validateConfig's
+// other branches. The disk-existence verdict is left to callers (the
+// field may name a directory that is created later).
+func validateTildePath(name string, p *string) error {
+	if strings.TrimSpace(*p) == "" {
+		*p = ""
+		return nil
+	}
+	if strings.Contains(*p, "**") {
+		return fmt.Errorf("%s: '**' is not supported", name)
+	}
+	expanded, err := expandTilde(*p)
+	if err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	*p = expanded
+	return nil
+}
+
 // Config is the decoded contents of config.yaml. All fields are optional:
 // a blank RootDir preserves the current-working-directory fallback, empty
 // Include / Exclude slices include every immediate child and exclude none,
@@ -107,6 +129,12 @@ type Config struct {
 	// ~/.cache/see/worktrees only when worktree mode is active, so an
 	// empty value stays empty (and harmless) in branch mode.
 	WorktreeRoot string `yaml:"worktree_root"`
+	// LogDir is the directory `see` writes its batch-level event log
+	// and per-invocation agent logs to. Empty means "use the default";
+	// the default is ~/.cache/see/logs (see defaultLogDir). Resolution
+	// precedence is SEE_LOG_DIR > LogDir > defaultLogDir (see
+	// resolveLogDir). A whitespace-only value is treated as unset.
+	LogDir string `yaml:"log_dir"`
 }
 
 // boolPtr returns a pointer to b; a small helper for tests and for
@@ -171,17 +199,11 @@ func validateConfig(cfg *Config) error {
 			(*group.patterns)[i] = expanded
 		}
 	}
-	if strings.TrimSpace(cfg.WorkflowsDir) == "" {
-		cfg.WorkflowsDir = ""
-	} else {
-		if strings.Contains(cfg.WorkflowsDir, "**") {
-			return fmt.Errorf("workflows_dir: '**' is not supported")
-		}
-		expanded, err := expandTilde(cfg.WorkflowsDir)
-		if err != nil {
-			return fmt.Errorf("workflows_dir: %w", err)
-		}
-		cfg.WorkflowsDir = expanded
+	if err := validateTildePath("workflows_dir", &cfg.WorkflowsDir); err != nil {
+		return err
+	}
+	if err := validateTildePath("log_dir", &cfg.LogDir); err != nil {
+		return err
 	}
 	return nil
 }
@@ -191,6 +213,13 @@ func validateConfig(cfg *Config) error {
 // is literal here; callers go through expandTilde when they resolve
 // the default.
 const defaultWorkflowsDir = "~/.config/see/workflows/"
+
+// defaultLogDir is the directory `see` writes its batch-level event
+// log and per-invocation agent logs to when neither SEE_LOG_DIR nor a
+// configured log_dir supplies a value. It mirrors defaultWorktreeRoot
+// so ~/.cache/see/ is the single root for `see`'s ephemeral artifacts.
+// Tilde is literal here; resolveLogDir expands it at resolution time.
+const defaultLogDir = "~/.cache/see/logs"
 
 // resolveWorkflowsDir returns the effective directory `see` reads
 // workflow `.md` files from, plus a stat-based verdict on whether
