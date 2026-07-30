@@ -9,12 +9,26 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// Column widths. The fixed columns sum to
+// wRepo+wChange+wPhase+wRetry (plus wAge when the terminal is
+// >= 80 cols). The ERROR column is flex: it absorbs the remaining
+// width, so fixedSum + errWidth == terminal width and a row can
+// never wrap past one physical line.
+const (
+	wRepo       = 24
+	wChange     = 30
+	wPhase      = 10
+	wRetry      = 8
+	wAge        = 8
+	errMinWidth = 20 // ERROR shows only when remaining width >= this
+)
+
 var (
-	colRepo   = lipgloss.NewStyle().Width(24).Align(lipgloss.Left)
-	colChange = lipgloss.NewStyle().Width(30).Align(lipgloss.Left)
-	colPhase  = lipgloss.NewStyle().Width(10).Align(lipgloss.Left)
-	colRetry  = lipgloss.NewStyle().Width(8).Align(lipgloss.Left)
-	colAge    = lipgloss.NewStyle().Width(8).Align(lipgloss.Right)
+	colRepo   = lipgloss.NewStyle().Width(wRepo).Align(lipgloss.Left)
+	colChange = lipgloss.NewStyle().Width(wChange).Align(lipgloss.Left)
+	colPhase  = lipgloss.NewStyle().Width(wPhase).Align(lipgloss.Left)
+	colRetry  = lipgloss.NewStyle().Width(wRetry).Align(lipgloss.Left)
+	colAge    = lipgloss.NewStyle().Width(wAge).Align(lipgloss.Right)
 
 	glyphIdle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("○ idle")
 	glyphWorking = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("● working")
@@ -31,6 +45,14 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(rs[:n-1]) + "…"
+}
+
+// oneLine collapses every run of whitespace (including the carriage
+// returns and line feeds that git/exec errors are full of) to a
+// single space, so an error never wraps its row past one physical
+// line. The full text remains in the batch JSONL.
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // viewportCap is the upper bound on rendered repository entries.
@@ -102,6 +124,15 @@ func (m *Model) View() string {
 	// Column visibility by terminal width: at >=80 cols show AGE,
 	// below that REPO/CHANGE/PHASE/RETRY only.
 	showAge := m.width >= 80
+	// ERROR is a flex column: the terminal width minus the active
+	// fixed columns. It shows only when that remainder is at least
+	// errMinWidth, so a row can never exceed one physical line.
+	fixedSum := wRepo + wChange + wPhase + wRetry
+	if showAge {
+		fixedSum += wAge
+	}
+	errWidth := m.width - fixedSum
+	showErr := errWidth >= errMinWidth
 
 	// Fixed lines: summary, header, footer, optional infrastructure
 	// error. Rows fill whatever remains, capped at viewportCap.
@@ -118,10 +149,10 @@ func (m *Model) View() string {
 	visible := fitToHeight(m.prioritizedRows(), avail)
 	summary := m.renderSummary(len(visible))
 
-	header := m.renderHeader(showAge)
+	header := m.renderHeader(showAge, showErr, errWidth)
 	body := make([]string, 0, len(visible))
 	for _, r := range visible {
-		body = append(body, m.renderRow(r, showAge))
+		body = append(body, m.renderRow(r, showAge, showErr, errWidth))
 	}
 
 	parts := []string{summary, header}
@@ -137,7 +168,7 @@ func (m *Model) View() string {
 	return strings.Join(parts, "\n")
 }
 
-func (m *Model) renderHeader(showAge bool) string {
+func (m *Model) renderHeader(showAge, showErr bool, errWidth int) string {
 	parts := []string{
 		colRepo.Render("REPO"),
 		colChange.Render("CHANGE"),
@@ -147,10 +178,13 @@ func (m *Model) renderHeader(showAge bool) string {
 	if showAge {
 		parts = append(parts, colAge.Render("AGE"))
 	}
+	if showErr {
+		parts = append(parts, lipgloss.NewStyle().Width(errWidth).Align(lipgloss.Left).Render("ERROR"))
+	}
 	return lipgloss.JoinHorizontal(lipgloss.Left, parts...)
 }
 
-func (m *Model) renderRow(r *RepoRow, showAge bool) string {
+func (m *Model) renderRow(r *RepoRow, showAge, showErr bool, errWidth int) string {
 	phaseStr := phaseString(r)
 	retry := "—"
 	if r.RetryMax > 0 {
@@ -161,10 +195,10 @@ func (m *Model) renderRow(r *RepoRow, showAge bool) string {
 		age = time.Since(r.StartedAt).Round(time.Second).String()
 	}
 
-	// ponytail: ⚠ glyph lives in the REPO cell so a fast scan lights
-	// up the row immediately; the message itself lives in the JSONL
-	// (the operator can jq for it). Trailing space keeps the column
-	// visually aligned when no warning is set.
+	// The ⚠ glyph lives in the REPO cell so a fast scan lights up the
+	// row even on terminals too narrow for the ERROR column; the
+	// failure reason renders inline in ERROR when wide enough and
+	// always lands in the batch JSONL.
 	name := r.Name
 	if r.Warning {
 		name = name + " ⚠"
@@ -181,16 +215,25 @@ func (m *Model) renderRow(r *RepoRow, showAge bool) string {
 	if !r.HasChange {
 		change = "—"
 	}
-	change = truncate(change, 30)
+	change = truncate(change, wChange)
 
 	parts := []string{
-		colRepo.Render(truncate(name, 24)),
+		colRepo.Render(truncate(name, wRepo)),
 		colChange.Render(change),
 		colPhase.Render(phaseStr),
 		colRetry.Render(retry),
 	}
 	if showAge {
 		parts = append(parts, colAge.Render(age))
+	}
+	if showErr {
+		// Collapse whitespace so a multi-line git/exec error cannot
+		// wrap the row; the flex width keeps the cell within the line.
+		err := "—"
+		if r.LastErr != "" {
+			err = truncate(oneLine(r.LastErr), errWidth)
+		}
+		parts = append(parts, lipgloss.NewStyle().Width(errWidth).Align(lipgloss.Left).Render(err))
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Left, parts...)
 }

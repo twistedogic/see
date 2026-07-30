@@ -154,8 +154,11 @@ Each visible row SHALL display, in order:
 - **PHASE** — one of `idle`, `working`, `done`, or `failed`, rendered with a phase-specific glyph and color. A row whose selected resolver found no change SHALL render at `idle` with `—` in the CHANGE column.
 - **RETRY** — `n/max` while retrying, `—` otherwise.
 - **AGE** — elapsed time since the current phase started, or `—`.
+- **ERROR** — the row's current failure reason (`LastErr`), rendered only on terminals wide enough to hold it after the fixed columns. For a `failed` row this is the final error; for a `working` row between retry attempts it is the previous attempt's error. The cell SHALL render `—` when the row has no current failure reason.
 
 The TUI SHALL NOT render the per-invocation agent log path anywhere in the grid. Each repository row SHALL occupy exactly one physical line, regardless of terminal width or the length of any path the watcher emits. The path remains available in the batch-level JavaScript Object Notation Lines (JSONL) event file and, under `--mode=log` with piped stdout, on the stdout mirror; the TUI is not a consumer of it. The TUI SHALL render fewer than ten entries when the terminal height cannot fit the summary, table header, footer, infrastructure error, and complete one-line row entries, and SHALL NOT render more than ten entries because of the height budget.
+
+The ERROR column SHALL be the final column. It SHALL be shown only when the terminal width exceeds the sum of the fixed columns active at that width by at least a fixed minimum (`errMinWidth`, twenty columns); below that width the column SHALL be omitted and the row SHALL be identical to a grid without it. AGE SHALL continue to appear at its existing width threshold (`>= 80` columns) regardless of whether the ERROR column is shown. When shown, the ERROR column's width SHALL be exactly the terminal width minus that fixed-column sum, so the column cannot cause a row to exceed one physical line. Before rendering, the failure reason SHALL be collapsed to a single line by replacing every run of whitespace (including carriage returns and line feeds) with a single space, then truncated to the column width with a trailing ellipsis if it overflows; a failure reason that contains embedded newlines SHALL therefore render on exactly one physical line. The full, unmodified failure reason remains available in the batch-level JSONL file and, under `--mode=log` with piped stdout, on the stdout mirror.
 
 The phase and warning counts SHALL appear in the top summary rather than being duplicated in the footer. The footer SHALL retain the `[q] quit` key hint. A `Warning` SHALL be cleared on the next `ChangeStarted` event for the same repo. The TUI SHALL own signal handling: pressing `q` or sending `SIGINT` SHALL exit the program and restore the terminal.
 
@@ -229,6 +232,25 @@ The phase and warning counts SHALL appear in the top summary rather than being d
 - **AND** the path string does not appear anywhere in the rendered grid
 - **AND** the row's REPO, CHANGE, PHASE, RETRY, and AGE columns render unchanged
 - **AND** the path still reaches the batch-level JSONL file and the `--mode=log` stdout mirror
+
+#### Scenario: Failed row shows its failure reason in the ERROR column
+- **WHEN** a repository's run exhausts its retries and the watcher emits `ChangeFailed` carrying an error, on a terminal at least 100 columns wide
+- **THEN** the rendered row for that repository SHALL display the final error in the ERROR column
+- **AND** the ERROR column SHALL appear as the final column after AGE
+- **AND** a healthy repository (no current failure reason) in the same viewport SHALL render `—` in its ERROR cell
+- **AND** the full, unmodified error SHALL still reach the batch-level JSONL file and the `--mode=log` stdout mirror
+
+#### Scenario: A multi-line failure reason collapses to one physical line
+- **WHEN** the failure reason carried by `ChangeFailed` contains embedded carriage returns and line feeds, and the terminal is at least 100 columns wide
+- **THEN** the rendered row for that repository SHALL occupy exactly one physical line
+- **AND** the ERROR cell SHALL contain no newline characters
+- **AND** the cell SHALL be truncated to the ERROR column width with a trailing ellipsis when the collapsed text exceeds it
+
+#### Scenario: ERROR column is omitted below its width threshold
+- **WHEN** the terminal is narrower than 100 columns, a repo has failed, and another repo is healthy
+- **THEN** no ERROR column is rendered in the header or any row
+- **AND** AGE SHALL still appear when the terminal is at least 80 columns wide
+- **AND** each row SHALL be identical to a grid rendered without the ERROR column
 
 #### Scenario: `q` and SIGINT share the same exit-status rule
 - **WHEN** the user presses `q` while the TUI is running, OR `SIGINT` is delivered to a running `see --tui` process

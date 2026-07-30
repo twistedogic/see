@@ -253,22 +253,28 @@ func TestViewFooterCountsByPhase(t *testing.T) {
 
 func TestViewHidesErrColumnBelow100Cols(t *testing.T) {
 	m := NewModel()
-	m.width = 90 // between 80 and 100: AGE shows, ERR hides
+	m.width = 90 // between 80 and 100: AGE shows, ERROR hides
 	repo := "/tmp/proj"
 	m = driveMessages(m,
 		RepoSeenMsg{Path: repo, HasChange: true},
 		ChangeFailedMsg{Path: repo, Change: "c1", Err: "boom"},
 	)
 	view := m.View()
-	if !strings.Contains(view, "AGE") {
+	lines := strings.Split(view, "\n")
+	if len(lines) < 3 {
+		t.Fatalf("expected summary+header+row, got %d lines:\n%s", len(lines), view)
+	}
+	header := lines[1]
+	if !strings.Contains(header, "AGE") {
 		t.Fatalf("header missing AGE column at width 90:\n%s", view)
 	}
-	if strings.Contains(view, " ERR ") || strings.HasSuffix(strings.Split(view, "\n")[0], "ERR") {
-		// best-effort: header line shouldn't end with ERR at width 90
+	if strings.Contains(header, "ERR") {
+		t.Fatalf("ERROR column should be hidden at width 90:\n%s", view)
 	}
-	// Stronger check: the ERR header label must not be present.
-	if strings.Contains(strings.Split(view, "\n")[0], "ERR") {
-		t.Fatalf("ERR column should be hidden at width 90:\n%s", view)
+	// Below the threshold the failure reason must not render at all.
+	row := lines[2]
+	if strings.Contains(row, "boom") {
+		t.Fatalf("failure reason should not render below the ERROR width threshold:\n%s", row)
 	}
 }
 
@@ -287,6 +293,63 @@ func TestViewHidesAgeColumnBelow80Cols(t *testing.T) {
 	}
 	if strings.Contains(header, "ERR") {
 		t.Fatalf("ERR should be hidden at width 60:\n%s", view)
+	}
+}
+
+func TestViewRendersErrColumnForFailedRow(t *testing.T) {
+	m := NewModel()
+	m.width = 120 // >= 100: ERROR column shows
+	repo := "/tmp/proj"
+	m = driveMessages(m,
+		RepoSeenMsg{Path: repo, HasChange: true},
+		ChangeStartedMsg{Path: repo, Change: "c1"},
+		RetryAttemptMsg{Path: repo, Change: "c1", N: 1, Max: 3, Err: "transient boom"},
+		ChangeFailedMsg{Path: repo, Change: "c1", Err: "fatal: merge conflict"},
+	)
+	view := m.View()
+	lines := strings.Split(view, "\n")
+	if len(lines) < 3 {
+		t.Fatalf("expected summary+header+row, got %d lines:\n%s", len(lines), view)
+	}
+	header := lines[1]
+	if !strings.Contains(header, "ERROR") {
+		t.Fatalf("header missing ERROR column at width 120:\n%s", view)
+	}
+	// ERROR is the final column, after AGE.
+	if ageIdx, errIdx := strings.Index(header, "AGE"), strings.Index(header, "ERROR"); !(ageIdx >= 0 && errIdx > ageIdx) {
+		t.Fatalf("ERROR column must follow AGE in the header:\n%s", header)
+	}
+	// The failed row carries the final error in its ERROR cell.
+	row := lines[2]
+	if !strings.Contains(row, "fatal: merge conflict") {
+		t.Fatalf("failed row missing final error in ERROR cell:\n%s", row)
+	}
+}
+
+func TestViewErrColumnCollapsesMultilineToOneLine(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	m.height = 24
+	repo := "/tmp/proj"
+	multiline := "fatal: conflict\nsecond line\r\nthird"
+	m = driveMessages(m,
+		RepoSeenMsg{Path: repo, HasChange: true},
+		ChangeFailedMsg{Path: repo, Change: "c1", Err: multiline},
+	)
+	view := m.View()
+	// Every retained row is exactly one physical line: summary +
+	// header + one-line-per-row + footer.
+	lines := strings.Split(view, "\n")
+	if want := 3 + len(m.rows); len(lines) != want {
+		t.Fatalf("multi-line error wrapped the row: got %d lines, want %d:\n%s", len(lines), want, view)
+	}
+	row := lines[2]
+	if strings.Contains(row, "\n") || strings.Contains(row, "\r") {
+		t.Fatalf("ERROR cell leaked a newline/CR into the row:\n%q", row)
+	}
+	// The whitespace runs are collapsed to single spaces.
+	if !strings.Contains(row, "fatal: conflict second line") {
+		t.Fatalf("collapsed error text missing from row:\n%s", row)
 	}
 }
 
