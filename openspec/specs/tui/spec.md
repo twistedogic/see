@@ -136,7 +136,7 @@ When the observer is `nil`, `Watcher` SHALL behave identically to a build withou
 - **AND** the observer receives the `ChangeFailed` event with the original agent error
 
 ### Requirement: `--tui` renders a live status grid of every scanned repo
-When `-tui` is `true` and stdout is a terminal, `see` SHALL render a live Terminal User Interface (TUI) status view via Bubble Tea in the alternate screen. The view SHALL retain state for every scanned git repository, but SHALL render a summary table followed by a priority viewport containing no more than ten repository entries. The summary SHALL count all retained repositories and SHALL include the total, counts by phase, active warning count, and the number of visible entries as `visible / total`.
+When `-tui` is `true` and stdout is a terminal, `see` SHALL render a live status view via Bubble Tea in the alternate screen. The view SHALL retain state for every scanned git repository, but SHALL render a summary table followed by a priority viewport containing no more than ten repository entries. The summary SHALL count all retained repositories and SHALL include the total, counts by phase, active warning count, and the number of visible entries as `visible / total`.
 
 The visible repository entries SHALL be ranked by attention priority and then activity recency:
 
@@ -153,12 +153,12 @@ Each visible row SHALL display, in order:
 - **CHANGE** — the custom condition's normalized change, the active OpenSpec fallback change name, or `—` if the selected resolver found no change.
 - **PHASE** — one of `idle`, `working`, `done`, or `failed`, rendered with a phase-specific glyph and color. A row whose selected resolver found no change SHALL render at `idle` with `—` in the CHANGE column.
 - **RETRY** — `n/max` while retrying, `—` otherwise.
-- **AGE** — elapsed time since the current phase started, or `—`.
-- **ERROR** — the row's current failure display text (`LastErr`), rendered only on terminals wide enough to hold it after the fixed columns. When the error provides a concise summary, this text SHALL be that summary; otherwise it SHALL be the full failure reason. For a `failed` row this represents the final error; for a `working` row between retry attempts it represents the previous attempt's error. The cell SHALL render `—` when the row has no current failure reason.
+- **AGE** — elapsed time since active work started while PHASE is `working`, or `—` while PHASE is `idle`, `done`, or `failed`.
+- **ERROR** — the row's current failure reason (`LastErr`), rendered only on terminals wide enough to hold it after the fixed columns. For a `failed` row this is the final error; for a `working` row between retry attempts it is the previous attempt's error. The cell SHALL render `—` when the row has no current failure reason.
 
 The TUI SHALL NOT render the per-invocation agent log path anywhere in the grid. Each repository row SHALL occupy exactly one physical line, regardless of terminal width or the length of any path the watcher emits. The path remains available in the batch-level JavaScript Object Notation Lines (JSONL) event file and, under `--mode=log` with piped stdout, on the stdout mirror; the TUI is not a consumer of it. The TUI SHALL render fewer than ten entries when the terminal height cannot fit the summary, table header, footer, infrastructure error, and complete one-line row entries, and SHALL NOT render more than ten entries because of the height budget.
 
-The ERROR column SHALL be the final column. It SHALL be shown only when the terminal width exceeds the sum of the fixed columns active at that width by at least a fixed minimum (`errMinWidth`, twenty columns); below that width the column SHALL be omitted and the row SHALL be identical to a grid without it. AGE SHALL continue to appear at its existing width threshold (`>= 80` columns) regardless of whether the ERROR column is shown. When shown, the ERROR column's width SHALL be exactly the terminal width minus that fixed-column sum, so the column cannot cause a row to exceed one physical line. Before rendering, the selected display text SHALL be collapsed to a single line by replacing every run of whitespace (including carriage returns and line feeds) with a single space, then truncated to the column width with a trailing ellipsis if it overflows; display text that contains embedded newlines SHALL therefore render on exactly one physical line. The same summary selection SHALL apply to watcher errors shown in the infrastructure error banner. The full, unmodified failure reason remains available in the batch-level JSONL file and, under `--mode=log` with piped stdout, on the stdout mirror.
+The ERROR column SHALL be the final column. It SHALL be shown only when the terminal width exceeds the sum of the fixed columns active at that width by at least a fixed minimum (`errMinWidth`, twenty columns); below that width the column SHALL be omitted and the row SHALL be identical to a grid without it. AGE SHALL continue to appear at its existing width threshold (`>= 80` columns) regardless of whether the ERROR column is shown. When shown, the ERROR column's width SHALL be exactly the terminal width minus that fixed-column sum, so the column cannot cause a row to exceed one physical line. Before rendering, the failure reason SHALL be collapsed to a single line by replacing every run of whitespace (including carriage returns and line feeds) with a single space, then truncated to the column width with a trailing ellipsis if it overflows; a failure reason that contains embedded newlines SHALL therefore render on exactly one physical line. The full, unmodified failure reason remains available in the batch-level JSONL file and, under `--mode=log` with piped stdout, on the stdout mirror.
 
 The phase and warning counts SHALL appear in the top summary rather than being duplicated in the footer. The footer SHALL retain the `[q] quit` key hint. A `Warning` SHALL be cleared on the next `ChangeStarted` event for the same repo. The TUI SHALL own signal handling: pressing `q` or sending `SIGINT` SHALL exit the program and restore the terminal.
 
@@ -208,6 +208,16 @@ The phase and warning counts SHALL appear in the top summary rather than being d
 - **THEN** no other retained row SHALL change
 - **THEN** the row's activity position SHALL be refreshed by the meaningful completion event
 
+#### Scenario: AGE advances only while working
+- **WHEN** a repository row is in the `working` phase with a recorded start time
+- **THEN** AGE SHALL display the elapsed time since active work started
+- **AND** the displayed duration SHALL continue updating once per second
+
+#### Scenario: Non-working phases show no AGE value
+- **WHEN** a repository row is in the `idle`, `done`, or `failed` phase
+- **THEN** AGE SHALL display `—`
+- **AND** a start time retained from earlier work SHALL NOT cause AGE to display or continue increasing
+
 #### Scenario: Warning event adds the warning glyph and updates the summary
 - **WHEN** the watcher emits a `Warning` event for a repo whose row is currently `done`
 - **THEN** the REPO cell for that repo SHALL display the repo name followed by `⚠`
@@ -235,7 +245,7 @@ The phase and warning counts SHALL appear in the top summary rather than being d
 
 #### Scenario: Failed row shows its failure reason in the ERROR column
 - **WHEN** a repository's run exhausts its retries and the watcher emits `ChangeFailed` carrying an error, on a terminal at least 100 columns wide
-- **THEN** the rendered row for that repository SHALL display the error in the ERROR column
+- **THEN** the rendered row for that repository SHALL display the final error in the ERROR column
 - **AND** the ERROR column SHALL appear as the final column after AGE
 - **AND** a healthy repository (no current failure reason) in the same viewport SHALL render `—` in its ERROR cell
 - **AND** the full, unmodified error SHALL still reach the batch-level JSONL file and the `--mode=log` stdout mirror

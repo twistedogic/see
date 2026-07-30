@@ -115,6 +115,23 @@ The phase and warning counts SHALL appear in the top summary rather than being d
 - **AND** a healthy repository (no current failure reason) in the same viewport SHALL render `—` in its ERROR cell
 - **AND** the full, unmodified error SHALL still reach the batch-level JSONL file and the `--mode=log` stdout mirror
 
+#### Scenario: Failed row uses a concise error summary when available
+- **WHEN** a repository's run exhausts its retries with an error that provides a concise summary and the watcher emits `ChangeFailed`, on a terminal at least 100 columns wide
+- **THEN** the rendered row for that repository SHALL display the concise summary in the ERROR column
+- **AND** the ERROR column SHALL appear as the final column after AGE
+- **AND** a healthy repository (no current failure reason) in the same viewport SHALL render `—` in its ERROR cell
+- **AND** the full, unmodified error SHALL still reach the batch-level JSONL file and the `--mode=log` stdout mirror
+
+#### Scenario: Failed row falls back to the full error
+- **WHEN** a repository's run exhausts its retries with an error that provides no concise summary and the watcher emits `ChangeFailed`, on a terminal at least 100 columns wide
+- **THEN** the rendered row for that repository SHALL display the full error in the ERROR column subject to the existing one-line collapse and truncation rules
+- **AND** the full, unmodified error SHALL reach the batch-level JSONL file and the `--mode=log` stdout mirror
+
+#### Scenario: Retry and infrastructure errors use concise summaries
+- **WHEN** an error that provides a concise summary is carried by a `RetryAttempt` event or shown as a watcher infrastructure error
+- **THEN** the TUI SHALL display the concise summary
+- **AND** the corresponding JSONL event SHALL retain the full, unmodified error
+
 #### Scenario: A multi-line failure reason collapses to one physical line
 - **WHEN** the failure reason carried by `ChangeFailed` contains embedded carriage returns and line feeds, and the terminal is at least 100 columns wide
 - **THEN** the rendered row for that repository SHALL occupy exactly one physical line

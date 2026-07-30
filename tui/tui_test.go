@@ -855,3 +855,88 @@ func TestSummaryVisibleCountWith10PlusRepos(t *testing.T) {
 		t.Fatalf("summary should report 10/47 visible, view:\n%s", view)
 	}
 }
+
+// Regression for show-age-only-while-working: AGE is a live work
+// timer. It must display elapsed time only while the row's phase
+// is PhaseWorking; idle, done, and failed phases always render the
+// em-dash placeholder, even when StartedAt is retained from a
+// prior attempt. tickMsg keeps ticking during the working phase so
+// the displayed duration advances once per second.
+func TestAGEOnlyShownWhileWorking(t *testing.T) {
+	repo := "/tmp/proj"
+	m := NewModel()
+	m.width = 120
+	ageCell := func() string {
+		cells := m.buildCells(m.rows[repo], true, false, 0)
+		return cells[4]
+	}
+	startedAt := func() bool { return !m.rows[repo].StartedAt.IsZero() }
+
+	// Fresh idle row: no StartedAt yet, AGE is em-dash.
+	m = driveMessages(m, RepoSeenMsg{Path: repo, HasChange: true})
+	if got := ageCell(); got != "—" {
+		t.Fatalf("idle row before work: AGE = %q, want %q", got, "—")
+	}
+
+	// Working: StartedAt is set by ChangeStarted; AGE shows duration.
+	m = driveMessages(m, ChangeStartedMsg{Path: repo, Change: "c1"})
+	if !startedAt() {
+		t.Fatalf("ChangeStarted did not set StartedAt")
+	}
+	if got := ageCell(); got == "—" {
+		t.Fatalf("working row: AGE = %q, want a duration string", got)
+	}
+
+	// Done: StartedAt is retained by the transition, but AGE must
+	// be em-dash because PHASE is no longer working.
+	m = driveMessages(m, ChangeDoneMsg{Path: repo, Change: "c1"})
+	if !startedAt() {
+		t.Fatalf("ChangeDone must not clear StartedAt (model invariant)")
+	}
+	if got := ageCell(); got != "—" {
+		t.Fatalf("done row: AGE = %q, want %q (retained StartedAt must not leak into non-working AGE)", got, "—")
+	}
+
+	// Working again → failed: AGE returns to em-dash on failure.
+	m = driveMessages(m, ChangeStartedMsg{Path: repo, Change: "c2"})
+	if got := ageCell(); got == "—" {
+		t.Fatalf("re-started row: AGE = %q, want a duration string", got)
+	}
+	m = driveMessages(m, ChangeFailedMsg{Path: repo, Change: "c2", Err: "boom"})
+	if !startedAt() {
+		t.Fatalf("ChangeFailed must not clear StartedAt (model invariant)")
+	}
+	if got := ageCell(); got != "—" {
+		t.Fatalf("failed row: AGE = %q, want %q (StartedAt from the prior attempt must not bleed through)", got, "—")
+	}
+
+	// Idle: a later RepoSeen with HasChange=false forces PhaseIdle;
+	// StartedAt from prior work remains, AGE stays em-dash.
+	m = driveMessages(m, RepoSeenMsg{Path: repo, HasChange: false})
+	if !startedAt() {
+		t.Fatalf("RepoSeen with HasChange=false must not clear StartedAt (model invariant)")
+	}
+	if got := ageCell(); got != "—" {
+		t.Fatalf("idle row after prior work: AGE = %q, want %q (StartedAt from prior work must not bleed through)", got, "—")
+	}
+}
+
+// Regression for show-age-only-while-working: AGE must keep
+// advancing while a row stays in PhaseWorking. A working row with
+// a pinned StartedAt in the past must render a non-em-dash
+// duration string; the existing TestTickDrivesRedrawDuringWork
+// proves the periodic tick reschedules.
+func TestAGEAdvancesWhileWorking(t *testing.T) {
+	repo := "/tmp/proj"
+	m := NewModel()
+	m.width = 120
+	m = driveMessages(m,
+		RepoSeenMsg{Path: repo, HasChange: true},
+		ChangeStartedMsg{Path: repo, Change: "c1"},
+	)
+	m.rows[repo].StartedAt = time.Now().Add(-2 * time.Second)
+	cells := m.buildCells(m.rows[repo], true, false, 0)
+	if cells[4] == "—" {
+		t.Fatalf("working row with past StartedAt must show duration, got em-dash")
+	}
+}

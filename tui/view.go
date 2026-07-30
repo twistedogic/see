@@ -227,8 +227,11 @@ func (m *Model) buildCells(r *RepoRow, showAge, showErr bool, errWidth int) tabl
 	if r.RetryMax > 0 {
 		retry = fmt.Sprintf("%d/%d", r.RetryN, r.RetryMax)
 	}
+	// AGE is a live work timer: only PhaseWorking renders elapsed
+	// time. Idle/done/failed phases show the em-dash placeholder
+	// even when StartedAt is retained from a prior attempt.
 	age := "—"
-	if !r.StartedAt.IsZero() {
+	if r.Phase == PhaseWorking && !r.StartedAt.IsZero() {
 		age = time.Since(r.StartedAt).Round(time.Second).String()
 	}
 
