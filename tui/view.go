@@ -52,17 +52,6 @@ var phaseStyles = struct {
 	failed:  lipgloss.NewStyle().Foreground(lipgloss.Color("1")),
 }
 
-func truncate(s string, n int) string {
-	if n <= 0 {
-		return ""
-	}
-	rs := []rune(s)
-	if len(rs) <= n {
-		return s
-	}
-	return string(rs[:n-1]) + "…"
-}
-
 // oneLine collapses every run of whitespace (including the carriage
 // returns and line feeds that git/exec errors are full of) to a
 // single space, so an error never wraps its row past one physical
@@ -219,6 +208,7 @@ func (m *Model) buildTable(visible []*RepoRow, showAge, showErr bool, errWidth i
 		table.WithColumns(cols),
 		table.WithRows(rows),
 		table.WithHeight(height),
+		table.WithWidth(m.width),
 		table.WithFocused(false),
 		table.WithStyles(bubblyGridStyles()),
 	)
@@ -251,10 +241,11 @@ func (m *Model) buildCells(r *RepoRow, showAge, showErr bool, errWidth int) tabl
 		name = name + " ⚠"
 	}
 
-	// Column widths are anchored to the styles above; truncate change
-	// by the column width to avoid overflow on narrow terminals.
-	// Repos without an openspec/ get an em-dash change column so the
-	// grid stays readable without a dedicated phase.
+	// Column widths are anchored to the styles above; bubbles truncates
+	// cells to col.Width via ansi.Truncate, so the source value can be
+	// passed at its natural length. Repos without an openspec/ get an
+	// em-dash change column so the grid stays readable without a
+	// dedicated phase.
 	change := r.Change
 	if r.Workflow != "" {
 		change = r.Workflow + ": " + change
@@ -262,23 +253,17 @@ func (m *Model) buildCells(r *RepoRow, showAge, showErr bool, errWidth int) tabl
 	if !r.HasChange {
 		change = "—"
 	}
-	change = truncate(change, wChange)
 
-	cells := []string{
-		truncate(name, wRepo),
-		change,
-		phaseStr,
-		retry,
-	}
+	cells := []string{name, change, phaseStr, retry}
 	if showAge {
 		cells = append(cells, age)
 	}
 	if showErr {
 		// Collapse whitespace so a multi-line git/exec error cannot
-		// wrap the row; the flex width keeps the cell within the line.
+		// wrap the row; bubbles truncates the cell to errWidth.
 		errCell := "—"
 		if r.LastErr != "" {
-			errCell = truncate(oneLine(r.LastErr), errWidth)
+			errCell = oneLine(r.LastErr)
 		}
 		cells = append(cells, errCell)
 	}

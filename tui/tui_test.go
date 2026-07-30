@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // driveMessages pumps msgs through Model.Update and returns the
@@ -27,7 +27,7 @@ func TestViewRendersRepoChangeDoneAndFooter(t *testing.T) {
 		ChangeStartedMsg{Path: repo, Change: "task-1"},
 		ChangeDoneMsg{Path: repo, Change: "task-1"},
 	)
-	view := m.View()
+	view := m.View().Content
 	if !strings.Contains(view, "proj") {
 		t.Fatalf("view missing repo basename:\n%s", view)
 	}
@@ -52,7 +52,7 @@ func TestViewHandlesNoSpecRepo(t *testing.T) {
 	m = driveMessages(m,
 		RepoSeenMsg{Path: repo, HasChange: false},
 	)
-	view := m.View()
+	view := m.View().Content
 	if !strings.Contains(view, "idle") {
 		t.Fatalf("view missing idle phase for repo without openspec:\n%s", view)
 	}
@@ -79,7 +79,7 @@ func TestViewTruncatesLongNames(t *testing.T) {
 		RepoSeenMsg{Path: repo, HasChange: true},
 		ChangeStartedMsg{Path: repo, Change: "task-1"},
 	)
-	view := m.View()
+	view := m.View().Content
 	// The repo column is 24 wide; a 50-char name must be truncated to
 	// fit, ending with the ellipsis.
 	lines := strings.Split(view, "\n")
@@ -104,7 +104,7 @@ func TestUpdateIgnoresUnknownEvents(t *testing.T) {
 		RepoSeenMsg{Path: repo, HasChange: true},
 		ChangeStartedMsg{Path: repo, Change: "task-1"},
 	)
-	beforeView := m.View()
+	beforeView := m.View().Content
 	beforeRows := map[string]*RepoRow{}
 	for k, v := range m.rows {
 		beforeRows[k] = v
@@ -128,7 +128,7 @@ func TestUpdateIgnoresUnknownEvents(t *testing.T) {
 			t.Fatalf("row %q disappeared after unknown event", k)
 		}
 	}
-	if got.View() != beforeView {
+	if got.View().Content != beforeView {
 		t.Fatalf("View changed for unknown event")
 	}
 }
@@ -136,7 +136,7 @@ func TestUpdateIgnoresUnknownEvents(t *testing.T) {
 func TestUpdateQuitsOnQ(t *testing.T) {
 	m := NewModel()
 	m.width = 120
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	updated, cmd := m.Update(tea.KeyPressMsg{Text: "q"})
 	if cmd == nil {
 		t.Fatalf("expected tea.Quit on q key, got nil cmd")
 	}
@@ -164,26 +164,6 @@ func TestTickDrivesRedrawDuringWork(t *testing.T) {
 	_, cmd := m.Update(tickMsg(time.Now()))
 	if cmd == nil {
 		t.Fatalf("tickMsg must reschedule the next tick (got nil cmd)")
-	}
-}
-
-func TestTruncate(t *testing.T) {
-	cases := []struct {
-		in   string
-		n    int
-		want string
-	}{
-		{"short", 10, "short"},
-		{"abcdef", 3, "ab…"},
-		{"abc", 1, "…"},
-		{"abc", 0, ""},
-		{"", 5, ""},
-	}
-	for _, c := range cases {
-		got := truncate(c.in, c.n)
-		if got != c.want {
-			t.Fatalf("truncate(%q, %d) = %q, want %q", c.in, c.n, got, c.want)
-		}
 	}
 }
 
@@ -217,7 +197,7 @@ func TestRowOrderingStableAcrossEvents(t *testing.T) {
 		ChangeStartedMsg{Path: "/wd/beta", Change: "c1"},
 		ChangeStartedMsg{Path: "/wd/alpha", Change: "c2"},
 	)
-	view := m.View()
+	view := m.View().Content
 	alphaIdx := strings.Index(view, "alpha")
 	betaIdx := strings.Index(view, "beta")
 	if alphaIdx < 0 || betaIdx < 0 {
@@ -241,7 +221,7 @@ func TestViewFooterCountsByPhase(t *testing.T) {
 		ChangeFailedMsg{Path: "/wd/failed-repo", Change: "c3", Err: "boom"},
 		RepoSeenMsg{Path: "/wd/nospec-repo", HasChange: false},
 	)
-	view := m.View()
+	view := m.View().Content
 	// The repo without openspec/ also renders at PhaseIdle, so the
 	// footer carries "2 idle" (one real idle + the no-spec row).
 	for _, want := range []string{"1 done", "1 working", "2 idle", "1 failed"} {
@@ -259,7 +239,7 @@ func TestViewHidesErrColumnBelow100Cols(t *testing.T) {
 		RepoSeenMsg{Path: repo, HasChange: true},
 		ChangeFailedMsg{Path: repo, Change: "c1", Err: "boom"},
 	)
-	view := m.View()
+	view := m.View().Content
 	lines := strings.Split(view, "\n")
 	if len(lines) < 3 {
 		t.Fatalf("expected summary+header+row, got %d lines:\n%s", len(lines), view)
@@ -286,7 +266,7 @@ func TestViewHidesAgeColumnBelow80Cols(t *testing.T) {
 		RepoSeenMsg{Path: repo, HasChange: true},
 		ChangeStartedMsg{Path: repo, Change: "c1"},
 	)
-	view := m.View()
+	view := m.View().Content
 	header := strings.Split(view, "\n")[0]
 	if strings.Contains(header, "AGE") {
 		t.Fatalf("AGE should be hidden at width 60:\n%s", view)
@@ -306,7 +286,7 @@ func TestViewRendersErrColumnForFailedRow(t *testing.T) {
 		RetryAttemptMsg{Path: repo, Change: "c1", N: 1, Max: 3, Err: "transient boom"},
 		ChangeFailedMsg{Path: repo, Change: "c1", Err: "fatal: merge conflict"},
 	)
-	view := m.View()
+	view := m.View().Content
 	lines := strings.Split(view, "\n")
 	if len(lines) < 3 {
 		t.Fatalf("expected summary+header+row, got %d lines:\n%s", len(lines), view)
@@ -336,7 +316,7 @@ func TestViewErrColumnCollapsesMultilineToOneLine(t *testing.T) {
 		RepoSeenMsg{Path: repo, HasChange: true},
 		ChangeFailedMsg{Path: repo, Change: "c1", Err: multiline},
 	)
-	view := m.View()
+	view := m.View().Content
 	// Every retained row is exactly one physical line: summary +
 	// header + one-line-per-row + footer.
 	lines := strings.Split(view, "\n")
@@ -368,7 +348,7 @@ func TestViewOmitsLogPathAndKeepsRowOneLine(t *testing.T) {
 		ChangeStartedMsg{Path: repo, Change: "add-dark-mode"},
 		ChangeDoneMsg{Path: repo, Change: "add-dark-mode"},
 	)
-	view := m.View()
+	view := m.View().Content
 	if strings.Contains(view, ".jsonl") {
 		t.Fatalf("view must not contain any jsonl path fragment:\n%s", view)
 	}
@@ -401,7 +381,7 @@ func TestViewOmitsLogPathWhenUnset(t *testing.T) {
 		ChangeStartedMsg{Path: repo, Change: "task-1"},
 		ChangeDoneMsg{Path: repo, Change: "task-1"},
 	)
-	view := m.View()
+	view := m.View().Content
 	// Default shape is summary + header + 1 row + footer = 4 lines.
 	// No extra row bearing a path (which would be a 5th line).
 	lines := strings.Split(view, "\n")
@@ -420,7 +400,7 @@ func TestViewRendersWorkflowNameWithChange(t *testing.T) {
 		RepoSeenMsg{Path: "/tmp/proj", HasChange: true},
 		ChangeStartedMsg{Path: "/tmp/proj", Workflow: "dependencies", Change: "package-update"},
 	)
-	if view := m.View(); !strings.Contains(view, "dependencies: package-update") {
+	if view := m.View().Content; !strings.Contains(view, "dependencies: package-update") {
 		t.Fatalf("view missing workflow and change:\n%s", view)
 	}
 }
@@ -439,7 +419,7 @@ func TestViewRendersCustomChangeNameNotDigest(t *testing.T) {
 		RepoSeenMsg{Path: repo, HasChange: true},
 		ChangeStartedMsg{Path: repo, Change: "add-dark-mode"},
 	)
-	view := m.View()
+	view := m.View().Content
 	if !strings.Contains(view, "add-dark-mode") {
 		t.Fatalf("view missing custom change value:\n%s", view)
 	}
@@ -479,7 +459,7 @@ func TestViewRendersCustomIdleRowWithEmDash(t *testing.T) {
 	m = driveMessages(m,
 		RepoSeenMsg{Path: repo, HasChange: false},
 	)
-	view := m.View()
+	view := m.View().Content
 	lines := strings.Split(view, "\n")
 	if len(lines) < 3 {
 		t.Fatalf("expected at least 3 lines (summary + header + row), got %d:\n%s", len(lines), view)
@@ -512,7 +492,7 @@ func TestViewPhaseAndWarningUnchangedAcrossRename(t *testing.T) {
 		WarningMsg{Path: repo, Change: "task-1", Msg: "rollback hiccup"},
 		ChangeStartedMsg{Path: repo, Change: "task-1"},
 	)
-	view := m.View()
+	view := m.View().Content
 	if !strings.Contains(view, "working") {
 		t.Fatalf("view missing working phase after re-start:\n%s", view)
 	}
@@ -546,7 +526,7 @@ func TestSummaryCountsAllRetainedRepos(t *testing.T) {
 		)
 	}
 	m = driveMessages(m, msgs...)
-	view := m.View()
+	view := m.View().Content
 	if !strings.Contains(view, "12 total") {
 		t.Fatalf("summary should report 12 total, view:\n%s", view)
 	}
@@ -569,7 +549,7 @@ func TestViewportCappedAtTenEntries(t *testing.T) {
 			ChangeStartedMsg{Path: path, Change: "c"},
 		)
 	}
-	view := m.View()
+	view := m.View().Content
 	// Count the number of repo rows. A row is a line that begins
 	// with a path basename. We rely on the "REPO" header being the
 	// first non-summary line and look for repo basenames r..r..
@@ -603,7 +583,7 @@ func TestViewportPrioritizesWorkingOverFailedOverWarningOverRest(t *testing.T) {
 		RepoSeenMsg{Path: "/wd/working", HasChange: true},
 		ChangeStartedMsg{Path: "/wd/working", Change: "c"},
 	)
-	view := m.View()
+	view := m.View().Content
 	// Layout: summary (line 0), header (line 1), rows (line 2+),
 	// footer (last line). Repo basenames live on the row lines.
 	lines := strings.Split(view, "\n")
@@ -656,7 +636,7 @@ func TestViewportActivityRecencyWithinClass(t *testing.T) {
 		RepoSeenMsg{Path: "/wd/beta", HasChange: true},
 		ChangeStartedMsg{Path: "/wd/beta", Change: "c"},
 	)
-	view := m.View()
+	view := m.View().Content
 	alphaIdx := strings.Index(view, "alpha")
 	betaIdx := strings.Index(view, "beta")
 	if alphaIdx < 0 || betaIdx < 0 {
@@ -686,7 +666,7 @@ func TestRepeatedRepoSeenDoesNotChangeActivityOrder(t *testing.T) {
 		RepoSeenMsg{Path: "/wd/beta", HasChange: true},
 		ChangeStartedMsg{Path: "/wd/beta", Change: "c"},
 	)
-	view := m.View()
+	view := m.View().Content
 	alphaIdx := strings.Index(view, "alpha")
 	betaIdx := strings.Index(view, "beta")
 	if alphaIdx < 0 || betaIdx < 0 {
@@ -725,7 +705,7 @@ func TestNewRepoReceivesDiscoveryOrder(t *testing.T) {
 		RepoSeenMsg{Path: "/wd/r0", HasChange: true},
 		RepoSeenMsg{Path: "/wd/r1", HasChange: true},
 	)
-	view := m.View()
+	view := m.View().Content
 	if !strings.Contains(view, "11 total") {
 		t.Fatalf("summary should report 11 total:\n%s", view)
 	}
@@ -748,7 +728,7 @@ func TestFooterNoLongerShowsPhaseCounts(t *testing.T) {
 		RepoSeenMsg{Path: "/wd/failed", HasChange: true},
 		ChangeFailedMsg{Path: "/wd/failed", Change: "c", Err: "boom"},
 	)
-	view := m.View()
+	view := m.View().Content
 	// The footer should mention only [q] quit; the top summary
 	// owns the counts. Locate the last line.
 	lines := strings.Split(view, "\n")
@@ -781,7 +761,7 @@ func TestShortTerminalCapsVisibleRows(t *testing.T) {
 			ChangeStartedMsg{Path: path, Change: "c"},
 		)
 	}
-	view := m.View()
+	view := m.View().Content
 	// Count working-phase rows: a row line is the one carrying a
 	// "●" glyph.
 	count := 0
@@ -813,7 +793,7 @@ func TestRowPhaseTransitionRefreshesActivity(t *testing.T) {
 		RepoSeenMsg{Path: "/wd/beta", HasChange: true},
 		ChangeStartedMsg{Path: "/wd/beta", Change: "c"},
 	)
-	view := m.View()
+	view := m.View().Content
 	betaIdx := strings.Index(view, "beta")
 	alphaIdx := strings.Index(view, "alpha")
 	if betaIdx < 0 || alphaIdx < 0 {
@@ -834,7 +814,7 @@ func TestWarningRowStillVisibleWhenIdle(t *testing.T) {
 		RepoSeenMsg{Path: "/wd/beta", HasChange: true},
 		WarningMsg{Path: "/wd/beta", Msg: "hmm"},
 	)
-	view := m.View()
+	view := m.View().Content
 	betaIdx := strings.Index(view, "beta")
 	alphaIdx := strings.Index(view, "alpha")
 	if betaIdx < 0 || alphaIdx < 0 {
@@ -848,7 +828,7 @@ func TestWarningRowStillVisibleWhenIdle(t *testing.T) {
 func TestSummaryEmptyRepoState(t *testing.T) {
 	m := NewModel()
 	m.width = 120
-	view := m.View()
+	view := m.View().Content
 	if !strings.Contains(view, "0 total") {
 		t.Fatalf("empty model summary should report 0 total:\n%s", view)
 	}
@@ -867,7 +847,7 @@ func TestSummaryVisibleCountWith10PlusRepos(t *testing.T) {
 			ChangeStartedMsg{Path: path, Change: "c"},
 		)
 	}
-	view := m.View()
+	view := m.View().Content
 	if !strings.Contains(view, "47 total") {
 		t.Fatalf("summary should report 47 total, view:\n%s", view)
 	}

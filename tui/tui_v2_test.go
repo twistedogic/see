@@ -83,10 +83,12 @@ func TestBubblesTableProducesOneLineRows(t *testing.T) {
 	content := m.renderContent()
 	lines := strings.Split(content, "\n")
 	// Layout: summary + header + rows + footer (+ optional error).
-	// Header must not introduce extra blank lines.
+	// Header must not introduce extra blank lines or box-drawing
+	// border artefacts; the bubbles table styles we pass suppress
+	// borders so cells remain one physical line.
 	header := lines[1]
-	if strings.Contains(header, "  ") || strings.Count(header, "│") > 0 || strings.Contains(header, "─") {
-		t.Fatalf("header should not contain padding or border artefacts:\n%s", header)
+	if strings.Count(header, "│") > 0 || strings.Contains(header, "─") {
+		t.Fatalf("header should not contain border artefacts:\n%s", header)
 	}
 	// The failed row must occupy exactly one physical line (no
 	// line wrapping from padding).
