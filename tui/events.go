@@ -13,6 +13,14 @@ type RepoSeenMsg struct {
 	HasChange bool
 }
 
+type ActivityMsg struct {
+	Text string
+}
+
+// PiActivityMsg is kept as a descriptive alias for callers that want
+// to distinguish this presentation message from other TUI updates.
+type PiActivityMsg = ActivityMsg
+
 type ChangeStartedMsg struct {
 	Path     string
 	Workflow string
@@ -66,3 +74,5 @@ type InfraErrorMsg struct {
 // when the last event arrived — which is wrong for any row that
 // has been in PhaseWorking longer than the gap between events.
 type tickMsg time.Time
+
+type marqueeTickMsg struct{}

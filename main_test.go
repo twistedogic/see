@@ -31,7 +31,7 @@ type fakeAgent struct {
 	onRun   func() error
 }
 
-func (f *fakeAgent) Run(_ context.Context, path, _, prompt, model string) (string, error) {
+func (f *fakeAgent) Run(_ context.Context, path, _, prompt, model string, _ ActivityCallback) (string, error) {
 	f.runs = append(f.runs, path)
 	f.prompts = append(f.prompts, prompt)
 	f.models = append(f.models, model)
@@ -216,7 +216,7 @@ func TestPiAgentCapturesOutputToLogFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	logPath, err := (PiAgent{binary: script, logDir: logDir}).Run(context.Background(), dir, "task-1", "prompt", "")
+	logPath, err := (PiAgent{binary: script, logDir: logDir}).Run(context.Background(), dir, "task-1", "prompt", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +243,7 @@ func TestPiAgentRespectsSeeLogDir(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf hello\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	logPath, err := (PiAgent{binary: script, logDir: logDir}).Run(context.Background(), dir, "task-1", "prompt", "")
+	logPath, err := (PiAgent{binary: script, logDir: logDir}).Run(context.Background(), dir, "task-1", "prompt", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +294,7 @@ func runPiAgentWithRecordedArgs(t *testing.T, model string) []string {
 		t.Fatal(err)
 	}
 	t.Setenv("SEE_TEST_ARGV", argvPath)
-	if _, err := (PiAgent{binary: script, logDir: logDir}).Run(context.Background(), dir, "task-1", "prompt text", model); err != nil {
+	if _, err := (PiAgent{binary: script, logDir: logDir}).Run(context.Background(), dir, "task-1", "prompt text", model, nil); err != nil {
 		t.Fatal(err)
 	}
 	body, err := os.ReadFile(argvPath)
@@ -310,7 +310,7 @@ func TestPiAgentPreservesExitCodeByDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := (PiAgent{binary: script, logDir: t.TempDir()}).Run(context.Background(), t.TempDir(), "task-1", "prompt", "")
+	_, err := (PiAgent{binary: script, logDir: t.TempDir()}).Run(context.Background(), t.TempDir(), "task-1", "prompt", "", nil)
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
 		t.Fatalf("Run() error = %v, want exit code 7", err)
@@ -341,7 +341,7 @@ func TestPiAgentRunSurfacesFileCreateError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	logPath, err := (PiAgent{binary: script, logDir: logDir}).Run(context.Background(), dir, "task-1", "prompt", "")
+	logPath, err := (PiAgent{binary: script, logDir: logDir}).Run(context.Background(), dir, "task-1", "prompt", "", nil)
 	if err == nil {
 		t.Fatal("Run returned nil error, want non-nil on capture failure")
 	}
@@ -3041,7 +3041,7 @@ type digestAgent struct {
 	digests []string
 }
 
-func (d *digestAgent) Run(_ context.Context, _, digest, _, _ string) (string, error) {
+func (d *digestAgent) Run(_ context.Context, _, digest, _, _ string, _ ActivityCallback) (string, error) {
 	d.digests = append(d.digests, digest)
 	return "/tmp/see--" + digest + ".jsonl", nil
 }

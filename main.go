@@ -128,9 +128,10 @@ func selectRunMode(mode string, isTTY bool) (runMode, error) {
 // before the agent was invoked) so the caller can surface it via
 // the LogPath event. After the silent-tui change, a non-empty
 // logPath is the rule rather than the exception — the log directory
-// is validated up front by resolveLogDir.
+// is validated up front by resolveLogDir. The optional activity
+// callback is the TUI capture side channel; nil preserves log mode.
 type Agent interface {
-	Run(ctx context.Context, path, change, prompt, model string) (string, error)
+	Run(ctx context.Context, path, change, prompt, model string, activity ActivityCallback) (string, error)
 }
 
 type PiAgent struct {
@@ -145,7 +146,7 @@ func pathFor(repo, change string) string {
 	return logFilename(filepath.Base(repo) + "--" + change)
 }
 
-func (p PiAgent) Run(ctx context.Context, path, change, prompt, model string) (string, error) {
+func (p PiAgent) Run(ctx context.Context, path, change, prompt, model string, activity ActivityCallback) (string, error) {
 	args := []string{"--mode", "json", "--no-session"}
 	if model = strings.TrimSpace(model); model != "" {
 		args = append(args, "--model", model)
@@ -159,8 +160,16 @@ func (p PiAgent) Run(ctx context.Context, path, change, prompt, model string) (s
 		return "", fmt.Errorf("see: log file create failed: %w", err)
 	}
 	defer f.Close()
-	cmd.Stdout = f
-	cmd.Stderr = f
+	if activity == nil {
+		cmd.Stdout = f
+		cmd.Stderr = f
+		return logPath, cmd.Run()
+	}
+	parser := newPiActivityParser(activity)
+	defer parser.Flush()
+	sink := &piActivitySink{file: f, parser: parser}
+	cmd.Stdout = sink
+	cmd.Stderr = sink
 	return logPath, cmd.Run()
 }
 
@@ -664,6 +673,7 @@ type Watcher struct {
 	agent Agent
 
 	observer Observer
+	activity ActivityCallback
 
 	RetryCount int
 	// ponytail: Once mirrors RetryCount — zero-default knob on the watcher,
@@ -837,7 +847,7 @@ func (w Watcher) workResolvedWorktree(ctx context.Context, path, change, ref str
 	if template == "" {
 		template = defaultPromptTemplate
 	}
-	logPath, runErr := w.agent.Run(ctx, worktreePath, digest, renderTemplate(template, change), w.Model)
+	logPath, runErr := w.runAgent(ctx, worktreePath, digest, renderTemplate(template, change), w.Model)
 	if logPath != "" && w.observer != nil {
 		w.observer.Observe(LogPath{Path: logPath, Workflow: w.WorkflowName, Change: change})
 	}
@@ -897,7 +907,7 @@ func (w Watcher) workResolved(ctx context.Context, path, change string) error {
 		if template == "" {
 			template = defaultPromptTemplate
 		}
-		logPath, runErr := w.agent.Run(ctx, path, digest, renderTemplate(template, change), w.Model)
+		logPath, runErr := w.runAgent(ctx, path, digest, renderTemplate(template, change), w.Model)
 		if logPath != "" && w.observer != nil {
 			w.observer.Observe(LogPath{Path: logPath, Workflow: w.WorkflowName, Change: change})
 		}
@@ -925,7 +935,7 @@ func (w Watcher) workResolved(ctx context.Context, path, change string) error {
 	if template == "" {
 		template = defaultPromptTemplate
 	}
-	logPath, runErr := w.agent.Run(ctx, path, change, renderTemplate(template, change), "")
+	logPath, runErr := w.runAgent(ctx, path, change, renderTemplate(template, change), "")
 	if logPath != "" && w.observer != nil {
 		w.observer.Observe(LogPath{Path: logPath, Workflow: w.WorkflowName, Change: change})
 	}
@@ -998,6 +1008,12 @@ func (w Watcher) runOnce(ctx context.Context, repos []string) error {
 	}
 	return nil
 }
+
+func (w Watcher) runAgent(ctx context.Context, path, change, prompt, model string) (string, error) {
+	return w.agent.Run(ctx, path, change, prompt, model, w.activity)
+}
+
+func (w *Watcher) SetActivityCallback(activity ActivityCallback) { w.activity = activity }
 
 // runOneWorkflow runs a single workflow against repo. The
 // watcher copy carries the workflow's condition, prompt, commit
@@ -1169,6 +1185,10 @@ func main() {
 func runTUI(ctx context.Context, w *Watcher, events *eventLogger, repos []string) error {
 	tCtx, cancel := context.WithCancelCause(ctx)
 	prog, obs := tui.New(tCtx)
+	// Activity is a TUI-only side channel; it never enters eventLogger.
+	w.SetActivityCallback(func(activity string) {
+		obs.Send(tui.ActivityMsg{Text: activity})
+	})
 	events.Attach(tuiObserver{send: obs.Send})
 	w.observer = events
 	wg := &sync.WaitGroup{}

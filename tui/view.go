@@ -9,6 +9,8 @@ import (
 	"charm.land/bubbles/v2/table"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/mattn/go-runewidth"
 )
 
 // Column widths. The fixed columns sum to
@@ -23,6 +25,11 @@ const (
 	wRetry      = 8
 	wAge        = 8
 	errMinWidth = 20 // ERROR shows only when remaining width >= this
+
+	tickerInterval = 120 * time.Millisecond
+	tickerPrefix   = "pi › "
+	tickerQuit     = "[q] quit"
+	tickerGap      = "   "
 )
 
 // bubblyGridStyles produces a Bubbles table style set with no cell
@@ -125,6 +132,75 @@ func priorityClass(r *RepoRow) int {
 	}
 }
 
+func (m *Model) tickerMiddleWidth() int {
+	width := m.width
+	fixed := runewidth.StringWidth(tickerPrefix) + 1 + runewidth.StringWidth(tickerQuit)
+	if width < fixed {
+		return 0
+	}
+	return width - fixed
+}
+
+func tickerText(text string) string {
+	text = strings.Join(strings.Fields(ansi.Strip(text)), " ")
+	if text == "" {
+		return "waiting"
+	}
+	if runes := []rune(text); len(runes) > maxPiActivityRunes {
+		text = string(runes[:maxPiActivityRunes])
+	}
+	return text
+}
+
+const maxPiActivityRunes = 512
+
+func (m *Model) tickerOverflow() bool {
+	return runewidth.StringWidth(m.activity) > m.tickerMiddleWidth()
+}
+
+func (m *Model) marqueeCmd() tea.Cmd {
+	if !m.tickerOverflow() {
+		return nil
+	}
+	return tea.Tick(tickerInterval, func(time.Time) tea.Msg { return marqueeTickMsg{} })
+}
+
+func displayWindow(text string, offset, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	period := runewidth.StringWidth(text)
+	if period == 0 {
+		return strings.Repeat(" ", width)
+	}
+	offset %= period
+	// A few copies of the loop cover the window for any offset/width
+	// within a single period.
+	loop := strings.Repeat(text, (offset+width)/period+2)
+	window := ansi.Cut(loop, offset, offset+width)
+	if padding := width - runewidth.StringWidth(window); padding > 0 {
+		window += strings.Repeat(" ", padding)
+	}
+	return window
+}
+
+func (m *Model) renderFooter() string {
+	width := m.width
+	quitWidth := runewidth.StringWidth(tickerQuit)
+	if width <= quitWidth {
+		return runewidth.Truncate(tickerQuit, max(width, 0), "")
+	}
+	middleWidth := m.tickerMiddleWidth()
+	if middleWidth == 0 {
+		return tickerQuit
+	}
+	activity := tickerText(m.activity)
+	if window := runewidth.StringWidth(activity); window <= middleWidth {
+		return tickerPrefix + activity + strings.Repeat(" ", middleWidth-window) + " " + tickerQuit
+	}
+	return tickerPrefix + displayWindow(activity+tickerGap, m.tickerOffset, middleWidth) + " " + tickerQuit
+}
+
 // renderContent builds the status grid as a string. It is the
 // rendering seam that View() wraps in a tea.View, and the seam that
 // tests inspect without depending on terminal-control behavior.
@@ -169,7 +245,7 @@ func (m *Model) renderContent() string {
 	if m.infraErr != "" {
 		parts = append(parts, "! "+m.infraErr)
 	}
-	parts = append(parts, "[q] quit")
+	parts = append(parts, m.renderFooter())
 	return strings.Join(parts, "\n")
 }
 

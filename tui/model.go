@@ -5,6 +5,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/mattn/go-runewidth"
 )
 
 type Phase int
@@ -60,17 +61,19 @@ type RepoRow struct {
 }
 
 type Model struct {
-	rows        map[string]*RepoRow // keyed by repo path
-	order       []string            // scan order, for stable rendering
-	width       int
-	height      int
-	infraErr    string
-	discoverSeq uint64 // monotonic, assigned to a row on first RepoSeen
-	activitySeq uint64 // monotonic, advanced on each meaningful lifecycle event
+	rows         map[string]*RepoRow // keyed by repo path
+	order        []string            // scan order, for stable rendering
+	width        int
+	height       int
+	infraErr     string
+	activity     string
+	tickerOffset int
+	discoverSeq  uint64 // monotonic, assigned to a row on first RepoSeen
+	activitySeq  uint64 // monotonic, advanced on each meaningful lifecycle event
 }
 
 func NewModel() *Model {
-	return &Model{rows: map[string]*RepoRow{}, width: 120, height: 24}
+	return &Model{rows: map[string]*RepoRow{}, width: 120, height: 24, activity: "waiting"}
 }
 
 func (m *Model) ensureRow(path string) *RepoRow {
@@ -117,7 +120,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			r.Phase = PhaseIdle
 			r.Change = "—"
 		}
+	case ActivityMsg:
+		m.activity = msg.Text
+		m.tickerOffset = 0
+		return m, m.marqueeCmd()
 	case ChangeStartedMsg:
+		m.activity = "starting"
+		m.tickerOffset = 0
 		r := m.ensureRow(msg.Path)
 		m.markActivity(r)
 		r.Phase = PhaseWorking
@@ -167,9 +176,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// recomputes AGE from StartedAt, so the tick is purely a
 		// redraw trigger.
 		return m, tea.Tick(time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
+	case marqueeTickMsg:
+		if !m.tickerOverflow() {
+			m.tickerOffset = 0
+			return m, nil
+		}
+		period := runewidth.StringWidth(m.activity + tickerGap)
+		if period == 0 {
+			return m, m.marqueeCmd()
+		}
+		m.tickerOffset = (m.tickerOffset + 1) % period
+		return m, m.marqueeCmd()
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.tickerOffset = 0
+		return m, m.marqueeCmd()
 	case tea.KeyPressMsg:
 		// Only q and ctrl+c quit; everything else (including the
 		// bubbles table navigation keys j/k/up/down/pgup/pgdown) is
