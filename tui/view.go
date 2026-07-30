@@ -6,7 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/table"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // Column widths. The fixed columns sum to
@@ -23,18 +25,32 @@ const (
 	errMinWidth = 20 // ERROR shows only when remaining width >= this
 )
 
-var (
-	colRepo   = lipgloss.NewStyle().Width(wRepo).Align(lipgloss.Left)
-	colChange = lipgloss.NewStyle().Width(wChange).Align(lipgloss.Left)
-	colPhase  = lipgloss.NewStyle().Width(wPhase).Align(lipgloss.Left)
-	colRetry  = lipgloss.NewStyle().Width(wRetry).Align(lipgloss.Left)
-	colAge    = lipgloss.NewStyle().Width(wAge).Align(lipgloss.Right)
+// bubblyGridStyles produces a Bubbles table style set with no cell
+// or header padding and a Selected style that matches the cell style
+// so the unfocused table does not introduce visible selection state.
+// The header uses default styling (no padding); bold is preserved so
+// existing tests that check for header content remain stable.
+func bubblyGridStyles() table.Styles {
+	zero := lipgloss.NewStyle()
+	cell := lipgloss.NewStyle().Padding(0, 0)
+	return table.Styles{
+		Cell:     cell,
+		Header:   cell,
+		Selected: zero,
+	}
+}
 
-	glyphIdle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("○ idle")
-	glyphWorking = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("● working")
-	glyphDone    = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render("✓ done")
-	glyphFailed  = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render("✗ failed")
-)
+var phaseStyles = struct {
+	idle    lipgloss.Style
+	working lipgloss.Style
+	done    lipgloss.Style
+	failed  lipgloss.Style
+}{
+	idle:    lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
+	working: lipgloss.NewStyle().Foreground(lipgloss.Color("3")),
+	done:    lipgloss.NewStyle().Foreground(lipgloss.Color("2")),
+	failed:  lipgloss.NewStyle().Foreground(lipgloss.Color("1")),
+}
 
 func truncate(s string, n int) string {
 	if n <= 0 {
@@ -120,7 +136,10 @@ func priorityClass(r *RepoRow) int {
 	}
 }
 
-func (m *Model) View() string {
+// renderContent builds the status grid as a string. It is the
+// rendering seam that View() wraps in a tea.View, and the seam that
+// tests inspect without depending on terminal-control behavior.
+func (m *Model) renderContent() string {
 	// Column visibility by terminal width: at >=80 cols show AGE,
 	// below that REPO/CHANGE/PHASE/RETRY only.
 	showAge := m.width >= 80
@@ -132,6 +151,9 @@ func (m *Model) View() string {
 		fixedSum += wAge
 	}
 	errWidth := m.width - fixedSum
+	if errWidth < 0 {
+		errWidth = 0
+	}
 	showErr := errWidth >= errMinWidth
 
 	// Fixed lines: summary, header, footer, optional infrastructure
@@ -149,17 +171,11 @@ func (m *Model) View() string {
 	visible := fitToHeight(m.prioritizedRows(), avail)
 	summary := m.renderSummary(len(visible))
 
-	header := m.renderHeader(showAge, showErr, errWidth)
-	body := make([]string, 0, len(visible))
-	for _, r := range visible {
-		body = append(body, m.renderRow(r, showAge, showErr, errWidth))
-	}
+	tbl := m.buildTable(visible, showAge, showErr, errWidth)
 
-	parts := []string{summary, header}
-	if len(body) == 0 {
+	parts := []string{summary, tbl.View()}
+	if len(visible) == 0 {
 		parts = append(parts, "(no repos scanned yet)")
-	} else {
-		parts = append(parts, strings.Join(body, "\n"))
 	}
 	if m.infraErr != "" {
 		parts = append(parts, "! "+m.infraErr)
@@ -168,24 +184,55 @@ func (m *Model) View() string {
 	return strings.Join(parts, "\n")
 }
 
-func (m *Model) renderHeader(showAge, showErr bool, errWidth int) string {
-	parts := []string{
-		colRepo.Render("REPO"),
-		colChange.Render("CHANGE"),
-		colPhase.Render("PHASE"),
-		colRetry.Render("RETRY"),
+// buildTable constructs an unfocused bubbles table fed by the
+// already-prioritized and height-fitted repository rows. The table
+// remains unfocused (focus=false) so the bubbles navigation keys
+// stay inert; cell and header padding are zero so the fixed-column
+// width arithmetic above remains valid. Selected style is
+// visually identical to Cell so cursor state never leaks into the
+// rendered output.
+func (m *Model) buildTable(visible []*RepoRow, showAge, showErr bool, errWidth int) table.Model {
+	cols := []table.Column{
+		{Title: "REPO", Width: wRepo},
+		{Title: "CHANGE", Width: wChange},
+		{Title: "PHASE", Width: wPhase},
+		{Title: "RETRY", Width: wRetry},
 	}
 	if showAge {
-		parts = append(parts, colAge.Render("AGE"))
+		cols = append(cols, table.Column{Title: "AGE", Width: wAge})
 	}
 	if showErr {
-		parts = append(parts, lipgloss.NewStyle().Width(errWidth).Align(lipgloss.Left).Render("ERROR"))
+		cols = append(cols, table.Column{Title: "ERROR", Width: errWidth})
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Left, parts...)
+
+	rows := make([]table.Row, 0, len(visible))
+	for _, r := range visible {
+		rows = append(rows, m.buildCells(r, showAge, showErr, errWidth))
+	}
+
+	// +1 for the header line that bubbles' View() prepends.
+	height := len(visible) + 1
+	if height < 2 {
+		height = 2 // table needs at least height=1 (header alone)
+	}
+	tbl := table.New(
+		table.WithColumns(cols),
+		table.WithRows(rows),
+		table.WithHeight(height),
+		table.WithFocused(false),
+		table.WithStyles(bubblyGridStyles()),
+	)
+	return tbl
 }
 
-func (m *Model) renderRow(r *RepoRow, showAge, showErr bool, errWidth int) string {
-	phaseStr := phaseString(r)
+// buildCells returns the visible cells for one repository row at
+// the responsive column configuration currently in effect. The PHASE
+// cell carries its Lip Gloss color so the glyph renders colored in
+// the bubbles table; the rest of the cells are plain strings.
+// Each cell is truncated to its column width to keep the row on
+// one physical line even when the source value runs long.
+func (m *Model) buildCells(r *RepoRow, showAge, showErr bool, errWidth int) table.Row {
+	phaseStr := phaseCellValue(r)
 	retry := "—"
 	if r.RetryMax > 0 {
 		retry = fmt.Sprintf("%d/%d", r.RetryN, r.RetryMax)
@@ -217,39 +264,53 @@ func (m *Model) renderRow(r *RepoRow, showAge, showErr bool, errWidth int) strin
 	}
 	change = truncate(change, wChange)
 
-	parts := []string{
-		colRepo.Render(truncate(name, wRepo)),
-		colChange.Render(change),
-		colPhase.Render(phaseStr),
-		colRetry.Render(retry),
+	cells := []string{
+		truncate(name, wRepo),
+		change,
+		phaseStr,
+		retry,
 	}
 	if showAge {
-		parts = append(parts, colAge.Render(age))
+		cells = append(cells, age)
 	}
 	if showErr {
 		// Collapse whitespace so a multi-line git/exec error cannot
 		// wrap the row; the flex width keeps the cell within the line.
-		err := "—"
+		errCell := "—"
 		if r.LastErr != "" {
-			err = truncate(oneLine(r.LastErr), errWidth)
+			errCell = truncate(oneLine(r.LastErr), errWidth)
 		}
-		parts = append(parts, lipgloss.NewStyle().Width(errWidth).Align(lipgloss.Left).Render(err))
+		cells = append(cells, errCell)
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Left, parts...)
+	return cells
 }
 
-func phaseString(r *RepoRow) string {
+func phaseCellValue(r *RepoRow) string {
+	var glyph, label string
 	switch r.Phase {
 	case PhaseIdle:
-		return glyphIdle
+		glyph, label = "○", "idle"
 	case PhaseWorking:
-		return glyphWorking
+		glyph, label = "●", "working"
 	case PhaseDone:
-		return glyphDone
+		glyph, label = "✓", "done"
 	case PhaseFailed:
-		return glyphFailed
+		glyph, label = "✗", "failed"
+	default:
+		glyph, label = "?", "?"
 	}
-	return "?"
+	var style lipgloss.Style
+	switch r.Phase {
+	case PhaseIdle:
+		style = phaseStyles.idle
+	case PhaseWorking:
+		style = phaseStyles.working
+	case PhaseDone:
+		style = phaseStyles.done
+	case PhaseFailed:
+		style = phaseStyles.failed
+	}
+	return style.Render(glyph + " " + label)
 }
 
 func (m *Model) renderSummary(visible int) string {
@@ -289,4 +350,13 @@ func (m *Model) renderSummary(visible int) string {
 	add("warning", warnings)
 	parts = append(parts, fmt.Sprintf("%d/%d visible", visible, total))
 	return strings.Join(parts, "  ")
+}
+
+// View returns the Bubble Tea v2 view: the rendered content with the
+// alternate-screen buffer declared on the returned view so Bubble
+// Tea's lifecycle takes care of entry and exit.
+func (m *Model) View() tea.View {
+	v := tea.NewView(m.renderContent())
+	v.AltScreen = true
+	return v
 }

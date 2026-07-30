@@ -3,7 +3,7 @@ package tui
 import (
 	"context"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // ChanObserver owns a bubbletea Program and forwards any tea.Msg to it
@@ -19,9 +19,13 @@ type ChanObserver struct {
 // the observer to a Watcher (as Watcher.observer), then calls
 // prog.Run() to start the UI. prog.Run() blocks until the user quits
 // or the program is killed.
+//
+// In Bubble Tea v2, alternate-screen mode is declared on the model's
+// returned tea.View (see Model.View), so no WithAltScreen option is
+// needed here.
 func New(ctx context.Context) (*tea.Program, *ChanObserver) {
 	m := NewModel()
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
+	p := tea.NewProgram(m, tea.WithContext(ctx))
 	obs := &ChanObserver{p: p}
 	return p, obs
 }
