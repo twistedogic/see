@@ -98,6 +98,13 @@ The phase and warning counts SHALL appear in the top summary rather than being d
 - **AND** the row's REPO, CHANGE, PHASE, RETRY, and AGE columns render unchanged
 - **AND** the path still reaches the batch-level JSONL file and the `--mode=log` stdout mirror
 
+#### Scenario: Failed row shows its failure reason in the ERROR column
+- **WHEN** a repository's run exhausts its retries and the watcher emits `ChangeFailed` carrying an error, on a terminal at least 100 columns wide
+- **THEN** the rendered row for that repository SHALL display the error in the ERROR column
+- **AND** the ERROR column SHALL appear as the final column after AGE
+- **AND** a healthy repository (no current failure reason) in the same viewport SHALL render `—` in its ERROR cell
+- **AND** the full, unmodified error SHALL still reach the batch-level JSONL file and the `--mode=log` stdout mirror
+
 #### Scenario: Failed row uses a concise error summary when available
 - **WHEN** a repository's run exhausts its retries with an error that provides a concise summary and the watcher emits `ChangeFailed`, on a terminal at least 100 columns wide
 - **THEN** the rendered row for that repository SHALL display the concise summary in the ERROR column

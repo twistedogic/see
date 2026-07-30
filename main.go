@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"golang.org/x/term"
 
 	"github.com/twistedogic/see/tui"
@@ -260,7 +261,7 @@ func ensureWorkflowLane(path, digest string) (created bool, err error) {
 	if dirty, derr := hasUntrackedOrModified(path); derr != nil {
 		return false, derr
 	} else if dirty {
-		return false, fmt.Errorf("see: working tree on %s is dirty; commit or stash before see runs", path)
+		return false, &dirtyWorkingTreeError{path: path}
 	}
 
 	// Does the lane already exist?
@@ -516,9 +517,10 @@ func (w Watcher) runWithRetry(ctx context.Context, repo string) (string, error) 
 	var prevErr error
 	for attempt := 1; attempt <= w.RetryCount; attempt++ {
 		if prevErr != nil && w.observer != nil {
+			errStr := prevErr.Error()
 			w.observer.Observe(RetryAttempt{
 				Path: repo, Workflow: w.WorkflowName, Change: lastChange, N: attempt, Max: w.RetryCount,
-				Err: prevErr.Error(),
+				Err: errStr, summary: summaryFor(prevErr),
 			})
 		}
 
@@ -593,6 +595,12 @@ type RetryAttempt struct {
 	Change   string
 	N, Max   int
 	Err      string
+	// summary carries the concise Summary() text when the source
+	// error implements it; empty otherwise. Unexported so the
+	// batch JavaScript Object Notation Lines (JSONL) schema is
+	// unchanged and the in-memory TUI adapter can pick the right
+	// text without leaking a presentation-only duplicate of Err.
+	summary string
 }
 
 func (RetryAttempt) isEvent() {}
@@ -610,6 +618,8 @@ type ChangeFailed struct {
 	Workflow string
 	Change   string
 	Err      string
+	// summary: see RetryAttempt.summary.
+	summary string
 }
 
 func (ChangeFailed) isEvent() {}
@@ -642,6 +652,8 @@ func (Warning) isEvent() {}
 type InfraError struct {
 	Where string
 	Err   string
+	// summary: see RetryAttempt.summary.
+	summary string
 }
 
 func (InfraError) isEvent() {}
@@ -812,7 +824,7 @@ func (w Watcher) workResolvedWorktree(ctx context.Context, path, change, ref str
 	if dirty, err := hasUntrackedOrModified(path); err != nil {
 		return err
 	} else if dirty {
-		return fmt.Errorf("see: working tree on %s is dirty; commit or stash before see runs", path)
+		return &dirtyWorkingTreeError{path: path}
 	}
 	_, worktreePath, err := ensureWorktree(path, digest, w.WorktreeRoot)
 	if err != nil {
@@ -968,7 +980,8 @@ func (w Watcher) runOnce(ctx context.Context, repos []string) error {
 				for _, wf := range w.Workflows {
 					changeName, err := w.runOneWorkflow(ctx, repo, wf)
 					if err != nil && w.observer != nil {
-						w.observer.Observe(ChangeFailed{Path: repo, Workflow: wf.Name, Change: changeName, Err: err.Error()})
+						errStr := err.Error()
+						w.observer.Observe(ChangeFailed{Path: repo, Workflow: wf.Name, Change: changeName, Err: errStr, summary: summaryFor(err)})
 					}
 				}
 				continue
@@ -976,7 +989,8 @@ func (w Watcher) runOnce(ctx context.Context, repos []string) error {
 			lastChange, err := w.runWithRetry(ctx, repo)
 			if err != nil {
 				if w.observer != nil {
-					w.observer.Observe(ChangeFailed{Path: repo, Change: lastChange, Err: err.Error()})
+					errStr := err.Error()
+					w.observer.Observe(ChangeFailed{Path: repo, Change: lastChange, Err: errStr, summary: summaryFor(err)})
 				}
 				return fmt.Errorf("%s: %w", repo, err)
 			}
@@ -1155,20 +1169,22 @@ func main() {
 func runTUI(ctx context.Context, w *Watcher, events *eventLogger, repos []string) error {
 	tCtx, cancel := context.WithCancelCause(ctx)
 	prog, obs := tui.New(tCtx)
-	events.Attach(tuiObserver{obs: obs})
+	events.Attach(tuiObserver{send: obs.Send})
 	w.observer = events
 	wg := &sync.WaitGroup{}
 	wg.Go(func() {
 		_, err := prog.Run()
 		if err != nil {
-			events.Observe(InfraError{Where: "tui", Err: err.Error()})
+			errStr := err.Error()
+			events.Observe(InfraError{Where: "tui", Err: errStr, summary: summaryFor(err)})
 		}
 		cancel(err)
 	})
 	wg.Go(func() {
 		err := w.Watch(tCtx, repos)
 		if err != nil {
-			events.Observe(InfraError{Where: "watcher", Err: err.Error()})
+			errStr := err.Error()
+			events.Observe(InfraError{Where: "watcher", Err: errStr, summary: summaryFor(err)})
 		}
 		cancel(err)
 	})
@@ -1176,26 +1192,48 @@ func runTUI(ctx context.Context, w *Watcher, events *eventLogger, repos []string
 	return context.Cause(tCtx)
 }
 
-// tuiObserver forwards each Event to the bubbletea Program via
-// ChanObserver.Send. The type-switch lives here (not in the tui
-// package) so the tui package has no dependency on main's Event types.
-type tuiObserver struct{ obs *tui.ChanObserver }
+// tuiObserver forwards each Event to the bubbletea Program via a
+// `func(tea.Msg)` (typically *tui.ChanObserver.Send). The function
+// field keeps the adapter trivial to test. The type-switch lives
+// here so the tui package has no dependency on main's Event types.
+//
+// For the three failure-bearing events the observer prefers the
+// concise unexported `summary` over the exported `Err` when the
+// source error opted into Summary(). The full Err still reaches the
+// batch JavaScript Object Notation Lines (JSONL) because the
+// eventLogger serializes the event before forwarding; the in-memory
+// TUI message therefore renders the short reason while JSONL readers
+// see the full diagnostic.
+type tuiObserver struct {
+	send func(tea.Msg)
+}
 
 func (o tuiObserver) Observe(e Event) {
 	switch e := e.(type) {
 	case RepoSeen:
-		o.obs.Send(tui.RepoSeenMsg{Path: e.Path, HasChange: e.HasChange})
+		o.send(tui.RepoSeenMsg{Path: e.Path, HasChange: e.HasChange})
 	case ChangeStarted:
-		o.obs.Send(tui.ChangeStartedMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change})
+		o.send(tui.ChangeStartedMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change})
 	case RetryAttempt:
-		o.obs.Send(tui.RetryAttemptMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change, N: e.N, Max: e.Max, Err: e.Err})
+		o.send(tui.RetryAttemptMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change, N: e.N, Max: e.Max, Err: pickSummary(e.Err, e.summary)})
 	case ChangeDone:
-		o.obs.Send(tui.ChangeDoneMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change})
+		o.send(tui.ChangeDoneMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change})
 	case ChangeFailed:
-		o.obs.Send(tui.ChangeFailedMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change, Err: e.Err})
+		o.send(tui.ChangeFailedMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change, Err: pickSummary(e.Err, e.summary)})
 	case Warning:
-		o.obs.Send(tui.WarningMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change, Msg: e.Msg})
+		o.send(tui.WarningMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change, Msg: e.Msg})
 	case InfraError:
-		o.obs.Send(tui.InfraErrorMsg{Where: e.Where, Err: e.Err})
+		o.send(tui.InfraErrorMsg{Where: e.Where, Err: pickSummary(e.Err, e.summary)})
 	}
+}
+
+// pickSummary returns summary when non-empty, else full. Keeps the
+// three failure-bearing event sites in lockstep and lets a future
+// event that forgets to populate `summary` fall back to its full
+// message unchanged.
+func pickSummary(full, summary string) string {
+	if summary != "" {
+		return summary
+	}
+	return full
 }
