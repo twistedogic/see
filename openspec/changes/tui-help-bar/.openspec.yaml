@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-08-01
+goal: Adopt bubbles' help-bar style and keymap conventions so the TUI footer is
+  a projection of a typed keymap, and so adding new key bindings is a one-field
+  change.
