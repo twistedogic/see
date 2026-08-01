@@ -28,7 +28,6 @@ const (
 
 	tickerInterval = 120 * time.Millisecond
 	tickerPrefix   = "pi › "
-	tickerQuit     = "[q] quit"
 	tickerGap      = "   "
 )
 
@@ -58,6 +57,11 @@ var phaseStyles = struct {
 	done:    lipgloss.NewStyle().Foreground(lipgloss.Color("2")),
 	failed:  lipgloss.NewStyle().Foreground(lipgloss.Color("1")),
 }
+
+// separatorStyle matches the help package's default dark separator
+// tone (#3C3C3C) so the footer rule visually attaches to the help
+// row beneath it.
+var separatorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#3C3C3C"))
 
 // oneLine collapses every run of whitespace (including the carriage
 // returns and line feeds that git/exec errors are full of) to a
@@ -134,7 +138,7 @@ func priorityClass(r *RepoRow) int {
 
 func (m *Model) tickerMiddleWidth() int {
 	width := m.width
-	fixed := runewidth.StringWidth(tickerPrefix) + 1 + runewidth.StringWidth(tickerQuit)
+	fixed := runewidth.StringWidth(tickerPrefix)
 	if width < fixed {
 		return 0
 	}
@@ -184,21 +188,35 @@ func displayWindow(text string, offset, width int) string {
 	return window
 }
 
-func (m *Model) renderFooter() string {
-	width := m.width
-	quitWidth := runewidth.StringWidth(tickerQuit)
-	if width <= quitWidth {
-		return runewidth.Truncate(tickerQuit, max(width, 0), "")
-	}
+// renderActivityLine renders the top footer row: the fixed pi ›
+// prefix and the latest sanitized activity, padded or marquee'd to
+// the terminal width. The activity window owns the full width minus
+// the prefix; the help bar no longer shares this row.
+func (m *Model) renderActivityLine() string {
 	middleWidth := m.tickerMiddleWidth()
-	if middleWidth == 0 {
-		return tickerQuit
+	if middleWidth <= 0 {
+		return ""
 	}
 	activity := tickerText(m.activity)
 	if window := runewidth.StringWidth(activity); window <= middleWidth {
-		return tickerPrefix + activity + strings.Repeat(" ", middleWidth-window) + " " + tickerQuit
+		return tickerPrefix + activity + strings.Repeat(" ", middleWidth-window)
 	}
-	return tickerPrefix + displayWindow(activity+tickerGap, m.tickerOffset, middleWidth) + " " + tickerQuit
+	return tickerPrefix + displayWindow(activity+tickerGap, m.tickerOffset, middleWidth)
+}
+
+// renderSeparatorLine renders the middle footer row: a single
+// horizontal rule spanning the terminal width, styled to match the
+// help row's separator tone. At zero or negative width it returns
+// an empty string so the row stays a single physical line.
+func (m *Model) renderSeparatorLine() string {
+	if m.width <= 0 {
+		return ""
+	}
+	return separatorStyle.Render(strings.Repeat("─", m.width))
+}
+
+func (m *Model) renderFooter() string {
+	return m.renderActivityLine() + "\n" + m.renderSeparatorLine() + "\n" + m.help.View(m.keys)
 }
 
 // renderContent builds the status grid as a string. It is the
@@ -221,9 +239,17 @@ func (m *Model) renderContent() string {
 	}
 	showErr := errWidth >= errMinWidth
 
-	// Fixed lines: summary, header, footer, optional infrastructure
-	// error. Rows fill whatever remains, capped at viewportCap.
-	fixedLines := 3
+	// Fixed lines: summary, header, and the three footer rows
+	// (activity, separator, help). The help row is one line in the
+	// short view and two in the full (toggled) view, so the height
+	// budget tracks the active rendering. An infrastructure error
+	// adds its own banner line. Rows fill whatever remains, capped
+	// at viewportCap.
+	helpLines := 1
+	if m.help.ShowAll {
+		helpLines = 2
+	}
+	fixedLines := 3 + 1 + helpLines
 	if m.infraErr != "" {
 		fixedLines++
 	}

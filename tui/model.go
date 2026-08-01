@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"charm.land/bubbles/v2/help"
+	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"github.com/mattn/go-runewidth"
 )
@@ -70,10 +72,19 @@ type Model struct {
 	tickerOffset int
 	discoverSeq  uint64 // monotonic, assigned to a row on first RepoSeen
 	activitySeq  uint64 // monotonic, advanced on each meaningful lifecycle event
+	help         help.Model // bubbles help bar; ShowAll toggles short/full
+	keys         keymap     // typed source of truth for footer key bindings
 }
 
 func NewModel() *Model {
-	return &Model{rows: map[string]*RepoRow{}, width: 120, height: 24, activity: "waiting"}
+	return &Model{
+		rows:     map[string]*RepoRow{},
+		width:    120,
+		height:   24,
+		activity: "waiting",
+		help:     help.New(),
+		keys:     defaultKeymap(),
+	}
 }
 
 func (m *Model) ensureRow(path string) *RepoRow {
@@ -190,14 +201,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.help.SetWidth(msg.Width)
 		m.tickerOffset = 0
 		return m, m.marqueeCmd()
 	case tea.KeyPressMsg:
-		// Only q and ctrl+c quit; everything else (including the
-		// bubbles table navigation keys j/k/up/down/pgup/pgdown) is
-		// inert so the table stays a non-interactive projection.
-		if msg.String() == "q" || msg.String() == "ctrl+c" {
+		// The keymap is the single source of truth for which keys the
+		// footer reacts to. Everything the help bar advertises routes
+		// through here; everything else (bubbles table navigation
+		// keys j/k/up/down/pgup/pgdown) is inert so the table stays a
+		// non-interactive projection.
+		switch {
+		case key.Matches(msg, m.keys.Quit):
 			return m, tea.Quit
+		case key.Matches(msg, m.keys.Help):
+			m.help.ShowAll = !m.help.ShowAll
+			return m, nil
 		}
 	}
 	return m, nil

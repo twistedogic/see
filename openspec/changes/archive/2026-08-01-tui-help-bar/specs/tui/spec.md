@@ -181,7 +181,7 @@ The `?` key SHALL toggle the help bar between the short one-line rendering and t
 - **THEN** the ticker displays that text with whitespace collapsed to one line
 - **AND** thinking and token-delta events do not independently update the ticker
 
-#### Scenario: Overflowing activity animates within the activity row
+#### Scenario: Overflowing activity animates within fixed chrome
 - **WHEN** sanitized activity is wider than the activity row
 - **THEN** successive marquee ticks advance the visible activity by terminal display cells
 - **AND** the separator and help rows remain at fixed positions on their own lines
@@ -197,10 +197,11 @@ The `?` key SHALL toggle the help bar between the short one-line rendering and t
 - **THEN** the ticker replaces the old activity
 - **AND** the new activity is first rendered from display offset zero
 
-#### Scenario: Narrow terminal truncates the help bar with an ellipsis
-- **WHEN** the help bar's rendered text exceeds the terminal width
-- **THEN** the help row renders a single physical line with a trailing `…` ellipsis marking the truncation
+#### Scenario: Narrow terminal preserves quit access
+- **WHEN** the terminal is too narrow to render the full help bar text
+- **THEN** the help row renders a single physical line with a trailing `…` ellipsis marking the truncation rather than wrapping
 - **AND** ticker content remains on its own row and is not wrapped into the help row
+- **AND** the quit binding remains active (handled by the `keymap`) regardless of whether its label is visible
 
 #### Scenario: Terminal controls are not interpreted
 - **WHEN** assistant text, a tool argument, or a diagnostic contains terminal escape sequences or control characters

@@ -37,8 +37,11 @@ func TestViewRendersRepoChangeDoneAndFooter(t *testing.T) {
 	if !strings.Contains(view, "done") {
 		t.Fatalf("view missing done phase:\n%s", view)
 	}
-	if !strings.Contains(view, "[q] quit") {
-		t.Fatalf("view missing footer hint:\n%s", view)
+	// The footer's last row is the help bar (sourced from the typed
+	// keymap). It must mention the quit binding.
+	lines := strings.Split(view, "\n")
+	if last := lines[len(lines)-1]; !strings.Contains(last, "quit") {
+		t.Fatalf("view missing help bar on the footer's last row:\n%s", view)
 	}
 	if !strings.Contains(view, "1 done") {
 		t.Fatalf("view missing live count:\n%s", view)
@@ -142,6 +145,45 @@ func TestUpdateQuitsOnQ(t *testing.T) {
 	}
 	if updated == nil {
 		t.Fatalf("expected non-nil model on q key")
+	}
+}
+
+// TestUpdateQuitsOnCtrlC pins the ctrl+c half of the Quit binding so
+// the typed keymap matches the historical quit key and not only q.
+func TestUpdateQuitsOnCtrlC(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if cmd == nil {
+		t.Fatalf("expected tea.Quit on ctrl+c, got nil cmd")
+	}
+	_ = updated
+}
+
+// TestUpdateHelpToggleFlipsShowAll pins the ? binding: it flips the
+// help bar's ShowAll state and returns no command (the help package
+// is otherwise stateless). The toggle starts false and alternates.
+func TestUpdateHelpToggleFlipsShowAll(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	if m.help.ShowAll {
+		t.Fatal("help.ShowAll should start false (the short view)")
+	}
+	updated, cmd := m.Update(tea.KeyPressMsg{Text: "?"})
+	if cmd != nil {
+		t.Fatalf("? toggle should return no cmd, got %v", cmd)
+	}
+	m, _ = updated.(*Model)
+	if !m.help.ShowAll {
+		t.Fatal("pressing ? should flip ShowAll to true")
+	}
+	updated, cmd = m.Update(tea.KeyPressMsg{Text: "?"})
+	if cmd != nil {
+		t.Fatalf("second ? toggle should return no cmd, got %v", cmd)
+	}
+	m, _ = updated.(*Model)
+	if m.help.ShowAll {
+		t.Fatal("pressing ? again should flip ShowAll back to false")
 	}
 }
 
@@ -318,9 +360,10 @@ func TestViewErrColumnCollapsesMultilineToOneLine(t *testing.T) {
 	)
 	view := m.View().Content
 	// Every retained row is exactly one physical line: summary +
-	// header + one-line-per-row + footer.
+	// header + one-line-per-row + footer (activity, separator, help
+	// = 3 rows in the short help view).
 	lines := strings.Split(view, "\n")
-	if want := 3 + len(m.rows); len(lines) != want {
+	if want := 5 + len(m.rows); len(lines) != want {
 		t.Fatalf("multi-line error wrapped the row: got %d lines, want %d:\n%s", len(lines), want, view)
 	}
 	row := lines[2]
@@ -353,10 +396,11 @@ func TestViewOmitsLogPathAndKeepsRowOneLine(t *testing.T) {
 		t.Fatalf("view must not contain any jsonl path fragment:\n%s", view)
 	}
 	// Each retained row is exactly one physical line, so the view is
-	// summary + header + one-line-per-row + footer.
+	// summary + header + one-line-per-row + footer (activity,
+	// separator, help = 3 rows in the short help view).
 	lines := strings.Split(view, "\n")
-	if want := 3 + len(m.rows); len(lines) != want {
-		t.Fatalf("every row must be one line; got %d lines, want %d (3 fixed + %d rows):\n%s", len(lines), want, len(m.rows), view)
+	if want := 5 + len(m.rows); len(lines) != want {
+		t.Fatalf("every row must be one line; got %d lines, want %d (5 fixed + %d rows):\n%s", len(lines), want, len(m.rows), view)
 	}
 	// fitToHeight never returns more rows than the budget allows at
 	// one line each, and never more than the input slice.
@@ -382,11 +426,12 @@ func TestViewOmitsLogPathWhenUnset(t *testing.T) {
 		ChangeDoneMsg{Path: repo, Change: "task-1"},
 	)
 	view := m.View().Content
-	// Default shape is summary + header + 1 row + footer = 4 lines.
-	// No extra row bearing a path (which would be a 5th line).
+	// Default shape is summary + header + 1 row + footer (activity,
+	// separator, help) = 6 lines. No extra row bearing a path
+	// (which would be a 7th line).
 	lines := strings.Split(view, "\n")
-	if len(lines) != 4 {
-		t.Fatalf("expected exactly 4 lines (summary + header + row + footer), got %d:\n%s", len(lines), view)
+	if len(lines) != 6 {
+		t.Fatalf("expected exactly 6 lines (summary + header + row + 3-row footer), got %d:\n%s", len(lines), view)
 	}
 	if strings.Contains(view, ".jsonl") {
 		t.Fatalf("view leaked a log path when none was set:\n%s", view)
@@ -729,12 +774,12 @@ func TestFooterNoLongerShowsPhaseCounts(t *testing.T) {
 		ChangeFailedMsg{Path: "/wd/failed", Change: "c", Err: "boom"},
 	)
 	view := m.View().Content
-	// The footer should mention only [q] quit; the top summary
-	// owns the counts. Locate the last line.
 	lines := strings.Split(view, "\n")
 	last := lines[len(lines)-1]
-	if !strings.Contains(last, "[q] quit") {
-		t.Fatalf("last line should still contain the quit hint:\n%s", view)
+	// The footer's last row is the help bar (no phase counts). It
+	// must mention the quit binding; the top summary owns the counts.
+	if !strings.Contains(last, "quit") {
+		t.Fatalf("last line should be the help bar mentioning quit:\n%s", view)
 	}
 	// No "N done", "N working", "N failed", "N idle", "N warning"
 	// should appear in the last line.
@@ -751,8 +796,9 @@ func TestFooterNoLongerShowsPhaseCounts(t *testing.T) {
 func TestShortTerminalCapsVisibleRows(t *testing.T) {
 	m := NewModel()
 	m.width = 120
-	// Height 12: summary (~1) + header (1) + footer (1) + error (0) = 3
-	// non-row lines, leaving 9 for rows. Add 12 repos.
+	// Height 12: summary (1) + header (1) + 3-row footer (activity,
+	// separator, help) = 5 non-row lines, leaving 7 for rows. Add 12
+	// repos; the cap (10) and the height budget (7) must both hold.
 	m.height = 12
 	for i := 0; i < 12; i++ {
 		path := "/wd/r" + string(rune('a'+i))
@@ -938,5 +984,138 @@ func TestAGEAdvancesWhileWorking(t *testing.T) {
 	cells := m.buildCells(m.rows[repo], true, false, 0)
 	if cells[4] == "—" {
 		t.Fatalf("working row with past StartedAt must show duration, got em-dash")
+	}
+}
+
+// TestHelpToggleFlipsShortAndFull pins the ? toggle: the short help
+// is one physical line; pressing ? flips to the two-line full view;
+// pressing ? again restores the short view. The activity and
+// separator rows are unchanged across the toggle (only the help row
+// changes), and both renderings reuse the same two keymap bindings.
+func TestHelpToggleFlipsShortAndFull(t *testing.T) {
+	m := NewModel()
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(*Model)
+
+	shortActivity := footerActivity(m.renderFooter())
+	shortHelp := footerHelpBlock(m.renderFooter())
+	if strings.Contains(shortHelp, "\n") {
+		t.Fatalf("short help should be one physical line: %q", shortHelp)
+	}
+	if !strings.Contains(shortHelp, "quit") || !strings.Contains(shortHelp, "help") {
+		t.Fatalf("short help missing a binding: %q", shortHelp)
+	}
+
+	// Toggle to the full view.
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "?"})
+	m = updated.(*Model)
+	if !m.help.ShowAll {
+		t.Fatal("? did not flip ShowAll to true")
+	}
+	fullActivity := footerActivity(m.renderFooter())
+	fullHelp := footerHelpBlock(m.renderFooter())
+	if !strings.Contains(fullHelp, "\n") {
+		t.Fatalf("full help should be two physical lines: %q", fullHelp)
+	}
+	if !strings.Contains(fullHelp, "quit") || !strings.Contains(fullHelp, "help") {
+		t.Fatalf("full help missing a binding: %q", fullHelp)
+	}
+	if shortActivity != fullActivity {
+		t.Fatal("activity row changed across the help toggle")
+	}
+
+	// Toggle back to the short view.
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "?"})
+	m = updated.(*Model)
+	if m.help.ShowAll {
+		t.Fatal("? did not flip ShowAll back to false")
+	}
+	if got := footerHelpBlock(m.renderFooter()); got != shortHelp {
+		t.Fatalf("toggling ? back did not restore the short help block:\n got %q\nwant %q", got, shortHelp)
+	}
+}
+
+// TestHelpBarIsProjectionOfKeymap pins that the footer's help row is
+// exactly m.help.View(m.keys): the keymap is the sole source of truth
+// for the footer chrome. (The old tickerQuit literal is a removed
+// const, so the compiler already rejects any reference to it; the
+// runtime equality below is the real source-of-truth contract.)
+func TestHelpBarIsProjectionOfKeymap(t *testing.T) {
+	m := NewModel()
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(*Model)
+
+	footer := m.renderFooter()
+	helpBlock := footerHelpBlock(footer)
+	if want := m.help.View(m.keys); helpBlock != want {
+		t.Fatalf("help row is not m.help.View(m.keys):\n got %q\nwant %q", helpBlock, want)
+	}
+}
+
+// TestHelpWidthTracksWindowSize pins that the help bar uses the help
+// package's built-in truncation: at a narrow width the help row ends
+// in an ellipsis; at a wide width both bindings fit without one.
+func TestHelpWidthTracksWindowSize(t *testing.T) {
+	m := NewModel()
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 5, Height: 24})
+	m = updated.(*Model)
+	narrow := footerHelpBlock(m.renderFooter())
+	if !strings.Contains(narrow, "…") {
+		t.Fatalf("narrow help should truncate with an ellipsis: %q", narrow)
+	}
+
+	updated, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(*Model)
+	wide := footerHelpBlock(m.renderFooter())
+	if strings.Contains(wide, "…") {
+		t.Fatalf("wide help should fit without truncation: %q", wide)
+	}
+	if !strings.Contains(wide, "quit") || !strings.Contains(wide, "help") {
+		t.Fatalf("wide help missing a binding: %q", wide)
+	}
+}
+
+// TestHelpFullViewShrinksViewportByOneRow pins the spec scenario that
+// the full (toggled) help view grows the footer by one line and so
+// shrinks the table viewport by one row at a tight height, and that
+// toggling back restores it.
+func TestHelpFullViewShrinksViewportByOneRow(t *testing.T) {
+	m := NewModel()
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 12})
+	m = updated.(*Model)
+	// Eight repos at height 12 with the short help: fixedLines = 5
+	// (summary + header + activity + separator + 1-line help), so
+	// avail = 7 and seven rows render.
+	for i := 0; i < 8; i++ {
+		path := "/wd/r" + string(rune('a'+i))
+		m = driveMessages(m,
+			RepoSeenMsg{Path: path, HasChange: true},
+			ChangeStartedMsg{Path: path, Change: "c"},
+		)
+	}
+	countWorking := func() int {
+		n := 0
+		for _, line := range strings.Split(m.View().Content, "\n") {
+			if strings.Contains(line, "●") {
+				n++
+			}
+		}
+		return n
+	}
+	if got := countWorking(); got != 7 {
+		t.Fatalf("short help at height 12 should show 7 rows, got %d", got)
+	}
+	// Toggle to the full help: the footer gains a second help line,
+	// fixedLines becomes 6, avail becomes 6.
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "?"})
+	m = updated.(*Model)
+	if got := countWorking(); got != 6 {
+		t.Fatalf("full help at height 12 should show 6 rows, got %d", got)
+	}
+	// Toggle back: the viewport grows again.
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "?"})
+	m = updated.(*Model)
+	if got := countWorking(); got != 7 {
+		t.Fatalf("short help restored should show 7 rows, got %d", got)
 	}
 }
