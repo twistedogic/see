@@ -197,6 +197,32 @@ touched (JSONL is observability, not data); copy or symlink them by
 hand if you want to keep history. Operators who set `SEE_LOG_DIR` or
 configure `log_dir` are unaffected.
 
+### Log retention
+
+`see` bounds the per-invocation agent logs to the 5 newest files per
+`<repo-basename>--<change-or-digest>` stem. The grouping is the
+filename component preceding the `--<utc-timestamp>--<pid>` suffix,
+identical to the identity the filename already encodes:
+`<repo>--<change>` in OpenSpec compatibility mode and
+`<repo>--<digest>` in custom mode. Each stem rotates independently,
+so a repository juggling several active changes keeps 5 files per
+stream rather than competing for 5 across all of them. Rotation
+runs after each `PiAgent.Run` once the just-written file is closed
+(so the newest file is never a deletion candidate while open) and
+applies whether or not the agent run succeeded — any run that
+produced a file is counted toward the stem's history. Deletion is
+best-effort: a failure to remove an older file does not fail the
+run, does not emit an event, and does not alter the `logPath` or
+error `PiAgent.Run` returns. The batch-level
+`see--<utc-timestamp>--<pid>.jsonl` event log is structurally
+excluded (different filename shape, never matches a
+`<stem>--` prefix) and is not bounded by rotation; it grows on
+process restart, a separate cadence that is left to a future
+change if it becomes a problem. The retention count is a fixed
+implementation constant (`maxInvocLogsPerStem = 5` in `eventlog.go`)
+and is not operator-configurable — add a `log_keep` knob only when
+a real need appears.
+
 ### Migration from legacy custom workflow configuration
 
 A former single custom workflow:

@@ -141,9 +141,10 @@ type PiAgent struct {
 
 // pathFor builds the per-invocation JSONL filename. Pure: no I/O,
 // no environment lookup, no fallback. The caller is responsible for
-// ensuring LogDir exists.
+// ensuring LogDir exists. The stem is delegated to invocStem so
+// the rotation selector cannot drift from the write path.
 func pathFor(repo, change string) string {
-	return logFilename(filepath.Base(repo) + "--" + change)
+	return logFilename(invocStem(repo, change))
 }
 
 func (p PiAgent) Run(ctx context.Context, path, change, prompt, model string, activity ActivityCallback) (string, error) {
@@ -159,18 +160,24 @@ func (p PiAgent) Run(ctx context.Context, path, change, prompt, model string, ac
 	if err != nil {
 		return "", fmt.Errorf("see: log file create failed: %w", err)
 	}
-	defer f.Close()
+	defer f.Close() // panic net; the explicit Close below is idempotent
 	if activity == nil {
 		cmd.Stdout = f
 		cmd.Stderr = f
-		return logPath, cmd.Run()
+	} else {
+		parser := newPiActivityParser(activity)
+		defer parser.Flush()
+		sink := &piActivitySink{file: f, parser: parser}
+		cmd.Stdout = sink
+		cmd.Stderr = sink
 	}
-	parser := newPiActivityParser(activity)
-	defer parser.Flush()
-	sink := &piActivitySink{file: f, parser: parser}
-	cmd.Stdout = sink
-	cmd.Stderr = sink
-	return logPath, cmd.Run()
+	runErr := cmd.Run()
+	// ponytail: close the per-invocation file before rotation so the
+	// just-written file is never a candidate for deletion while open;
+	// rotateLogs is best-effort and never alters the returned tuple.
+	_ = f.Close()
+	rotateLogs(p.logDir, invocStem(path, change), maxInvocLogsPerStem)
+	return logPath, runErr
 }
 
 func ListActiveOpenSpecChanges(cwd string) []string {

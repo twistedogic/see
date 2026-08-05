@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -39,6 +40,23 @@ func resolveLogDir(cfg Config) (string, error) {
 	return dir, nil
 }
 
+// maxInvocLogsPerStem bounds the per-invocation JSONL files that
+// share a stem to the newest N; older files in the same stem are
+// removed by rotateLogs after each PiAgent.Run. The value is a fixed
+// implementation constant because "JSONL is observability, not
+// data" — add an operator knob only when a real need appears.
+const maxInvocLogsPerStem = 5
+
+// invocStem returns the filename stem shared by pathFor (which
+// builds the per-invocation filename) and rotateLogs (which bounds
+// its population). Extracting it ensures the write path and the
+// rotation selector cannot drift: they agree on what "the same
+// stream" means. The digest spelling in custom mode is supplied by
+// the caller, so the helper has no knowledge of change vs digest.
+func invocStem(repo, identity string) string {
+	return filepath.Base(repo) + "--" + identity
+}
+
 // logFilename builds the `<stem>--<utc-20060102T150405>--<pid>.jsonl`
 // filename shared by the batch-level event log and the per-invocation
 // agent log. Two files with the same PID in the same UTC second are
@@ -50,6 +68,41 @@ func logFilename(stem string) string {
 		time.Now().UTC().Format("20060102T150405"),
 		os.Getpid(),
 	)
+}
+
+// rotateLogs trims the population of per-invocation JSONL files that
+// share stem inside dir to keep newest entries. Selection uses the
+// exact prefix stem+"--" plus the ".jsonl" suffix so the trailing
+// "--" prevents a stem like "myproj--add" from matching files for
+// "myproj--add-dark-mode". Recency is determined by lexicographic
+// filename sort: the embedded fixed-width YYYYMMDDTHHMMSS timestamp
+// makes that order chronological at second granularity, with no
+// os.Stat needed. After sorting ascending, the oldest files sit
+// at the front and are deleted; the newest keep files at the back
+// are retained. Each removal is best-effort; a failure to delete
+// one file does not stop the others and is silently swallowed,
+// consistent with "JSONL is observability, not data".
+func rotateLogs(dir, stem string, keep int) {
+	prefix := stem + "--"
+	suffix := ".jsonl"
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	var names []string
+	for _, e := range entries {
+		n := e.Name()
+		if strings.HasPrefix(n, prefix) && strings.HasSuffix(n, suffix) {
+			names = append(names, n)
+		}
+	}
+	if len(names) <= keep {
+		return
+	}
+	slices.Sort(names) // ascending; oldest files sit at the front
+	for _, n := range names[:len(names)-keep] {
+		_ = os.Remove(filepath.Join(dir, n))
+	}
 }
 
 // eventLogPath returns the filename for the batch-level event log.
