@@ -111,7 +111,7 @@ unknown tokens SHALL remain literal.
 
 ## MODIFIED Requirements
 
-### Requirement: Change token renders prompt, commit, and check templates
+### Requirement: Change token renders prompt and commit templates
 
 For an active workflow, `see` SHALL replace every literal `{change}`
 occurrence in that workflow's `prompt`, `commit`, and `check` (when
@@ -119,7 +119,7 @@ present) templates with the normalized change. Unknown tokens SHALL
 remain literal, and rendered values SHALL be passed directly as process
 arguments without shell evaluation.
 
-#### Scenario: Prompt, commit, and check receive the same change
+#### Scenario: Prompt and commit receive the same change
 
 - **WHEN** the normalized change is `add-dark-mode`
 - **AND** the prompt is `Apply {change}`

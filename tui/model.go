@@ -173,6 +173,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		r.Workflow = msg.Workflow
 		r.Change = msg.Change
 		r.LastErr = msg.Err
+	case CheckFailedMsg:
+		// Render identically to ChangeFailedMsg: the grid has one
+		// failed state. The two message types stay distinct at the
+		// event layer so consumers can branch on the cause.
+		r := m.ensureRow(msg.Path)
+		m.markActivity(r)
+		r.Phase = PhaseFailed
+		r.Workflow = msg.Workflow
+		r.Change = msg.Change
+		r.LastErr = msg.Err
 	case WarningMsg:
 		r := m.ensureRow(msg.Path)
 		m.markActivity(r)

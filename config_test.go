@@ -497,6 +497,46 @@ func TestLoadConfigWorkflowsWrongType(t *testing.T) {
 	}
 }
 
+// TestLoadConfigWorkflowsCheckRoundTrip: the optional `check`
+// field round-trips through the strict decoder onto WorkflowConfig.Check,
+// and an absent check decodes to "". Blank (absent or whitespace-only)
+// is the "no check gate" case; workflows behave identically to before
+// the field existed.
+func TestLoadConfigWorkflowsCheckRoundTrip(t *testing.T) {
+	base := t.TempDir()
+	body := `workflows:
+  - name: gated
+    prompt: "Apply {change}"
+    condition: "echo gated"
+    commit: "see: apply {change}"
+    check: "go test ./..."
+  - name: ungated
+    prompt: "Apply {change}"
+    condition: "echo ungated"
+    commit: "see: apply {change}"
+  - name: blank
+    prompt: "Apply {change}"
+    condition: "echo blank"
+    commit: "see: apply {change}"
+    check: "  "
+`
+	cfg, err := loadConfig(writeConfigYAML(t, base, body))
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if got := cfg.Workflows[0].Check; got != "go test ./..." {
+		t.Fatalf("Workflows[0].Check = %q, want rendered value", got)
+	}
+	if got := cfg.Workflows[1].Check; got != "" {
+		t.Fatalf("Workflows[1].Check = %q, want empty for omitted field", got)
+	}
+	// Blank check is the "no gate" case, identical to absent; it must
+	// not fail validation or decoding.
+	if got := cfg.Workflows[2].Check; got != "  " {
+		t.Fatalf("Workflows[2].Check = %q, want raw whitespace (call site trims)", got)
+	}
+}
+
 // TestLoadConfigWorkflowsUnknownField proves per-workflow entries
 // inherit the strict known-field contract: an unknown sub-field is
 // rejected so a typo does not silently disable a workflow.

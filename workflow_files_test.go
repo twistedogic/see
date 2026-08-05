@@ -112,6 +112,46 @@ func TestParseWorkflowFileDisableRoundTrip(t *testing.T) {
 	})
 }
 
+// TestParseWorkflowFileCheckRoundTrip: the optional `check`
+// frontmatter key threads onto the produced WorkflowConfig; an
+// absent check decodes to "". A sixth key (typo) continues to be
+// rejected by the strict known-field decoder.
+func TestParseWorkflowFileCheckRoundTrip(t *testing.T) {
+	t.Run("check present", func(t *testing.T) {
+		path := writeWorkflowFile(t, "openspec.md", strings.Join([]string{
+			"---",
+			"condition: \"echo add-dark-mode\"",
+			"commit: \"see: apply {change}\"",
+			"check: \"go test ./...\"",
+			"---",
+			"Apply the change.",
+		}, "\n"))
+		wf, err := parseWorkflowFile(path)
+		if err != nil {
+			t.Fatalf("parseWorkflowFile: %v", err)
+		}
+		if wf.Check != "go test ./..." {
+			t.Fatalf("Check = %q, want go test ./...", wf.Check)
+		}
+	})
+	t.Run("absent check is no gate", func(t *testing.T) {
+		path := writeWorkflowFile(t, "openspec.md", strings.Join([]string{
+			"---",
+			"condition: \"echo add-dark-mode\"",
+			"commit: \"see: apply {change}\"",
+			"---",
+			"Apply the change.",
+		}, "\n"))
+		wf, err := parseWorkflowFile(path)
+		if err != nil {
+			t.Fatalf("parseWorkflowFile: %v", err)
+		}
+		if wf.Check != "" {
+			t.Fatalf("Check = %q, want empty for absent field", wf.Check)
+		}
+	})
+}
+
 func TestParseWorkflowFileMissingOpeningDelimiter(t *testing.T) {
 	path := writeWorkflowFile(t, "openspec.md", strings.Join([]string{
 		"condition: \"echo add-dark-mode\"",

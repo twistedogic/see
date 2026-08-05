@@ -156,6 +156,16 @@ type WorkflowConfig struct {
 	Condition string `yaml:"condition"`
 	Commit    string `yaml:"commit"`
 	Model     string `yaml:"model"`
+	// Check is the optional quality gate run after a successful agent
+	// attempt and before any git landing operation. Blank (absent or
+	// whitespace-only) means the workflow has no check gate, identical
+	// to behaviour before the field existed; a nonblank value runs as
+	// a platform-shell command in the agent's working directory with
+	// `{change}` substituted under the same rule as prompt and commit.
+	// The gate is skipped on an idempotent no-op run (clean working
+	// tree) and a nonzero exit rolls back to a clean slate. See
+	// runCheck / checkFailedError for execution and error semantics.
+	Check string `yaml:"check"`
 	// Disable parks a fully-configured workflow in place: it is still
 	// validated but removed from the evaluated list so the run loop, TUI,
 	// and event stream never see it. Defaults to false (enabled); an

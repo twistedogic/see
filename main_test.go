@@ -2089,6 +2089,97 @@ func TestResolveCustomConditionFailureIncludesStderr(t *testing.T) {
 	}
 }
 
+// --- runCheck: add-workflow-check task 3.1 --------------------------------
+
+// TestRunCheckPassesOnExitZero: a command that exits 0 produces no
+// error and stderr is captured-but-ignored on success.
+func TestRunCheckPassesOnExitZero(t *testing.T) {
+	dir := t.TempDir()
+	if err := runCheck(t.Context(), dir, platformCondition(`exit 0`, `exit /b 0`)); err != nil {
+		t.Fatalf("runCheck: %v, want nil", err)
+	}
+}
+
+// TestRunCheckNonZeroReturnsCheckFailedError: a command that exits
+// nonzero produces a *checkFailedError carrying the rendered command,
+// exit code, and captured stderr. Summary() exposes the concise
+// "check failed" tier.
+func TestRunCheckNonZeroReturnsCheckFailedError(t *testing.T) {
+	dir := t.TempDir()
+	err := runCheck(t.Context(), dir, platformCondition(
+		`printf 'build failed' >&2; exit 7`,
+		`echo build failed 1>&2 & exit /b 7`,
+	))
+	if err == nil {
+		t.Fatal("runCheck returned nil error for nonzero exit")
+	}
+	var cfe *checkFailedError
+	if !errors.As(err, &cfe) {
+		t.Fatalf("err = %T, want *checkFailedError", err)
+	}
+	if cfe.command == "" {
+		t.Fatal("checkFailedError.command is empty; want rendered command")
+	}
+	if cfe.exitCode != 7 {
+		t.Fatalf("checkFailedError.exitCode = %d, want 7", cfe.exitCode)
+	}
+	if !strings.Contains(cfe.stderr, "build failed") {
+		t.Fatalf("checkFailedError.stderr = %q, want captured stderr", cfe.stderr)
+	}
+}
+
+// TestRunCheckRunsInCwd: the command's working directory is the
+// caller-supplied cwd (the agent's lane/worktree dir), not the
+// watcher's CWD. A command that creates a marker in $PWD proves it.
+func TestRunCheckRunsInCwd(t *testing.T) {
+	dir := t.TempDir()
+	marker := "check-ran-here"
+	if err := runCheck(t.Context(), dir, platformCondition(
+		`printf x > `+marker,
+		`echo x > `+marker,
+	)); err != nil {
+		t.Fatalf("runCheck: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, marker)); err != nil {
+		t.Fatalf("check did not run in cwd %s: stat err = %v", dir, err)
+	}
+}
+
+// TestRunCheckCancellationStopsShell: cancellation of the watcher
+// context terminates the check shell so SIGINT does not strand
+// descendants, matching the condition contract.
+func TestRunCheckCancellationStopsShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX sleep to drive a long-running shell")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	dir := t.TempDir()
+	result := make(chan error, 1)
+	go func() {
+		result <- runCheck(ctx, dir, `touch check-started; sleep 30`)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "check-started")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("check did not start before cancellation test deadline")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("runCheck returned nil after cancellation; want a failure")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runCheck did not stop after cancellation")
+	}
+}
+
 func TestResolveCustomConditionCancellationStopsShell(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -2963,8 +3054,207 @@ func TestCustomCatchUpCommitIsWarningFreeNoOpWhenUnchanged(t *testing.T) {
 	}
 	for _, e := range obs.events {
 		if _, ok := e.(Warning); ok {
-			t.Fatalf("unexpected warning event for unchanged run: %+v", e)
+			t.Fatalf("unexpected warning event on unchanged run: %+v", e)
 		}
+	}
+}
+
+// --- check gate: add-workflow-check tasks 4.1, 5.x, 6.x -------------------
+
+// TestCustomCheckPassesThenCatchesUp: a passing check runs in the
+// lane checkout before the catch-up commit; the catch-up commit
+// then lands with the rendered commit message and the agent's
+// changes reach the lane. The check observes the same directory
+// the agent ran in.
+func TestCustomCheckPassesThenCatchesUp(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	marker := "check-ran.txt"
+	agent := &fakeAgent{
+		onRun: func() error {
+			return os.WriteFile(filepath.Join(repo, "leftover.txt"), []byte("agent work"), 0o644)
+		},
+	}
+	obs := &recordingObserver{}
+	w := Watcher{
+		agent:          agent,
+		Condition:      condition,
+		CommitTemplate: "see: complete {change}",
+		Check:          platformCondition(`printf ok > `+marker+`; exit 0`, `echo ok > `+marker),
+		RetryCount:     1,
+		Once:           true,
+		observer:       obs,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, marker)); err != nil {
+		t.Fatalf("check did not run in lane checkout: %v", err)
+	}
+	out, err := exec.Command("git", "-C", repo, "log", "--oneline").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "see: complete add-foo") {
+		t.Fatalf("catch-up commit missing after passing check:\n%s", out)
+	}
+	var sawDone bool
+	for _, e := range obs.events {
+		if _, ok := e.(ChangeDone); ok {
+			sawDone = true
+		}
+	}
+	if !sawDone {
+		t.Fatalf("ChangeDone not emitted; events = %v", obs.eventTypes())
+	}
+}
+
+// TestCustomCheckFailureRollsBackAndYieldsCheckFailed: a failing
+// check rolls the lane back to its pre-attempt tip, creates no
+// commit, and emits CheckFailed (not ChangeFailed) as the terminal
+// event for the workflow. Captured stderr reaches the event so the
+// operator can diagnose without re-running the agent.
+func TestCustomCheckFailureRollsBackAndYieldsCheckFailed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX shell to emit a known stderr message")
+	}
+	repo := mkCleanCustomRepo(t)
+	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	agent := &fakeAgent{
+		onRun: func() error {
+			// Commit one change but leave another dirty so the
+			// check runs against the agent's leftover output.
+			if err := os.WriteFile(filepath.Join(repo, "committed.txt"), []byte("x"), 0o644); err != nil {
+				return err
+			}
+			if err := exec.Command("git", "-C", repo, "add", "-A").Run(); err != nil {
+				return err
+			}
+			if err := exec.Command("git", "-C", repo, "commit", "-q", "-m", "agent commit").Run(); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(repo, "leftover.txt"), []byte("agent work"), 0o644)
+		},
+	}
+	obs := &recordingObserver{}
+	w := Watcher{
+		agent:          agent,
+		Condition:      condition,
+		CommitTemplate: "see: complete {change}",
+		Check:          `printf 'build failed' >&2; exit 7`,
+		RetryCount:     1,
+		Once:           true,
+		observer:       obs,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err == nil {
+		t.Fatal("Watch returned nil; check failure must propagate so runWithRetry retries")
+	}
+	digest := customChangeDigest("add-foo")
+	if branchExists(t, repo, "see/"+digest) {
+		t.Fatalf("rolled-back lane should be deleted; see/%s still exists", digest)
+	}
+	if got := currentBranch(t, repo); got != "main" {
+		t.Fatalf("current branch = %q, want main (rollback restored source)", got)
+	}
+	out, err := exec.Command("git", "-C", repo, "log", "--oneline", "main").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "agent commit") || strings.Contains(string(out), "see: complete add-foo") {
+		t.Fatalf("attempt's commits leaked into main:\n%s", out)
+	}
+	var sawCheckFailed bool
+	var sawChangeFailed bool
+	for _, e := range obs.events {
+		if cf, ok := e.(CheckFailed); ok {
+			sawCheckFailed = true
+			if cf.Change != "add-foo" {
+				t.Fatalf("CheckFailed.Change = %q, want add-foo", cf.Change)
+			}
+			if cf.ExitCode != 7 {
+				t.Fatalf("CheckFailed.ExitCode = %d, want 7", cf.ExitCode)
+			}
+			if !strings.Contains(cf.Err, "build failed") {
+				t.Fatalf("CheckFailed.Err = %q, want captured stderr", cf.Err)
+			}
+		}
+		if _, ok := e.(ChangeFailed); ok {
+			sawChangeFailed = true
+		}
+	}
+	if !sawCheckFailed {
+		t.Fatalf("CheckFailed not emitted; events = %v", obs.eventTypes())
+	}
+	if sawChangeFailed {
+		t.Fatalf("ChangeFailed emitted alongside CheckFailed; only one should fire")
+	}
+}
+
+// TestCustomCheckSkippedOnNoOp: when the agent leaves no working-tree
+// changes, the check is skipped and the run stays a warning-free
+// no-op. The check's marker file must not appear on disk.
+func TestCustomCheckSkippedOnNoOp(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	agent := &fakeAgent{} // success, no file changes
+	obs := &recordingObserver{}
+	w := Watcher{
+		agent:          agent,
+		Condition:      condition,
+		CommitTemplate: "see: complete {change}",
+		Check:          `printf ran > check-ran.txt`,
+		RetryCount:     1,
+		Once:           true,
+		observer:       obs,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "check-ran.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("check ran despite no-op agent; stat err = %v", err)
+	}
+	for _, e := range obs.events {
+		if _, ok := e.(Warning); ok {
+			t.Fatalf("unexpected warning event on no-op run: %+v", e)
+		}
+	}
+}
+
+// TestCustomCheckRendersChange: the {change} token in the check
+// command is replaced with the normalized change value before
+// execution, matching the prompt/commit substitution rule.
+func TestCustomCheckRendersChange(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	agent := &fakeAgent{
+		onRun: func() error {
+			return os.WriteFile(filepath.Join(repo, "leftover.txt"), []byte("agent work"), 0o644)
+		},
+	}
+	// The check writes the value of {change} to a marker file so
+	// the test can read it back and assert the rendered command.
+	marker := "change-rendered.txt"
+	checkCmd := platformCondition(
+		`printf '%s' "{change}" > `+marker,
+		`echo {change} > `+marker,
+	)
+	w := Watcher{
+		agent:          agent,
+		Condition:      condition,
+		CommitTemplate: "see: complete {change}",
+		Check:          checkCmd,
+		RetryCount:     1,
+		Once:           true,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(repo, marker))
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if want := "add-foo"; strings.TrimSpace(string(got)) != want {
+		t.Fatalf("rendered change = %q, want %q", strings.TrimSpace(string(got)), want)
 	}
 }
 
@@ -4616,4 +4906,274 @@ func TestWorktreeRootDefaultAndOverride(t *testing.T) {
 			t.Fatalf("root = %q, want empty in branch mode", root)
 		}
 	})
+}
+
+// --- check gate (worktree + retry + TUI): add-workflow-check tasks 4.2/4.3/6.1/7.6 ---
+
+// TestWorktreeCheckPassesThenMerges: in worktree + auto-merge mode
+// the check runs in the worktree directory before the catch-up
+// commit + rebase + ff-merge. A passing check proceeds exactly as
+// without a check; main receives the agent's commits.
+func TestWorktreeCheckPassesThenMerges(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "proj")
+	mkRepoWithChange(t, repo, "task-1")
+	wtRoot := t.TempDir()
+	digest := customChangeDigest("task-1")
+	wantWorktree := filepath.Join(wtRoot, filepath.Base(repo)+"--"+digest)
+	marker := "check-ran.txt"
+	agent := &fakeAgent{
+		onRun: func() error {
+			// Leave a tracked-and-committed file plus an untracked
+			// marker so the working tree is dirty when the check runs.
+			if err := os.WriteFile(filepath.Join(wantWorktree, "committed.txt"), []byte("x"), 0o644); err != nil {
+				return err
+			}
+			gitRun(t, wantWorktree, "add", "-A")
+			if err := exec.Command("git", "-C", wantWorktree, "commit", "-q", "-m", "agent").Run(); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(wantWorktree, marker), []byte("ok"), 0o644)
+		},
+	}
+	obs := &recordingObserver{}
+	w := Watcher{
+		agent:          agent,
+		Condition:      platformCondition(`printf 'task-1'`, `echo task-1`),
+		CommitTemplate: "see: {change}",
+		Check:          platformCondition(`exit 0`, `exit /b 0`),
+		Worktree:       true,
+		AutoMerge:      true,
+		WorktreeRoot:   wtRoot,
+		RetryCount:     1,
+		Once:           true,
+		observer:       obs,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "committed.txt")); err != nil {
+		t.Fatalf("agent commit not merged onto main: %v", err)
+	}
+	if branchExists(t, repo, "see/"+digest) {
+		t.Fatal("lane should be cleaned up after auto-merge")
+	}
+	var sawDone bool
+	for _, e := range obs.events {
+		if _, ok := e.(ChangeDone); ok {
+			sawDone = true
+		}
+	}
+	if !sawDone {
+		t.Fatalf("ChangeDone not emitted; events = %v", obs.eventTypes())
+	}
+}
+
+// TestWorktreeCheckFailureRemovesWorktreeAndLane: a failing check in
+// worktree + auto-merge mode removes the worktree directory, deletes
+// the lane with -D, leaves the operator untouched, and emits
+// CheckFailed as the terminal event (not ChangeFailed).
+func TestWorktreeCheckFailureRemovesWorktreeAndLane(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX shell to emit a known stderr message")
+	}
+	repo := filepath.Join(t.TempDir(), "proj")
+	mkRepoWithChange(t, repo, "task-1")
+	wtRoot := t.TempDir()
+	digest := customChangeDigest("task-1")
+	wantWorktree := filepath.Join(wtRoot, filepath.Base(repo)+"--"+digest)
+	agent := &fakeAgent{
+		onRun: func() error {
+			// Commit one file but leave another untracked so the
+			// working tree is dirty when the check runs.
+			if err := os.WriteFile(filepath.Join(wantWorktree, "committed.txt"), []byte("x"), 0o644); err != nil {
+				return err
+			}
+			gitRun(t, wantWorktree, "add", "-A")
+			if err := exec.Command("git", "-C", wantWorktree, "commit", "-q", "-m", "agent").Run(); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(wantWorktree, "leftover.txt"), []byte("agent work"), 0o644)
+		},
+	}
+	obs := &recordingObserver{}
+	w := Watcher{
+		agent:          agent,
+		Condition:      platformCondition(`printf 'task-1'`, `echo task-1`),
+		CommitTemplate: "see: {change}",
+		Check:          `printf 'build failed' >&2; exit 7`,
+		Worktree:       true,
+		AutoMerge:      true,
+		WorktreeRoot:   wtRoot,
+		RetryCount:     1,
+		Once:           true,
+		observer:       obs,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err == nil {
+		t.Fatal("Watch returned nil; check failure must propagate")
+	}
+	if _, err := os.Stat(wantWorktree); !os.IsNotExist(err) {
+		t.Fatal("worktree should be removed after failed check")
+	}
+	if branchExists(t, repo, "see/"+digest) {
+		t.Fatalf("lane should be deleted after failed check; see/%s still exists", digest)
+	}
+	if got := currentBranch(t, repo); got != "main" {
+		t.Fatalf("operator branch = %q, want main", got)
+	}
+	out, err := exec.Command("git", "-C", repo, "log", "--oneline", "main").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "agent") {
+		t.Fatalf("agent's commit leaked onto main:\n%s", out)
+	}
+	var sawCheckFailed bool
+	var sawChangeFailed bool
+	for _, e := range obs.events {
+		if _, ok := e.(CheckFailed); ok {
+			sawCheckFailed = true
+		}
+		if _, ok := e.(ChangeFailed); ok {
+			sawChangeFailed = true
+		}
+	}
+	if !sawCheckFailed {
+		t.Fatalf("CheckFailed not emitted; events = %v", obs.eventTypes())
+	}
+	if sawChangeFailed {
+		t.Fatalf("ChangeFailed emitted alongside CheckFailed")
+	}
+}
+
+// TestWorktreeManualMergeCheckFailureRollsBack: in worktree +
+// manual-merge mode a failing check also removes the worktree and
+// deletes the lane, since worktree mode never preserves a failed
+// attempt regardless of auto_merge. The terminal event is
+// CheckFailed.
+func TestWorktreeManualMergeCheckFailureRollsBack(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX shell to emit a known stderr message")
+	}
+	repo := filepath.Join(t.TempDir(), "proj")
+	mkRepoWithChange(t, repo, "task-1")
+	wtRoot := t.TempDir()
+	digest := customChangeDigest("task-1")
+	wantWorktree := filepath.Join(wtRoot, filepath.Base(repo)+"--"+digest)
+	agent := &fakeAgent{
+		onRun: func() error {
+			if err := os.WriteFile(filepath.Join(wantWorktree, "committed.txt"), []byte("x"), 0o644); err != nil {
+				return err
+			}
+			gitRun(t, wantWorktree, "add", "-A")
+			if err := exec.Command("git", "-C", wantWorktree, "commit", "-q", "-m", "agent").Run(); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(wantWorktree, "leftover.txt"), []byte("agent work"), 0o644)
+		},
+	}
+	obs := &recordingObserver{}
+	w := Watcher{
+		agent:          agent,
+		Condition:      platformCondition(`printf 'task-1'`, `echo task-1`),
+		CommitTemplate: "see: {change}",
+		Check:          `exit 9`,
+		Worktree:       true,
+		AutoMerge:      false,
+		WorktreeRoot:   wtRoot,
+		RetryCount:     1,
+		Once:           true,
+		observer:       obs,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err == nil {
+		t.Fatal("Watch returned nil; check failure must propagate")
+	}
+	if _, err := os.Stat(wantWorktree); !os.IsNotExist(err) {
+		t.Fatal("worktree should be removed after failed check")
+	}
+	if branchExists(t, repo, "see/"+digest) {
+		t.Fatalf("lane should be deleted after failed check; see/%s still exists", digest)
+	}
+	var sawCheckFailed bool
+	for _, e := range obs.events {
+		if _, ok := e.(CheckFailed); ok {
+			sawCheckFailed = true
+		}
+	}
+	if !sawCheckFailed {
+		t.Fatalf("CheckFailed not emitted; events = %v", obs.eventTypes())
+	}
+}
+
+// TestCheckFailureRetriesAndYieldsCheckFailed: a check failure
+// retries up to RetryCount, each attempt re-runs the agent from a
+// clean slate, and the terminal event after the final failure is
+// CheckFailed. RetryAttempt events between attempts carry the
+// check-failure summary.
+func TestCheckFailureRetriesAndYieldsCheckFailed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX shell to emit a known stderr message")
+	}
+	repo := mkCleanCustomRepo(t)
+	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	var runs int
+	agent := &fakeAgent{
+		onRun: func() error {
+			runs++
+			return os.WriteFile(filepath.Join(repo, "leftover.txt"), []byte(fmt.Sprintf("attempt-%d", runs)), 0o644)
+		},
+	}
+	obs := &recordingObserver{}
+	w := Watcher{
+		agent:          agent,
+		Condition:      condition,
+		CommitTemplate: "see: complete {change}",
+		Check:          `printf 'build failed' >&2; exit 7`,
+		RetryCount:     2,
+		Once:           true,
+		observer:       obs,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err == nil {
+		t.Fatal("Watch returned nil; exhausted check failure must propagate")
+	}
+	if runs != 2 {
+		t.Fatalf("agent runs = %d, want 2 (RetryCount)", runs)
+	}
+	// RetryAttempt events between attempts carry the concise
+	// "check failed" summary, derived from the prior *checkFailedError.
+	var sawRetryAttempt bool
+	for _, e := range obs.events {
+		if ra, ok := e.(RetryAttempt); ok {
+			if ra.N < 1 || ra.N > ra.Max {
+				t.Fatalf("RetryAttempt N=%d Max=%d out of range", ra.N, ra.Max)
+			}
+			sawRetryAttempt = true
+		}
+	}
+	if !sawRetryAttempt {
+		t.Fatalf("RetryAttempt events missing; events = %v", obs.eventTypes())
+	}
+	var sawCheckFailed bool
+	var sawChangeFailed bool
+	for _, e := range obs.events {
+		if _, ok := e.(CheckFailed); ok {
+			sawCheckFailed = true
+		}
+		if _, ok := e.(ChangeFailed); ok {
+			sawChangeFailed = true
+		}
+	}
+	if !sawCheckFailed {
+		t.Fatalf("CheckFailed not emitted; events = %v", obs.eventTypes())
+	}
+	if sawChangeFailed {
+		t.Fatalf("ChangeFailed emitted alongside CheckFailed")
+	}
+	// Lane deleted on rollback; main untouched.
+	digest := customChangeDigest("add-foo")
+	if branchExists(t, repo, "see/"+digest) {
+		t.Fatalf("rolled-back lane see/%s still exists", digest)
+	}
+	if got := currentBranch(t, repo); got != "main" {
+		t.Fatalf("current branch = %q, want main", got)
+	}
 }

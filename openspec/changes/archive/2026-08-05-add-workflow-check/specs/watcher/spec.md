@@ -2,7 +2,7 @@
 
 ## MODIFIED Requirements
 
-### Requirement: Successful custom runs run the check gate, then create a catch-up commit only for staged changes
+### Requirement: Successful custom runs create a catch-up commit only for staged changes
 
 After a custom agent run succeeds in branch mode, `Watcher` SHALL, if
 the workflow defines a `check` and the working tree is dirty with

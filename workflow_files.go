@@ -24,9 +24,17 @@ type workflowFileFrontmatter struct {
 	Condition string `yaml:"condition"` // required, nonblank
 	Commit    string `yaml:"commit"`    // required, nonblank
 	Model     string `yaml:"model"`     // optional; blank falls back to agent default
+	// Check is the optional quality gate run after a successful agent
+	// attempt and before any git landing operation. Absent or blank
+	// means the workflow has no check gate; a nonblank value runs as
+	// a platform-shell command in the agent's working directory with
+	// `{change}` substituted under the same rule as prompt and commit.
+	// See runCheck / checkFailedError in main.go for execution and
+	// error semantics.
+	Check string `yaml:"check"`
 	// Disable is an optional boolean; absent means enabled. Threaded
 	// onto the produced WorkflowConfig like Model. The strict decoder
-	// still rejects any sixth key.
+	// still rejects any seventh key.
 	Disable bool `yaml:"disable"`
 }
 
@@ -82,6 +90,7 @@ func parseWorkflowFile(path string) (WorkflowConfig, error) {
 		Condition: fm.Condition,
 		Commit:    fm.Commit,
 		Model:     fm.Model,
+		Check:     fm.Check,
 		Disable:   fm.Disable,
 	}, nil
 }

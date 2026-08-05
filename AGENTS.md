@@ -99,6 +99,7 @@ workflows:
       Apply the OpenSpec change "{change}".
     condition: "git rev-parse --abbrev-ref HEAD"
     commit: "see: apply {change}"
+    # check: "openspec validate {change}"   # optional quality gate; absent or blank = no gate
   - name: dependencies
     prompt: |-
       Update the dependency identified by "{change}".
@@ -143,6 +144,11 @@ workflows:
   nonzero status is a failure.
 - A workflow `commit` is the catch-up commit message template. The same
   `{change}` substitution rule applies.
+- A workflow `check` is an optional platform-shell command run after a
+  successful agent attempt and before any git landing operation. The same
+  shell contract and `{change}` substitution rule apply as `condition`.
+  Absent or whitespace-only means the workflow has no gate, identical to
+  behavior before the field existed. See [Check gate](#check-gate) below.
 - `worktree` (boolean, default `false`) selects lane isolation. `false`
   (the default) is **branch** mode: the agent runs in the operator's
   checkout and success leaves the checkout on the lane. `true` is
@@ -339,10 +345,10 @@ Custom workflows may also be direct, non-hidden `.md` children of
 `workflows_dir`. The filename without `.md` is the workflow name and determines
 alphabetical execution order; a frontmatter `name` key is accepted but ignored.
 YAML frontmatter supplies required `condition` and `commit` values and an
-optional `model` and `disable` (default `false`, parks the workflow), while
-the Markdown body is the prompt. File workflows run
-before `config.yaml` workflows, and a name collision between the sources fails
-startup.
+optional `model`, `disable` (default `false`, parks the workflow), and `check`
+(absent or blank means no gate), while the Markdown body is the prompt. File
+workflows run before `config.yaml` workflows, and a name collision between the
+sources fails startup.
 
 Custom workflows run under whichever [lane isolation mode](#lane-isolation-modes)
 the operator selected (`branch` by default, `worktree` opt-in); the mode applies
@@ -482,6 +488,50 @@ condition, so a retry can:
 - exit `1` and become idle (no `ChangeFailed`),
 - select a different change value and switch to the corresponding
   lane.
+
+A check failure behaves like an agent failure for retry purposes: it
+returns an error, `runWithRetry` retries up to `RetryCount` times,
+each retry re-resolves the change and re-runs the agent from a
+clean slate, and the terminal event for the final failure is
+`CheckFailed` (not `ChangeFailed`). `RetryAttempt` events between
+attempts carry the concise "check failed" summary unchanged.
+
+### Check gate
+
+A configured workflow may carry an optional `check` shell command
+that runs after a successful agent attempt and before any git
+landing operation. The command uses the same platform-shell contract
+as `condition` (`/bin/sh -c` on Unix, `cmd.exe /C` on Windows), the
+watcher context is attached, and on Unix the shell runs in its own
+process group so cancellation does not strand descendants. The
+literal token `{change}` is substituted under the same rule as
+`prompt`, `condition`, and `commit`.
+
+- **No-op skip.** The check runs only when the working tree is dirty
+  with changes to land (the same dirtiness check that gates the
+  catch-up commit). An idempotent successful run whose agent committed
+  everything itself or changed nothing stays warning-free and skips
+  the check, so a routine poll never spins up a test suite.
+- **Pass.** Exit status `0` lets the existing landing path run
+  unchanged: branch-mode catch-up commit, or worktree-mode catch-up
+  commit + rebase (+ fast-forward merge when `auto_merge: true`).
+- **Fail.** Any nonzero exit produces a `*checkFailedError` carrying
+  the rendered command, the integer exit code, and the captured
+  stderr. The active mode rolls back to a clean slate (branch mode:
+  reset to the pre-attempt lane tip + `git clean -fd`; worktree
+  mode: remove the worktree + delete the lane with `-D`). No commit
+  is ever created for the attempt, and the operator's checkout is
+  untouched in worktree mode.
+- **Retry.** A check failure flows through `runWithRetry` like an
+  agent failure: the agent gets up to `RetryCount` fresh attempts per
+  poll to satisfy the gate.
+- **Terminal event.** When the final attempt for a repository fails
+  at the check, `runOnce` emits a `CheckFailed` event (carrying the
+  rendered command, exit code, and stderr) instead of `ChangeFailed`.
+  The two are mutually exclusive for the same final failure; the
+  selection is driven by `errors.As` on `*checkFailedError` so a
+  rollback wrapper around the sentinel still selects the check
+  variant.
 
 ### JSONL event payload migration
 

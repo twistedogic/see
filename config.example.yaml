@@ -46,6 +46,7 @@
 #       Apply the OpenSpec change "{change}".
 #     condition: "git rev-parse --abbrev-ref HEAD"
 #     commit: "see: apply {change}"
+#     check: "openspec validate {change}"   # optional quality gate; absent or blank = no gate
 #   - name: dependencies
 #     prompt: "Update dependency {change}."
 #     condition: "./scripts/next-dependency-update"

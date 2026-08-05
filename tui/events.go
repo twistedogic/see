@@ -48,6 +48,21 @@ type ChangeFailedMsg struct {
 	Err      string
 }
 
+// CheckFailedMsg is the TUI mirror of main's CheckFailed event: the
+// final attempt for a repository failed at the workflow check gate.
+// It renders like ChangeFailedMsg (the row goes to PhaseFailed with
+// the failure message in the error column) but is distinguished at
+// the event layer so consumers that treat "check failed" differently
+// from "agent failed" can branch on the message type.
+type CheckFailedMsg struct {
+	Path     string
+	Workflow string
+	Change   string
+	Command  string
+	ExitCode int
+	Err      string
+}
+
 // WarningMsg reports a per-repo cleanup or pre-run check step that
 // failed. The TUI renders a ⚠ glyph next to the repo's row and
 // counts the row in the footer's warning counter until the next

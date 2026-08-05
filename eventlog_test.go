@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -412,5 +413,69 @@ func TestPiAgentRunRotationBothModes(t *testing.T) {
 	}
 	if got := listStem(t, logDir, invocStem(repo, digest)); len(got) != maxInvocLogsPerStem {
 		t.Fatalf("custom stem has %d files, want %d: %v", len(got), maxInvocLogsPerStem, got)
+	}
+}
+
+// Regression for add-workflow-check task 5.2/5.3: the JSONL
+// serializer must accept CheckFailed as a payload variant and
+// surface Command, ExitCode, and the captured Err verbatim. The
+// unexported summary field stays off the wire; consumers
+// distinguish check failures by payload type rather than parsing
+// the message string.
+func TestEventLoggerMarshalsCheckFailed(t *testing.T) {
+	dir := t.TempDir()
+	logger, err := openEventLogger(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logger.Close()
+
+	logger.Observe(CheckFailed{
+		Path:     "/repos/myrepo",
+		Workflow: "openspec",
+		Change:   "add-dark-mode",
+		Command:  "go test ./...",
+		ExitCode: 7,
+		Err:      "build failed",
+		summary:  "check failed",
+	})
+
+	files, err := filepath.Glob(filepath.Join(dir, "see--*.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("event log file count = %d, want 1", len(files))
+	}
+	body, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("got %d JSONL lines, want 1:\n%s", len(lines), body)
+	}
+	var entry struct {
+		Event map[string]any `json:"event"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &entry); err != nil {
+		t.Fatalf("line is not valid JSON: %v\n%s", err, lines[0])
+	}
+	for _, want := range []string{"Path", "Workflow", "Change", "Command", "ExitCode", "Err"} {
+		if _, ok := entry.Event[want]; !ok {
+			t.Fatalf("event payload missing %q: %v", want, entry.Event)
+		}
+	}
+	if _, leaked := entry.Event["summary"]; leaked {
+		t.Fatalf("event leaked unexported 'summary' field: %v", entry.Event)
+	}
+	if _, hasChange := entry.Event["HasChange"]; hasChange {
+		t.Fatalf("CheckFailed payload should not carry HasChange: %v", entry.Event)
+	}
+	if got, want := entry.Event["ExitCode"], float64(7); got != want {
+		t.Fatalf("ExitCode = %v, want %v", got, want)
+	}
+	if got, want := entry.Event["Err"], "build failed"; got != want {
+		t.Fatalf("Err = %v, want %q", got, want)
 	}
 }

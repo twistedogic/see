@@ -40,3 +40,26 @@ func (e *dirtyWorkingTreeError) Error() string {
 func (e *dirtyWorkingTreeError) Summary() string {
 	return "dirty working tree; commit or stash"
 }
+
+// checkFailedError reports that a workflow's check gate exited
+// nonzero after a successful agent run. The rendered command, exit
+// code, and captured stderr are carried so retries can summarize
+// the failure and the terminal CheckFailed event has everything it
+// needs without re-running the shell. Error() prefixes the rendered
+// command and surfaces stderr; Summary() exposes the concise
+// "check failed" tier so the TUI grid and RetryAttempt events stay
+// short. The sentinel implements errorSummary so errors.As walks
+// any rollback wrapper cleanly.
+type checkFailedError struct {
+	command  string
+	exitCode int
+	stderr   string
+}
+
+func (e *checkFailedError) Error() string {
+	return fmt.Sprintf("see: check failed: %s (exit %d): %s", e.command, e.exitCode, e.stderr)
+}
+
+func (e *checkFailedError) Summary() string {
+	return "check failed"
+}

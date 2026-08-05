@@ -2,7 +2,7 @@
 
 ## MODIFIED Requirements
 
-### Requirement: Worktree + auto-merge runs the check gate, rebases onto the operator's branch, and fast-forward merges
+### Requirement: Worktree + auto-merge rebases onto the operator's branch and fast-forward merges
 
 When worktree mode is active and `auto_merge` is true, on a successful
 agent run `see` SHALL:
@@ -106,7 +106,7 @@ deleted, operator's checkout untouched) and return the error.
   is preserved on their branch)
 - **AND** the attempt returns the merge error
 
-### Requirement: Worktree + manual-merge runs the check gate, rebases onto the operator's branch, and preserves the lane
+### Requirement: Worktree + manual-merge rebases onto the operator's branch and preserves the lane
 
 When worktree mode is active and `auto_merge` is false, on a successful
 agent run `see` SHALL:

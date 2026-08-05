@@ -102,6 +102,43 @@ func resolveCustomCondition(ctx context.Context, path, condition string) (string
 	return change, nil
 }
 
+// runCheck executes command in cwd through the platform shell using
+// the same context / process-group plumbing as resolveCustomCondition.
+// Status 0 passes; any nonzero exit produces a *checkFailedError
+// carrying the rendered command, the integer exit code, and the
+// captured stderr. Cancellation of ctx terminates the shell so
+// SIGINT does not strand descendants; the resulting error is the
+// context error so callers can distinguish it from a check failure.
+func runCheck(ctx context.Context, cwd, command string) error {
+	var shell string
+	var args []string
+	if runtime.GOOS == "windows" {
+		shell, args = "cmd.exe", []string{"/C", command}
+	} else {
+		shell, args = "/bin/sh", []string{"-c", command}
+	}
+
+	cmd := exec.CommandContext(ctx, shell, args...)
+	configureConditionCommand(cmd)
+	cmd.Dir = cwd
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return &checkFailedError{command: command, exitCode: exitErr.ExitCode(), stderr: strings.TrimSpace(stderr.String())}
+		}
+		// Non-exit errors (fork/exec failures) still surface as a
+		// check failure with the captured stderr and a synthetic
+		// exit code so the rollback path treats them uniformly.
+		return &checkFailedError{command: command, exitCode: -1, stderr: strings.TrimSpace(stderr.String())}
+	}
+	return nil
+}
+
 type runMode int
 
 const (
@@ -349,6 +386,29 @@ func (w Watcher) rollbackWorkflowLane(path, change, digest, ref, commit string, 
 // resumes the same persistent branch.
 func (w Watcher) catchUpCustomCommit(path, change string) error {
 	return stageAndCommitIfDirty(path, w.catchUpMessage(change))
+}
+
+// runWorkflowCheckIfDirty runs the configured check gate against
+// the agent's working directory when both conditions hold: the
+// watcher has a nonblank Check and the working tree carries changes
+// to land. A clean working tree is the existing warning-free no-op
+// case (the agent committed everything or changed nothing); the
+// check is skipped there so an idempotent poll never spins up a
+// test suite. The check failure is the sentinel *checkFailedError;
+// any non-check error (e.g. context cancellation) bubbles up
+// untouched.
+func (w Watcher) runWorkflowCheckIfDirty(ctx context.Context, cwd, change string) error {
+	if !w.checkEnabled() {
+		return nil
+	}
+	dirty, err := hasUntrackedOrModified(cwd)
+	if err != nil {
+		return err
+	}
+	if !dirty {
+		return nil
+	}
+	return runCheck(ctx, cwd, renderTemplate(w.Check, change))
 }
 
 // catchUpMessage returns the catch-up commit message for change in
@@ -640,6 +700,29 @@ type ChangeFailed struct {
 
 func (ChangeFailed) isEvent() {}
 
+// CheckFailed is the terminal event when the final attempt for a
+// repository failed at the workflow check gate. The check exited
+// nonzero after a successful agent run, the per-mode rollback
+// discarded the attempt's working-tree changes, and no commit was
+// created. It is mutually exclusive with ChangeFailed for the same
+// final failure: errors.As on *checkFailedError selects this event
+// in runOnce, ChangeFailed otherwise. Command is the rendered check
+// command (after {change} substitution); ExitCode is the integer
+// shell exit code; Err is the captured stderr (trimmed) for
+// JSONL and TUI surfaces.
+type CheckFailed struct {
+	Path     string
+	Workflow string
+	Change   string
+	Command  string
+	ExitCode int
+	Err      string
+	// summary: see RetryAttempt.summary.
+	summary string
+}
+
+func (CheckFailed) isEvent() {}
+
 type LogPath struct {
 	Path     string
 	Workflow string
@@ -712,6 +795,16 @@ type Watcher struct {
 	// SetCommitTemplate to apply the trimming rule rather than
 	// assigning directly.
 	CommitTemplate string
+	// Check is the optional quality gate run after a successful agent
+	// run and before any git landing operation. Blank means the
+	// workflow has no check gate; a nonblank value runs as a
+	// platform-shell command in the agent's working directory with
+	// `{change}` substituted. The gate is skipped on an idempotent
+	// no-op run (clean working tree) and a nonzero exit rolls back
+	// to a clean slate. See runCheck / checkFailedError for execution
+	// and error semantics. The runtime check is trimmed; whitespace-
+	// only is treated as absent so callers do not have to.
+	Check string
 	// Workflows is the ordered multi-workflow configuration. When
 	// non-empty, Watcher iterates over each workflow for every
 	// repository instead of falling through to the legacy
@@ -774,6 +867,23 @@ func (w *Watcher) SetPromptTemplate(s string) {
 // cannot surface a "nothing to commit" warning in the common path.
 func (w *Watcher) SetCommitTemplate(s string) {
 	w.CommitTemplate = strings.TrimSpace(s)
+}
+
+// SetCheckTemplate stores s as the effective check gate command,
+// trimming surrounding whitespace. A blank trimmed value means
+// "no gate" so a workflow that has a check in its config but a
+// whitespace-only runtime override behaves identically to omitting
+// the field. The trimmed value is the rendered form; runCheck does
+// no further normalisation.
+func (w *Watcher) SetCheckTemplate(s string) {
+	w.Check = strings.TrimSpace(s)
+}
+
+// checkEnabled reports whether the watcher has a nonblank check
+// gate. Trimmed comparison keeps the contract simple for callers:
+// the watcher copy carries the trimmed value (see runOneWorkflow).
+func (w Watcher) checkEnabled() bool {
+	return strings.TrimSpace(w.Check) != ""
 }
 
 // NewWatcher constructs a fully-populated Watcher. PiAgent fields are
@@ -861,6 +971,10 @@ func (w Watcher) workResolvedWorktree(ctx context.Context, path, change, ref str
 	if runErr != nil {
 		return w.rollbackWorktree(path, digest, worktreePath, runErr)
 	}
+	if checkErr := w.runWorkflowCheckIfDirty(ctx, worktreePath, change); checkErr != nil {
+		w.warn(path, change, checkErr.Error())
+		return w.rollbackWorktree(path, digest, worktreePath, checkErr)
+	}
 	if w.AutoMerge {
 		if err := w.mergeWorktreeLane(path, ref, worktreePath, digest, change); err != nil {
 			return w.rollbackWorktree(path, digest, worktreePath, err)
@@ -920,6 +1034,10 @@ func (w Watcher) workResolved(ctx context.Context, path, change string) error {
 		}
 		if runErr != nil {
 			return w.rollbackWorkflowLane(path, change, digest, ref, attemptTip, created, runErr)
+		}
+		if checkErr := w.runWorkflowCheckIfDirty(ctx, path, change); checkErr != nil {
+			w.warn(path, change, checkErr.Error())
+			return w.rollbackWorkflowLane(path, change, digest, ref, attemptTip, created, checkErr)
 		}
 		if commitErr := w.catchUpCustomCommit(path, change); commitErr != nil {
 			w.warn(path, change, commitErr.Error())
@@ -997,8 +1115,7 @@ func (w Watcher) runOnce(ctx context.Context, repos []string) error {
 				for _, wf := range w.Workflows {
 					changeName, err := w.runOneWorkflow(ctx, repo, wf)
 					if err != nil && w.observer != nil {
-						errStr := err.Error()
-						w.observer.Observe(ChangeFailed{Path: repo, Workflow: wf.Name, Change: changeName, Err: errStr, summary: summaryFor(err)})
+						w.observeWorkflowFailure(repo, wf.Name, changeName, err)
 					}
 				}
 				continue
@@ -1006,8 +1123,7 @@ func (w Watcher) runOnce(ctx context.Context, repos []string) error {
 			lastChange, err := w.runWithRetry(ctx, repo)
 			if err != nil {
 				if w.observer != nil {
-					errStr := err.Error()
-					w.observer.Observe(ChangeFailed{Path: repo, Change: lastChange, Err: errStr, summary: summaryFor(err)})
+					w.observeWorkflowFailure(repo, w.WorkflowName, lastChange, err)
 				}
 				return fmt.Errorf("%s: %w", repo, err)
 			}
@@ -1018,6 +1134,34 @@ func (w Watcher) runOnce(ctx context.Context, repos []string) error {
 
 func (w Watcher) runAgent(ctx context.Context, path, change, prompt, model string) (string, error) {
 	return w.agent.Run(ctx, path, change, prompt, model, w.activity)
+}
+
+// observeWorkflowFailure emits the terminal event for a failed
+// workflow: CheckFailed when the final error is a check failure,
+// ChangeFailed otherwise. The two are mutually exclusive — the
+// selection is driven by errors.As walking the wrapping chain so a
+// rollback wrapper around *checkFailedError still selects the
+// check variant. Command, ExitCode, and Err on CheckFailed come
+// straight from the sentinel.
+func (w Watcher) observeWorkflowFailure(repo, workflow, change string, err error) {
+	if w.observer == nil {
+		return
+	}
+	var cfe *checkFailedError
+	if errors.As(err, &cfe) {
+		w.observer.Observe(CheckFailed{
+			Path:     repo,
+			Workflow: workflow,
+			Change:   change,
+			Command:  cfe.command,
+			ExitCode: cfe.exitCode,
+			Err:      cfe.stderr,
+			summary:  summaryFor(err),
+		})
+		return
+	}
+	errStr := err.Error()
+	w.observer.Observe(ChangeFailed{Path: repo, Workflow: workflow, Change: change, Err: errStr, summary: summaryFor(err)})
 }
 
 func (w *Watcher) SetActivityCallback(activity ActivityCallback) { w.activity = activity }
@@ -1036,6 +1180,7 @@ func (w Watcher) runOneWorkflow(ctx context.Context, repo string, wf WorkflowCon
 	child.WorkflowName = wf.Name
 	child.Model = strings.TrimSpace(wf.Model)
 	child.SetPromptTemplate(wf.Prompt)
+	child.SetCheckTemplate(wf.Check)
 	return child.runWithRetry(ctx, repo)
 }
 
@@ -1247,6 +1392,8 @@ func (o tuiObserver) Observe(e Event) {
 		o.send(tui.ChangeDoneMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change})
 	case ChangeFailed:
 		o.send(tui.ChangeFailedMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change, Err: pickSummary(e.Err, e.summary)})
+	case CheckFailed:
+		o.send(tui.CheckFailedMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change, Command: e.Command, ExitCode: e.ExitCode, Err: pickSummary(e.Err, e.summary)})
 	case Warning:
 		o.send(tui.WarningMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change, Msg: e.Msg})
 	case InfraError:

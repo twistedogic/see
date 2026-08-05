@@ -162,6 +162,49 @@ func TestTuiObserverForwardsSummaryWhenPresent(t *testing.T) {
 	}
 }
 
+// Regression for add-workflow-check task 6.1: the TUI observer
+// must forward CheckFailed to the tui package as a CheckFailedMsg
+// (distinct from ChangeFailedMsg) so consumers can branch on the
+// message type. The concise summary propagates; the full command
+// and exit code ride along on the dedicated fields.
+func TestTuiObserverForwardsCheckFailed(t *testing.T) {
+	const fullText = "see: check failed: go test ./... (exit 7): build failed"
+	const summaryText = "check failed"
+
+	cap := &captureTuiObserver{}
+	obs := tuiObserver{send: cap.send}
+
+	obs.Observe(CheckFailed{
+		Path:     "/repos/myrepo",
+		Workflow: "openspec",
+		Change:   "add-foo",
+		Command:  "go test ./...",
+		ExitCode: 7,
+		Err:      fullText,
+		summary:  summaryText,
+	})
+
+	if len(cap.msgs) != 1 {
+		t.Fatalf("observer forwarded %d msgs, want 1", len(cap.msgs))
+	}
+	cf, ok := cap.msgs[0].(tui.CheckFailedMsg)
+	if !ok {
+		t.Fatalf("msgs[0] = %T, want tui.CheckFailedMsg", cap.msgs[0])
+	}
+	if cf.Path != "/repos/myrepo" || cf.Workflow != "openspec" || cf.Change != "add-foo" {
+		t.Fatalf("payload identity mismatch: %+v", cf)
+	}
+	if cf.Command != "go test ./..." {
+		t.Fatalf("Command = %q, want go test ./...", cf.Command)
+	}
+	if cf.ExitCode != 7 {
+		t.Fatalf("ExitCode = %d, want 7", cf.ExitCode)
+	}
+	if cf.Err != summaryText {
+		t.Fatalf("Err = %q, want concise %q (full was %q)", cf.Err, summaryText, fullText)
+	}
+}
+
 // Regression for shorten-tui-errors task 1.2: when the source error
 // does not implement Summary(), the observer must fall back to the
 // exported Err verbatim. This is the contract that keeps every

@@ -81,3 +81,31 @@ func TestDirtyWorkingTreeErrorSatisfiesErrorSummaryViaPointer(t *testing.T) {
 		t.Fatalf("Summary() = %q, want %q", got, want)
 	}
 }
+
+// Regression for add-workflow-check task 3.2: the checkFailedError
+// sentinel carries the rendered command, exit code, and captured
+// stderr. Error() preserves the existing "see: check failed:"
+// prefix with the rendered command and stderr; Summary() exposes
+// the concise "check failed" tier; errors.As finds it through
+// %w wrappers.
+func TestCheckFailedErrorExposesCommandAndStderr(t *testing.T) {
+	err := &checkFailedError{command: "go test ./...", exitCode: 7, stderr: "build failed"}
+	wantFull := "see: check failed: go test ./... (exit 7): build failed"
+	if got := err.Error(); got != wantFull {
+		t.Fatalf("Error() = %q, want %q", got, wantFull)
+	}
+	if got, want := err.Summary(), "check failed"; got != want {
+		t.Fatalf("Summary() = %q, want %q", got, want)
+	}
+	var cfe *checkFailedError
+	wrapped := fmt.Errorf("see: rollback: %w", err)
+	if !errors.As(wrapped, &cfe) {
+		t.Fatal("errors.As did not find *checkFailedError through %w wrapper")
+	}
+	if cfe.exitCode != 7 || cfe.stderr != "build failed" {
+		t.Fatalf("errors.As payload mismatch: %+v", cfe)
+	}
+	if !strings.Contains(wrapped.Error(), "check failed") {
+		t.Fatalf("wrapped.Error() = %q, want inner diagnostic surfaced", wrapped.Error())
+	}
+}
