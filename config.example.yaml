@@ -47,6 +47,7 @@
 #     condition: "git rev-parse --abbrev-ref HEAD"
 #     commit: "see: apply {change}"
 #     check: "openspec validate {change}"   # optional quality gate; absent or blank = no gate
+#     measure: "./bench.sh {change}"        # optional improvement gate; absent = no gate, fallback convention file at ~/.config/see/measure/<name>.sh
 #   - name: dependencies
 #     prompt: "Update dependency {change}."
 #     condition: "./scripts/next-dependency-update"

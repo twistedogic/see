@@ -36,6 +36,11 @@ type workflowFileFrontmatter struct {
 	// onto the produced WorkflowConfig like Model. The strict decoder
 	// still rejects any seventh key.
 	Disable bool `yaml:"disable"`
+	// Measure is the optional improvement gate: see WorkflowConfig.Measure
+	// for the contract. A pointer so the validator can distinguish
+	// absent (nil) from present-blank (non-nil whitespace → startup
+	// error).
+	Measure *string `yaml:"measure"`
 }
 
 // parseWorkflowFile reads path as a workflow file: a YAML
@@ -92,6 +97,7 @@ func parseWorkflowFile(path string) (WorkflowConfig, error) {
 		Model:     fm.Model,
 		Check:     fm.Check,
 		Disable:   fm.Disable,
+		Measure:   fm.Measure,
 	}, nil
 }
 

@@ -44,6 +44,24 @@ watcher SHALL leave the custom lane checked out in either case.
   newly created)
 - **AND** the attempt returns the check-failure error
 
+#### Scenario: Passing check precedes the catch-up commit
+
+- **WHEN** a custom agent succeeds in branch mode, the workflow defines
+  a check, the working tree is dirty, and the check exits `0`
+- **THEN** the check runs in the lane checkout before staging
+- **AND** the watcher stages the changes and creates the catch-up commit
+- **AND** leaves the custom lane checked out
+
+#### Scenario: Failed check triggers branch rollback without committing
+
+- **WHEN** a custom agent succeeds in branch mode, the workflow defines
+  a check, and the check exits nonzero
+- **THEN** no `git add` or `git commit` runs for the attempt
+- **AND** the lane is restored to its pre-attempt tip (or removed if
+  newly created)
+- **AND** the attempt's working-tree changes are discarded
+- **AND** the attempt returns the check-failure error
+
 #### Scenario: Non-improvement triggers branch rollback without committing
 
 - **WHEN** a custom agent succeeds in branch mode, the workflow defines a
@@ -74,6 +92,14 @@ watcher SHALL leave the custom lane checked out in either case.
 
 - **WHEN** a custom agent succeeds without changing the repository
 - **AND** the workflow has no measure gate
+- **THEN** the watcher creates no commit
+- **AND** the check is not executed
+- **AND** returns success
+- **AND** the condition may trigger another run on the next polling pass
+
+#### Scenario: Idempotent run is a successful no-op
+
+- **WHEN** a custom agent succeeds without changing the repository
 - **THEN** the watcher creates no commit
 - **AND** the check is not executed
 - **AND** returns success

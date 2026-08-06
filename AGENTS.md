@@ -100,6 +100,7 @@ workflows:
     condition: "git rev-parse --abbrev-ref HEAD"
     commit: "see: apply {change}"
     # check: "openspec validate {change}"   # optional quality gate; absent or blank = no gate
+    # measure: "./bench.sh {change}"        # optional improvement gate; absent falls back to ~/.config/see/measure/<name>.sh
   - name: dependencies
     prompt: |-
       Update the dependency identified by "{change}".
@@ -149,6 +150,22 @@ workflows:
   shell contract and `{change}` substitution rule apply as `condition`.
   Absent or whitespace-only means the workflow has no gate, identical to
   behavior before the field existed. See [Check gate](#check-gate) below.
+- A workflow `measure` is an optional platform-shell command that gates
+  landing on strict improvement. It runs once before the agent to
+  capture the **baseline** and once after a passing check (or after the
+  agent when no check is defined) to capture the **candidate**. The
+  candidate must strictly exceed the baseline for the attempt to land;
+  ties, non-improvement, nonzero exits, or unparseable values are all
+  measure failures that roll back to a clean slate and are retried
+  like an agent failure. Two definition forms: a nonblank
+  `measure:` field wins; otherwise the regular file at
+  `~/.config/see/measure/<workflow-name>.sh` is consulted. A blank
+  `measure` field fails startup (so absent and present-blank are
+  distinguishable). The `{change}` token substitutes into the measure
+  command; the `{metric}` token (the baseline value) substitutes into
+  `prompt` and `commit` only when a measure gate is resolved and
+  remains literal in `measure`. See
+  [Measure gate](#measure-gate) below.
 - `worktree` (boolean, default `false`) selects lane isolation. `false`
   (the default) is **branch** mode: the agent runs in the operator's
   checkout and success leaves the checkout on the lane. `true` is
@@ -345,8 +362,10 @@ Custom workflows may also be direct, non-hidden `.md` children of
 `workflows_dir`. The filename without `.md` is the workflow name and determines
 alphabetical execution order; a frontmatter `name` key is accepted but ignored.
 YAML frontmatter supplies required `condition` and `commit` values and an
-optional `model`, `disable` (default `false`, parks the workflow), and `check`
-(absent or blank means no gate), while the Markdown body is the prompt. File
+optional `model`, `disable` (default `false`, parks the workflow), `check`
+(absent or blank means no gate), and `measure` (absent falls back to the
+convention script at `~/.config/see/measure/<workflow-name>.sh`; blank
+fails startup), while the Markdown body is the prompt. File
 workflows run before `config.yaml` workflows, and a name collision between the
 sources fails startup.
 
@@ -532,6 +551,83 @@ literal token `{change}` is substituted under the same rule as
   selection is driven by `errors.As` on `*checkFailedError` so a
   rollback wrapper around the sentinel still selects the check
   variant.
+
+### Measure gate
+
+A configured workflow may carry an optional `measure` shell command
+that gates landing on strict improvement. It runs **twice** per
+attempt: once before the agent to capture the **baseline**, and once
+after a passing check (or after the agent when no check is defined) to
+capture the **candidate**. Both values are held in `see`'s memory and
+are never written where the agent can read them. The measure command
+uses the same platform-shell contract as `condition` and `check`
+(`/bin/sh -c` on Unix, `cmd.exe /C` on Windows), the watcher context
+is attached, and on Unix the shell runs in its own process group so
+cancellation does not strand descendants. The command runs with its
+working directory set to the agent's working directory (the lane
+checkout in branch mode, the worktree directory in worktree mode).
+The literal token `{change}` is substituted into the `measure` command
+under the same rule as `prompt`, `condition`, `commit`, and `check`;
+the token `{metric}` is **not** substituted into `measure` (it is the
+producer of `{metric}`, not a consumer) and remains literal if present.
+
+- **Two definition forms.** A nonblank `measure:` field (frontmatter
+  or `config.yaml` value) wins. Otherwise, the regular file at
+  `~/.config/see/measure/<workflow-name>.sh` is read and its contents
+  executed as the measure command. A missing convention directory or
+  a missing `<name>.sh` means "no measure gate" and is not an error.
+  A present-but-blank `measure:` is a startup error.
+- **Baseline before the agent.** For an attempt where a measure gate
+  is resolved, `see` runs the measure command once before the agent to
+  capture the baseline and parses it as a 64-bit floating-point
+  number. A baseline-measure failure aborts the attempt before the
+  agent runs, rolls back to a clean slate, and emits `MeasureFailed`.
+  The baseline value is held in memory and rendered as the `{metric}`
+  substitution in `prompt` and `commit`.
+- **Candidate after the agent.** After a passing check (or after the
+  agent when no check is defined), `see` runs the candidate measure
+  regardless of whether the working tree is dirty (a non-deterministic
+  metric may differ on an unchanged tree). The candidate is parsed as
+  a 64-bit floating-point number.
+- **Strict improvement lands.** Candidate strictly greater than baseline
+  → land the agent's changes via the existing catch-up commit /
+  rebase / ff-merge path. Candidate equal to or less than baseline →
+  `measureFailedError`. The candidate measure is also a failure on
+  nonzero exit, empty / multi-line output, or a value that cannot be
+  parsed as a number.
+- **Rollback to clean slate.** A measure failure does not create a
+  commit. The active mode's rollback runs as if it were a check
+  failure: branch mode resets the lane tip + `git clean -fd`; worktree
+  mode removes the worktree + deletes the lane with `-D`. The
+  operator's checkout is untouched in worktree mode.
+- **Retry.** A measure failure flows through `runWithRetry` like an
+  agent or check error: the agent gets up to `RetryCount` fresh
+  attempts per poll, each re-resolving the change and re-capturing
+  the baseline. `RetryAttempt` events between attempts carry the
+  measure-failure summary unchanged.
+- **Terminal event.** When the final attempt for a repository fails at
+  the measure, `runOnce` emits a `MeasureFailed` event (carrying the
+  rendered command, exit code, baseline, candidate, and stderr)
+  instead of `ChangeFailed` or `CheckFailed`. The three are mutually
+  exclusive for the same final failure; the selection is driven by
+  `errors.As` on `*measureFailedError` so a rollback wrapper around
+  the sentinel still selects the measure variant.
+- **`{metric}` token.** When a measure gate is resolved, `{metric}` is
+  substituted with the normalized baseline value (the same string that
+  was parsed as a float64) into `prompt` and `commit`. When no measure
+  gate is resolved, `{metric}` remains literal in those templates.
+  `{metric}` is never substituted into `condition`, `check`, or
+  `measure`.
+- **Integrity model.** When the measure is supplied as the convention
+  file or as an inline frontmatter value, the script lives outside the
+  watched repository, so the agent — which runs in the repository
+  working directory — cannot casually read or execute it. The agent
+  receives the *value* to beat (`{metric}` in the prompt) but not the
+  *mechanism*. An operator who points `measure` at an in-repository
+  path forfeits this tamper-resistance. The residual gap — a
+  determined agent reading `~/.config/see/measure/<name>.sh` by
+  absolute path on a shared filesystem — is accepted; closing it would
+  require a sandbox `see` does not provide today.
 
 ### JSONL event payload migration
 

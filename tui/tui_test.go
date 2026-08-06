@@ -226,6 +226,29 @@ func TestPhaseString(t *testing.T) {
 	}
 }
 
+// TestViewRendersMeasureFailed: a MeasureFailedMsg drives the
+// row to PhaseFailed with the failure message in the error
+// column, identical to ChangeFailedMsg / CheckFailedMsg. The
+// grid has one failed state; the message type stays distinct at
+// the event layer so consumers can branch on the cause.
+func TestViewRendersMeasureFailed(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	repo := "/tmp/proj"
+	m = driveMessages(m,
+		RepoSeenMsg{Path: repo, HasChange: true},
+		ChangeStartedMsg{Path: repo, Change: "task-1"},
+		MeasureFailedMsg{Path: repo, Change: "task-1", Err: "no improvement", Baseline: "0.73", Candidate: "0.71"},
+	)
+	view := m.View().Content
+	if !strings.Contains(view, "failed") {
+		t.Fatalf("view missing failed phase for MeasureFailed:\n%s", view)
+	}
+	if !strings.Contains(view, "no improvement") {
+		t.Fatalf("view missing measure failure message:\n%s", view)
+	}
+}
+
 func TestRowOrderingStableAcrossEvents(t *testing.T) {
 	m := NewModel()
 	m.width = 120

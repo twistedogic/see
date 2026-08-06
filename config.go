@@ -171,6 +171,17 @@ type WorkflowConfig struct {
 	// and event stream never see it. Defaults to false (enabled); an
 	// omitted field is identical to today. See filterDisabledWorkflows.
 	Disable bool `yaml:"disable"`
+	// Measure is the optional improvement gate run before the agent
+	// (baseline) and after a passing check or when no check is defined
+	// (candidate). The candidate must strictly exceed the baseline for
+	// the attempt to land. A pointer so the validator can distinguish
+	// "absent / unset" (nil → "no gate") from "present blank"
+	// (non-nil pointing to whitespace → startup error). When nonblank,
+	// see also falls back to ~/.config/see/measure/<workflow-name>.sh
+	// when no convention script exists (see resolveMeasureCommand).
+	// See runMeasure / measureFailedError in main.go for execution
+	// semantics.
+	Measure *string `yaml:"measure"`
 }
 
 func validateConfig(cfg *Config) error {
@@ -309,6 +320,9 @@ func validateWorkflows(cfg Config) error {
 			return fmt.Errorf("%s: duplicate workflow name %q", path, wf.Name)
 		}
 		seen[name] = struct{}{}
+		if wf.Measure != nil && strings.TrimSpace(*wf.Measure) == "" {
+			return fmt.Errorf("%s: workflow %q measure is blank", path, wf.Name)
+		}
 	}
 	return nil
 }

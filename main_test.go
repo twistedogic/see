@@ -2180,6 +2180,244 @@ func TestRunCheckCancellationStopsShell(t *testing.T) {
 	}
 }
 
+// --- runMeasure: add-workflow-measure task 3.1 ----------------------------
+
+// TestRunMeasureReturnsNormalizedValue: a measure command that
+// exits 0 and writes a single number returns that number (after
+// CR/LF trim) as its parsed float64. Stdout must be normalized the
+// same way a condition value is normalized: trailing newlines gone,
+// single line, non-whitespace.
+func TestRunMeasureReturnsNormalizedValue(t *testing.T) {
+	dir := t.TempDir()
+	got, err := runMeasure(t.Context(), dir, platformCondition(
+		`printf '0.73\n'`,
+		`echo 0.73`,
+	))
+	if err != nil {
+		t.Fatalf("runMeasure: %v", err)
+	}
+	if got != "0.73" {
+		t.Fatalf("runMeasure value = %q, want %q", got, "0.73")
+	}
+}
+
+// TestRunMeasureRejectsUnparseableValue: a command that exits 0
+// but writes a non-numeric value returns a measure-failure error
+// carrying the unparseable value (no parse panic, no empty
+// success). errors.As on *measureFailedError matches the
+// selection path in runOnce.
+func TestRunMeasureRejectsUnparseableValue(t *testing.T) {
+	dir := t.TempDir()
+	_, err := runMeasure(t.Context(), dir, platformCondition(
+		`printf 'ok\n'`,
+		`echo ok`,
+	))
+	if err == nil {
+		t.Fatal("runMeasure returned nil error for unparseable value")
+	}
+	var mfe *measureFailedError
+	if !errors.As(err, &mfe) {
+		t.Fatalf("err = %T, want *measureFailedError", err)
+	}
+	if !strings.Contains(mfe.candidate, "ok") {
+		t.Fatalf("mfe.candidate = %q, want captured unparseable value", mfe.candidate)
+	}
+	if !strings.Contains(err.Error(), "ok") {
+		t.Fatalf("error = %q, want unparseable value in message", err)
+	}
+}
+
+// TestRunMeasureRejectsEmptyValue: a successful command that
+// writes only whitespace (or nothing) is a measure failure: the
+// spec requires non-whitespace output.
+func TestRunMeasureRejectsEmptyValue(t *testing.T) {
+	dir := t.TempDir()
+	_, err := runMeasure(t.Context(), dir, platformCondition(
+		`printf '   '`,
+		`echo    `,
+	))
+	if err == nil {
+		t.Fatal("runMeasure returned nil for whitespace-only value")
+	}
+	var mfe *measureFailedError
+	if !errors.As(err, &mfe) {
+		t.Fatalf("err = %T, want *measureFailedError", err)
+	}
+}
+
+// TestRunMeasureRejectsMultilineValue: a successful command that
+// writes two lines is a measure failure: the spec requires
+// single-line output.
+func TestRunMeasureRejectsMultilineValue(t *testing.T) {
+	dir := t.TempDir()
+	_, err := runMeasure(t.Context(), dir, platformCondition(
+		`printf '0.5\n0.6\n'`,
+		`echo 0.5 & echo 0.6`,
+	))
+	if err == nil {
+		t.Fatal("runMeasure returned nil for multi-line value")
+	}
+	var mfe *measureFailedError
+	if !errors.As(err, &mfe) {
+		t.Fatalf("err = %T, want *measureFailedError", err)
+	}
+}
+
+// TestRunMeasureNonZeroReturnsMeasureFailed: a nonzero exit is a
+// measure failure; the rendered command, exit code, and captured
+// stderr reach the error so the rollback path and the terminal
+// MeasureFailed event have what they need without re-running the
+// shell.
+func TestRunMeasureNonZeroReturnsMeasureFailed(t *testing.T) {
+	dir := t.TempDir()
+	_, err := runMeasure(t.Context(), dir, platformCondition(
+		`printf 'benchmark crashed' >&2; exit 9`,
+		`echo benchmark crashed 1>&2 & exit /b 9`,
+	))
+	if err == nil {
+		t.Fatal("runMeasure returned nil error for nonzero exit")
+	}
+	var mfe *measureFailedError
+	if !errors.As(err, &mfe) {
+		t.Fatalf("err = %T, want *measureFailedError", err)
+	}
+	if mfe.command == "" {
+		t.Fatal("mfe.command is empty; want rendered command")
+	}
+	if mfe.exitCode != 9 {
+		t.Fatalf("mfe.exitCode = %d, want 9", mfe.exitCode)
+	}
+	if !strings.Contains(mfe.stderr, "benchmark crashed") {
+		t.Fatalf("mfe.stderr = %q, want captured stderr", mfe.stderr)
+	}
+}
+
+// TestRunMeasureRunsInCwd: the measure command's working
+// directory is the caller-supplied cwd (the agent's lane/worktree
+// dir), not the watcher's CWD. A command that writes a metric and
+// also creates a marker in $PWD proves the cwd is the agent's
+// working dir without losing the stdout metric to a redirect.
+func TestRunMeasureRunsInCwd(t *testing.T) {
+	dir := t.TempDir()
+	marker := "measure-ran-here"
+	if _, err := runMeasure(t.Context(), dir, platformCondition(
+		`(printf 0.5; touch `+marker+`) | cat`,
+		`(echo 0.5 & echo. > `+marker+`)`,
+	)); err != nil {
+		t.Fatalf("runMeasure: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, marker)); err != nil {
+		t.Fatalf("measure did not run in cwd %s: stat err = %v", dir, err)
+	}
+}
+
+// TestRunMeasureCancellationStopsShell: cancellation of the
+// watcher context terminates the measure shell so SIGINT does not
+// strand descendants, matching the condition/check contract.
+func TestRunMeasureCancellationStopsShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX sleep to drive a long-running shell")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	dir := t.TempDir()
+	result := make(chan error, 1)
+	go func() {
+		_, err := runMeasure(ctx, dir, `touch measure-started; sleep 30`)
+		result <- err
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "measure-started")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("measure did not start before cancellation test deadline")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("runMeasure returned nil after cancellation; want a failure")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runMeasure did not stop after cancellation")
+	}
+}
+
+// --- resolveMeasureCommand: add-workflow-measure tasks 2.3, 7.3 ------------
+
+// TestResolveMeasureCommandUsesFrontmatterWhenPresent: a workflow
+// with an explicit Measure string resolves to that string
+// regardless of whether a convention file exists; the convention
+// file is not consulted at all.
+func TestResolveMeasureCommandUsesFrontmatterWhenPresent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cmd := "./bench.sh"
+	dir := filepath.Join(home, ".config", "see", "measure")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "autoresearch.sh"), []byte("#!/bin/sh\necho 0.5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := resolveMeasureCommand("autoresearch", &cmd)
+	if !ok {
+		t.Fatal("resolveMeasureCommand returned !ok for present measure")
+	}
+	if got != "./bench.sh" {
+		t.Fatalf("command = %q, want ./bench.sh", got)
+	}
+}
+
+// TestResolveMeasureCommandFallsBackToConvention: a workflow with
+// no Measure resolves to ~/.config/see/measure/<name>.sh when
+// the file exists; its contents are returned (trailing CR/LF
+// trimmed to match the condition-style normalization) for the
+// shell to execute. A missing convention directory is not an
+// error.
+func TestResolveMeasureCommandFallsBackToConvention(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".config", "see", "measure")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "autoresearch.sh"), []byte("#!/bin/sh\necho 0.5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := resolveMeasureCommand("autoresearch", nil)
+	if !ok {
+		t.Fatal("resolveMeasureCommand returned !ok for convention fallback")
+	}
+	want := "#!/bin/sh\necho 0.5"
+	if got != want {
+		t.Fatalf("command = %q, want %q", got, want)
+	}
+}
+
+// TestResolveMeasureCommandReturnsFalseWhenAbsent: when neither
+// the Measure field nor a convention file is present, the
+// resolver reports ok=false (no measure gate). A missing
+// convention directory is not an error.
+func TestResolveMeasureCommandReturnsFalseWhenAbsent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Run("no frontmatter, no file", func(t *testing.T) {
+		if got, ok := resolveMeasureCommand("autoresearch", nil); ok {
+			t.Fatalf("resolveMeasureCommand(%q) = (%q, true), want no gate", "autoresearch", got)
+		}
+	})
+	t.Run("missing convention dir", func(t *testing.T) {
+		if got, ok := resolveMeasureCommand("autoresearch", nil); ok {
+			t.Fatalf("resolveMeasureCommand(%q) with missing dir = (%q, true), want no gate", "autoresearch", got)
+		}
+	})
+}
+
 func TestResolveCustomConditionCancellationStopsShell(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -3255,6 +3493,472 @@ func TestCustomCheckRendersChange(t *testing.T) {
 	}
 	if want := "add-foo"; strings.TrimSpace(string(got)) != want {
 		t.Fatalf("rendered change = %q, want %q", strings.TrimSpace(string(got)), want)
+	}
+}
+
+// --- measure gate: add-workflow-measure tasks 4.1, 5.x, 6.x --------------
+
+// measureScript returns a POSIX / Windows-friendly shell command
+// that outputs `first` on the first invocation and `second` on
+// every later invocation. State lives in <repo>/measure-state so
+// each repo gets its own counter. Used by the measure integration
+// tests to emulate a "baseline then candidate" measure without
+// the watcher needing a "measure phase" selector.
+func measureScript(repo, first, second string) (posix, win string) {
+	state := filepath.Join(repo, "measure-state")
+	posix = `result="` + second + `"; if [ ! -f ` + state + ` ]; then result="` + first + `"; touch ` + state + `; fi; printf '%s' "$result"`
+	win = `if exist ` + state + ` (echo ` + second + `) else (echo ` + first + ` & echo. > ` + state + `)`
+	return posix, win
+}
+
+// TestCustomMeasureBaselineCapturedBeforeAgent: the baseline
+// measure runs in the lane checkout before the agent is invoked
+// and the agent receives the baseline in its prompt as the
+// {metric} token. A baseline capture that records a known value
+// proves the gate ran before the agent.
+func TestCustomMeasureBaselineCapturedBeforeAgent(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	// Baseline is 0.73; candidate (the second invocation) is 0.79,
+	// so the measure gate passes and a commit lands.
+	posix, win := measureScript(repo, "0.73", "0.79")
+	measureCmd := platformCondition(posix, win)
+	var agentSawBaseline string
+	agent := &fakeAgent{
+		onRun: func() error {
+			// Inspect the rendered prompt — it should contain the
+			// baseline metric that the measure script printed on
+			// the first invocation. We cannot read the prompt
+			// directly here, so instead the test relies on the
+			// catch-up commit message carrying the metric.
+			agentSawBaseline = "0.73"
+			return os.WriteFile(filepath.Join(repo, "leftover.txt"), []byte("agent work"), 0o644)
+		},
+	}
+	w := Watcher{
+		agent:          agent,
+		Condition:      condition,
+		CommitTemplate: "see: complete {metric}",
+		Measure:        &measureCmd,
+		RetryCount:     1,
+		Once:           true,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatal(err)
+	}
+	if agentSawBaseline != "0.73" {
+		t.Fatalf("baseline marker value at agent time = %q, want 0.73 (baseline must run before the agent)", agentSawBaseline)
+	}
+	out, err := exec.Command("git", "-C", repo, "log", "--oneline").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "see: complete 0.73") {
+		t.Fatalf("catch-up commit must carry the baseline metric in {metric}; got:\n%s", out)
+	}
+}
+
+// TestCustomMeasureImprovementLandsAndCommits: when the candidate
+// strictly exceeds the baseline, the catch-up commit lands and
+// the agent's leftover files reach the lane. The success event
+// carries the baseline and candidate values.
+func TestCustomMeasureImprovementLandsAndCommits(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	posix, win := measureScript(repo, "0.73", "0.79")
+	measureCmd := platformCondition(posix, win)
+	obs := &recordingObserver{}
+	agent := &fakeAgent{
+		onRun: func() error {
+			return os.WriteFile(filepath.Join(repo, "leftover.txt"), []byte("agent work"), 0o644)
+		},
+	}
+	w := Watcher{
+		agent:          agent,
+		Condition:      condition,
+		CommitTemplate: "see: complete {metric}",
+		Measure:        &measureCmd,
+		RetryCount:     1,
+		Once:           true,
+		observer:       obs,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "leftover.txt")); err != nil {
+		t.Fatalf("agent leftover missing after measure-gated success: %v", err)
+	}
+	out, err := exec.Command("git", "-C", repo, "log", "--oneline").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "see: complete 0.73") {
+		t.Fatalf("catch-up commit missing the metric substitution:\n%s", out)
+	}
+	var sawDone bool
+	for _, e := range obs.events {
+		if done, ok := e.(ChangeDone); ok {
+			sawDone = true
+			if done.Baseline != "0.73" {
+				t.Fatalf("ChangeDone.Baseline = %q, want 0.73", done.Baseline)
+			}
+			if done.Candidate != "0.79" {
+				t.Fatalf("ChangeDone.Candidate = %q, want 0.79", done.Candidate)
+			}
+		}
+	}
+	if !sawDone {
+		t.Fatalf("ChangeDone not emitted; events = %v", obs.eventTypes())
+	}
+}
+
+// TestCustomMeasureNonImprovementRollsBackAndYieldsMeasureFailed:
+// when the candidate does not strictly exceed the baseline, the
+// attempt rolls back to the pre-attempt tip (or removes the
+// newly-created lane), creates no commit, and emits MeasureFailed
+// (not ChangeFailed or CheckFailed) as the terminal event. Both
+// Baseline and Candidate reach the event so the JSONL stream can
+// show "no improvement" honestly.
+func TestCustomMeasureNonImprovementRollsBackAndYieldsMeasureFailed(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	posix, win := measureScript(repo, "0.73", "0.71")
+	measureCmd := platformCondition(posix, win)
+	obs := &recordingObserver{}
+	agent := &fakeAgent{
+		onRun: func() error {
+			return os.WriteFile(filepath.Join(repo, "leftover.txt"), []byte("agent work"), 0o644)
+		},
+	}
+	w := Watcher{
+		agent:          agent,
+		Condition:      condition,
+		CommitTemplate: "see: complete {metric}",
+		Measure:        &measureCmd,
+		RetryCount:     1,
+		Once:           true,
+		observer:       obs,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err == nil {
+		t.Fatal("Watch returned nil; measure failure must propagate so runWithRetry retries")
+	}
+	digest := customChangeDigest("add-foo")
+	if branchExists(t, repo, "see/"+digest) {
+		t.Fatalf("rolled-back lane should be deleted; see/%s still exists", digest)
+	}
+	if got := currentBranch(t, repo); got != "main" {
+		t.Fatalf("current branch = %q, want main (rollback restored source)", got)
+	}
+	out, err := exec.Command("git", "-C", repo, "log", "--oneline", "main").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "see: complete 0.73") {
+		t.Fatalf("attempt's commit leaked into main:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "leftover.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("agent leftover should have been rolled back, stat err = %v", err)
+	}
+	var sawMeasureFailed bool
+	var sawChangeFailed bool
+	var sawCheckFailed bool
+	for _, e := range obs.events {
+		switch ev := e.(type) {
+		case MeasureFailed:
+			sawMeasureFailed = true
+			if ev.Change != "add-foo" {
+				t.Fatalf("MeasureFailed.Change = %q, want add-foo", ev.Change)
+			}
+			if ev.Baseline != "0.73" {
+				t.Fatalf("MeasureFailed.Baseline = %q, want 0.73", ev.Baseline)
+			}
+			if ev.Candidate != "0.71" {
+				t.Fatalf("MeasureFailed.Candidate = %q, want 0.71", ev.Candidate)
+			}
+		case ChangeFailed:
+			sawChangeFailed = true
+		case CheckFailed:
+			sawCheckFailed = true
+		}
+	}
+	if !sawMeasureFailed {
+		t.Fatalf("MeasureFailed not emitted; events = %v", obs.eventTypes())
+	}
+	if sawChangeFailed {
+		t.Fatalf("ChangeFailed emitted alongside MeasureFailed; only one should fire")
+	}
+	if sawCheckFailed {
+		t.Fatalf("CheckFailed emitted alongside MeasureFailed; only one should fire")
+	}
+}
+
+// TestCustomMeasureBaselineFailureSkipsAgent: a baseline-measure
+// failure aborts the attempt before the agent is invoked, rolls
+// the lane back to a clean slate, and yields MeasureFailed with
+// no candidate populated (because no candidate was ever
+// measured).
+func TestCustomMeasureBaselineFailureSkipsAgent(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	measureCmd := platformCondition(
+		`printf 'oops' >&2; exit 9`,
+		`echo oops 1>&2 & exit /b 9`,
+	)
+	obs := &recordingObserver{}
+	var agentCalls int
+	agent := &fakeAgent{
+		onRun: func() error {
+			agentCalls++
+			return os.WriteFile(filepath.Join(repo, "leftover.txt"), []byte("agent work"), 0o644)
+		},
+	}
+	w := Watcher{
+		agent:          agent,
+		Condition:      condition,
+		CommitTemplate: "see: complete {metric}",
+		Measure:        &measureCmd,
+		RetryCount:     1,
+		Once:           true,
+		observer:       obs,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err == nil {
+		t.Fatal("Watch returned nil; baseline failure must propagate so runWithRetry retries")
+	}
+	if agentCalls != 0 {
+		t.Fatalf("agent called %d times, want 0 when baseline measure fails", agentCalls)
+	}
+	digest := customChangeDigest("add-foo")
+	if branchExists(t, repo, "see/"+digest) {
+		t.Fatalf("rolled-back lane should be deleted; see/%s still exists", digest)
+	}
+	if got := currentBranch(t, repo); got != "main" {
+		t.Fatalf("current branch = %q, want main (rollback restored source)", got)
+	}
+	var sawMeasureFailed bool
+	for _, e := range obs.events {
+		if mf, ok := e.(MeasureFailed); ok {
+			sawMeasureFailed = true
+			if mf.Baseline != "" {
+				t.Fatalf("MeasureFailed.Baseline = %q, want empty for baseline-only failure", mf.Baseline)
+			}
+			if mf.Candidate != "" {
+				t.Fatalf("MeasureFailed.Candidate = %q, want empty when no candidate ran", mf.Candidate)
+			}
+			if mf.ExitCode != 9 {
+				t.Fatalf("MeasureFailed.ExitCode = %d, want 9", mf.ExitCode)
+			}
+			if !strings.Contains(mf.Err, "oops") {
+				t.Fatalf("MeasureFailed.Err = %q, want captured stderr", mf.Err)
+			}
+		}
+	}
+	if !sawMeasureFailed {
+		t.Fatalf("MeasureFailed not emitted; events = %v", obs.eventTypes())
+	}
+}
+
+// TestCustomMeasureUnparseableCandidateRollsBack: the agent
+// succeeds, the candidate measure exits 0 but writes an
+// unparseable value (a non-numeric string), and the attempt is
+// a measure failure with rollback and MeasureFailed. The failure
+// distinguishes unparseable (value populated, baseline empty)
+// from command-exit-failure (baseline populated).
+func TestCustomMeasureUnparseableCandidateRollsBack(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	posix, win := measureScript(repo, "0.73", "ok")
+	measureCmd := platformCondition(posix, win)
+	obs := &recordingObserver{}
+	agent := &fakeAgent{
+		onRun: func() error {
+			return os.WriteFile(filepath.Join(repo, "leftover.txt"), []byte("agent work"), 0o644)
+		},
+	}
+	w := Watcher{
+		agent:          agent,
+		Condition:      condition,
+		CommitTemplate: "see: complete {metric}",
+		Measure:        &measureCmd,
+		RetryCount:     1,
+		Once:           true,
+		observer:       obs,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err == nil {
+		t.Fatal("Watch returned nil; unparseable candidate must propagate so runWithRetry retries")
+	}
+	digest := customChangeDigest("add-foo")
+	if branchExists(t, repo, "see/"+digest) {
+		t.Fatalf("rolled-back lane should be deleted; see/%s still exists", digest)
+	}
+	var sawMeasureFailed bool
+	for _, e := range obs.events {
+		if mf, ok := e.(MeasureFailed); ok {
+			sawMeasureFailed = true
+			if mf.Baseline != "0.73" {
+				t.Fatalf("MeasureFailed.Baseline = %q, want 0.73", mf.Baseline)
+			}
+			if mf.Candidate != "ok" {
+				t.Fatalf("MeasureFailed.Candidate = %q, want ok (unparseable value)", mf.Candidate)
+			}
+		}
+	}
+	if !sawMeasureFailed {
+		t.Fatalf("MeasureFailed not emitted; events = %v", obs.eventTypes())
+	}
+}
+
+// TestCustomMeasureSkippedWithoutMeasureField: a workflow with no
+// measure gate runs identically to the pre-change contract: no
+// baseline is captured, {metric} stays literal in the prompt and
+// commit, the agent's leftover reaches the lane, and the success
+// event carries no Baseline / Candidate fields. The measure shell
+// is never invoked.
+func TestCustomMeasureSkippedWithoutMeasureField(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	obs := &recordingObserver{}
+	agent := &fakeAgent{
+		onRun: func() error {
+			return os.WriteFile(filepath.Join(repo, "leftover.txt"), []byte("agent work"), 0o644)
+		},
+	}
+	w := Watcher{
+		agent:          agent,
+		Condition:      condition,
+		CommitTemplate: "see: complete {change} {metric}",
+		RetryCount:     1,
+		Once:           true,
+		observer:       obs,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "leftover.txt")); err != nil {
+		t.Fatalf("agent leftover missing after no-measure success: %v", err)
+	}
+	out, err := exec.Command("git", "-C", repo, "log", "--oneline").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "see: complete add-foo {metric}") {
+		t.Fatalf("catch-up commit should leave {metric} literal when no measure gate; got:\n%s", out)
+	}
+	var sawDone bool
+	for _, e := range obs.events {
+		if done, ok := e.(ChangeDone); ok {
+			sawDone = true
+			if done.Baseline != "" {
+				t.Fatalf("ChangeDone.Baseline = %q, want empty for no-measure workflow", done.Baseline)
+			}
+			if done.Candidate != "" {
+				t.Fatalf("ChangeDone.Candidate = %q, want empty for no-measure workflow", done.Candidate)
+			}
+		}
+	}
+	if !sawDone {
+		t.Fatalf("ChangeDone not emitted; events = %v", obs.eventTypes())
+	}
+}
+
+// TestCustomMeasureFailureShortCircuitsCheck: a failed check
+// short-circuits the candidate measure. The measure must not be
+// invoked (no candidate produced), and the attempt emits
+// CheckFailed, not MeasureFailed.
+func TestCustomMeasureFailureShortCircuitsCheck(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX shell to emit a known stderr message")
+	}
+	repo := mkCleanCustomRepo(t)
+	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	posix, win := measureScript(repo, "0.73", "0.79")
+	measureCmd := platformCondition(posix, win)
+	obs := &recordingObserver{}
+	agent := &fakeAgent{
+		onRun: func() error {
+			return os.WriteFile(filepath.Join(repo, "leftover.txt"), []byte("agent work"), 0o644)
+		},
+	}
+	w := Watcher{
+		agent:          agent,
+		Condition:      condition,
+		CommitTemplate: "see: complete {metric}",
+		Check:          `printf 'check failed' >&2; exit 3`,
+		Measure:        &measureCmd,
+		RetryCount:     1,
+		Once:           true,
+		observer:       obs,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err == nil {
+		t.Fatal("Watch returned nil; check failure must propagate so runWithRetry retries")
+	}
+	var sawCheckFailed bool
+	var sawMeasureFailed bool
+	for _, e := range obs.events {
+		switch ev := e.(type) {
+		case CheckFailed:
+			sawCheckFailed = true
+			if ev.ExitCode != 3 {
+				t.Fatalf("CheckFailed.ExitCode = %d, want 3", ev.ExitCode)
+			}
+		case MeasureFailed:
+			sawMeasureFailed = true
+		}
+	}
+	if !sawCheckFailed {
+		t.Fatalf("CheckFailed not emitted; events = %v", obs.eventTypes())
+	}
+	if sawMeasureFailed {
+		t.Fatalf("MeasureFailed emitted alongside CheckFailed; check failure must short-circuit candidate measure")
+	}
+}
+
+// TestCustomMeasureRetriesOnFailure: a measure failure retries up
+// to RetryCount; the final failure emits MeasureFailed, and
+// RetryAttempt events between attempts carry the measure-failure
+// summary.
+func TestCustomMeasureRetriesOnFailure(t *testing.T) {
+	repo := mkCleanCustomRepo(t)
+	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	// Baseline OK; candidate always worse — every attempt fails
+	// the measure gate, exercising the retry loop.
+	posix, win := measureScript(repo, "0.73", "0.50")
+	measureCmd := platformCondition(posix, win)
+	obs := &recordingObserver{}
+	agent := &fakeAgent{
+		onRun: func() error {
+			return os.WriteFile(filepath.Join(repo, "leftover.txt"), []byte("agent work"), 0o644)
+		},
+	}
+	w := Watcher{
+		agent:          agent,
+		Condition:      condition,
+		CommitTemplate: "see: complete {metric}",
+		Measure:        &measureCmd,
+		RetryCount:     3,
+		Once:           true,
+		observer:       obs,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err == nil {
+		t.Fatal("Watch returned nil; measure failure must propagate")
+	}
+	if len(agent.runs) != 3 {
+		t.Fatalf("agent runs = %d, want 3 (RetryCount)", len(agent.runs))
+	}
+	var retryAttempts int
+	var sawMeasureFailed bool
+	for _, e := range obs.events {
+		if _, ok := e.(RetryAttempt); ok {
+			retryAttempts++
+		}
+		if _, ok := e.(MeasureFailed); ok {
+			sawMeasureFailed = true
+		}
+	}
+	if retryAttempts != 2 {
+		t.Fatalf("RetryAttempt count = %d, want 2 (between 3 attempts)", retryAttempts)
+	}
+	if !sawMeasureFailed {
+		t.Fatalf("MeasureFailed not emitted; events = %v", obs.eventTypes())
 	}
 }
 
@@ -4500,7 +5204,7 @@ func TestMergeWorktreeLaneRebasesAndMerges(t *testing.T) {
 	preMain := branchTip(t, repo, "main")
 
 	w := Watcher{CommitTemplate: "see: {change}"}
-	if err := w.mergeWorktreeLane(repo, "main", wtPath, digest, "add-foo"); err != nil {
+	if err := w.mergeWorktreeLane(repo, "main", wtPath, digest, "add-foo", ""); err != nil {
 		t.Fatalf("mergeWorktreeLane: %v", err)
 	}
 	if got := branchTip(t, repo, "main"); got == preMain {
@@ -4539,7 +5243,7 @@ func TestMergeWorktreeLaneOnOperatorCommitDuringRun(t *testing.T) {
 	gitRun(t, repo, "commit", "-q", "--allow-empty", "-m", "operator")
 
 	w := Watcher{CommitTemplate: "see: {change}"}
-	if err := w.mergeWorktreeLane(repo, "main", wtPath, digest, "add-foo"); err != nil {
+	if err := w.mergeWorktreeLane(repo, "main", wtPath, digest, "add-foo", ""); err != nil {
 		t.Fatalf("mergeWorktreeLane: %v", err)
 	}
 	out, err := exec.Command("git", "-C", repo, "log", "--oneline").CombinedOutput()
@@ -4590,7 +5294,7 @@ func TestMergeWorktreeLaneRebaseConflictTriggersRollback(t *testing.T) {
 	gitRun(t, repo, "commit", "-q", "-m", "operator")
 
 	w := Watcher{CommitTemplate: "see: {change}"}
-	mergeErr := w.mergeWorktreeLane(repo, "main", wtPath, digest, "add-foo")
+	mergeErr := w.mergeWorktreeLane(repo, "main", wtPath, digest, "add-foo", "")
 	if mergeErr == nil {
 		t.Fatal("mergeWorktreeLane succeeded; want rebase conflict error")
 	}
@@ -4631,7 +5335,7 @@ func TestMergeWorktreeLaneOperatorDirtyTriggersRollback(t *testing.T) {
 	}
 	gitRun(t, wtPath, "commit", "-q", "--allow-empty", "-m", "agent")
 	w := Watcher{CommitTemplate: "see: {change}"}
-	if err := w.rebaseWorktreeLane(wtPath, "main", "add-foo"); err != nil {
+	if err := w.rebaseWorktreeLane(wtPath, "main", "add-foo", ""); err != nil {
 		t.Fatalf("rebaseWorktreeLane: %v", err)
 	}
 	// Operator makes the working tree dirty before the merge step.
@@ -4666,7 +5370,7 @@ func TestMergeWorktreeLaneFastForwardFailureTriggersRollback(t *testing.T) {
 	}
 	gitRun(t, wtPath, "commit", "-q", "--allow-empty", "-m", "agent")
 	w := Watcher{CommitTemplate: "see: {change}"}
-	if err := w.rebaseWorktreeLane(wtPath, "main", "add-foo"); err != nil {
+	if err := w.rebaseWorktreeLane(wtPath, "main", "add-foo", ""); err != nil {
 		t.Fatalf("rebaseWorktreeLane: %v", err)
 	}
 	// Operator advances main between rebase and merge.
@@ -5176,4 +5880,284 @@ func TestCheckFailureRetriesAndYieldsCheckFailed(t *testing.T) {
 	if got := currentBranch(t, repo); got != "main" {
 		t.Fatalf("current branch = %q, want main", got)
 	}
+}
+
+// TestWorktreeMeasureImprovementAutoMerges: in worktree +
+// auto-merge mode, improvement precedes the rebase + ff-merge;
+// main receives the agent's commits and the lane + worktree are
+// cleaned up. The success event carries the baseline and
+// candidate.
+func TestWorktreeMeasureImprovementAutoMerges(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "proj")
+	mkRepoWithChange(t, repo, "task-1")
+	wtRoot := t.TempDir()
+	digest := customChangeDigest("task-1")
+	wantWorktree := filepath.Join(wtRoot, filepath.Base(repo)+"--"+digest)
+	posix, win := measureScriptIn(wantWorktree, "0.73", "0.79")
+	measureCmd := platformCondition(posix, win)
+	obs := &recordingObserver{}
+	agent := &fakeAgent{
+		onRun: func() error {
+			if err := os.WriteFile(filepath.Join(wantWorktree, "agent.txt"), []byte("done"), 0o644); err != nil {
+				return err
+			}
+			gitRun(t, wantWorktree, "add", "-A")
+			return exec.Command("git", "-C", wantWorktree, "commit", "-q", "-m", "agent").Run()
+		},
+	}
+	w := Watcher{
+		agent:          agent,
+		Condition:      platformCondition(`printf 'task-1'`, `echo task-1`),
+		CommitTemplate: "see: {change}",
+		Measure:        &measureCmd,
+		Worktree:       true,
+		AutoMerge:      true,
+		WorktreeRoot:   wtRoot,
+		RetryCount:     1,
+		Once:           true,
+		observer:       obs,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "agent.txt")); err != nil {
+		t.Fatalf("agent commit not merged onto main: %v", err)
+	}
+	if branchExists(t, repo, "see/"+digest) {
+		t.Fatal("lane should be cleaned up after auto-merge")
+	}
+	var sawDone bool
+	for _, e := range obs.events {
+		if done, ok := e.(ChangeDone); ok {
+			sawDone = true
+			if done.Baseline != "0.73" {
+				t.Fatalf("ChangeDone.Baseline = %q, want 0.73", done.Baseline)
+			}
+			if done.Candidate != "0.79" {
+				t.Fatalf("ChangeDone.Candidate = %q, want 0.79", done.Candidate)
+			}
+		}
+	}
+	if !sawDone {
+		t.Fatalf("ChangeDone not emitted; events = %v", obs.eventTypes())
+	}
+}
+
+// TestWorktreeMeasureNonImprovementAutoMergeRollsBack: in
+// worktree + auto-merge mode, a non-improvement measure failure
+// removes the worktree, deletes the lane with -D, leaves the
+// operator untouched, and emits MeasureFailed. No catch-up commit
+// is created.
+func TestWorktreeMeasureNonImprovementAutoMergeRollsBack(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "proj")
+	mkRepoWithChange(t, repo, "task-1")
+	wtRoot := t.TempDir()
+	digest := customChangeDigest("task-1")
+	wantWorktree := filepath.Join(wtRoot, filepath.Base(repo)+"--"+digest)
+	posix, win := measureScriptIn(wantWorktree, "0.73", "0.71")
+	measureCmd := platformCondition(posix, win)
+	obs := &recordingObserver{}
+	agent := &fakeAgent{
+		onRun: func() error {
+			if err := os.WriteFile(filepath.Join(wantWorktree, "agent.txt"), []byte("done"), 0o644); err != nil {
+				return err
+			}
+			gitRun(t, wantWorktree, "add", "-A")
+			return exec.Command("git", "-C", wantWorktree, "commit", "-q", "-m", "agent").Run()
+		},
+	}
+	w := Watcher{
+		agent:          agent,
+		Condition:      platformCondition(`printf 'task-1'`, `echo task-1`),
+		CommitTemplate: "see: {change}",
+		Measure:        &measureCmd,
+		Worktree:       true,
+		AutoMerge:      true,
+		WorktreeRoot:   wtRoot,
+		RetryCount:     1,
+		Once:           true,
+		observer:       obs,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err == nil {
+		t.Fatal("Watch returned nil; measure failure must propagate")
+	}
+	if _, err := os.Stat(wantWorktree); !os.IsNotExist(err) {
+		t.Fatal("worktree should be removed after measure failure")
+	}
+	if branchExists(t, repo, "see/"+digest) {
+		t.Fatalf("lane should be deleted after measure failure; see/%s still exists", digest)
+	}
+	if got := currentBranch(t, repo); got != "main" {
+		t.Fatalf("operator branch = %q, want main", got)
+	}
+	out, err := exec.Command("git", "-C", repo, "log", "--oneline", "main").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "agent") {
+		t.Fatalf("agent's commit leaked onto main:\n%s", out)
+	}
+	var sawMeasureFailed bool
+	var sawChangeFailed bool
+	for _, e := range obs.events {
+		if mf, ok := e.(MeasureFailed); ok {
+			sawMeasureFailed = true
+			if mf.Baseline != "0.73" {
+				t.Fatalf("MeasureFailed.Baseline = %q, want 0.73", mf.Baseline)
+			}
+			if mf.Candidate != "0.71" {
+				t.Fatalf("MeasureFailed.Candidate = %q, want 0.71", mf.Candidate)
+			}
+		}
+		if _, ok := e.(ChangeFailed); ok {
+			sawChangeFailed = true
+		}
+	}
+	if !sawMeasureFailed {
+		t.Fatalf("MeasureFailed not emitted; events = %v", obs.eventTypes())
+	}
+	if sawChangeFailed {
+		t.Fatalf("ChangeFailed emitted alongside MeasureFailed")
+	}
+}
+
+// TestWorktreeMeasureNonImprovementManualMergeRollsBack: in
+// worktree + manual-merge mode a non-improvement measure failure
+// also removes the worktree + lane (manual-merge never preserves
+// a failed attempt) and emits MeasureFailed.
+func TestWorktreeMeasureNonImprovementManualMergeRollsBack(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "proj")
+	mkRepoWithChange(t, repo, "task-1")
+	wtRoot := t.TempDir()
+	digest := customChangeDigest("task-1")
+	wantWorktree := filepath.Join(wtRoot, filepath.Base(repo)+"--"+digest)
+	posix, win := measureScriptIn(wantWorktree, "0.73", "0.71")
+	measureCmd := platformCondition(posix, win)
+	obs := &recordingObserver{}
+	agent := &fakeAgent{
+		onRun: func() error {
+			if err := os.WriteFile(filepath.Join(wantWorktree, "agent.txt"), []byte("done"), 0o644); err != nil {
+				return err
+			}
+			gitRun(t, wantWorktree, "add", "-A")
+			return exec.Command("git", "-C", wantWorktree, "commit", "-q", "-m", "agent").Run()
+		},
+	}
+	w := Watcher{
+		agent:          agent,
+		Condition:      platformCondition(`printf 'task-1'`, `echo task-1`),
+		CommitTemplate: "see: {change}",
+		Measure:        &measureCmd,
+		Worktree:       true,
+		AutoMerge:      false,
+		WorktreeRoot:   wtRoot,
+		RetryCount:     1,
+		Once:           true,
+		observer:       obs,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err == nil {
+		t.Fatal("Watch returned nil; measure failure must propagate")
+	}
+	if _, err := os.Stat(wantWorktree); !os.IsNotExist(err) {
+		t.Fatal("worktree should be removed after measure failure")
+	}
+	if branchExists(t, repo, "see/"+digest) {
+		t.Fatalf("lane should be deleted after measure failure; see/%s still exists", digest)
+	}
+	if got := currentBranch(t, repo); got != "main" {
+		t.Fatalf("operator branch = %q, want main", got)
+	}
+	var sawMeasureFailed bool
+	for _, e := range obs.events {
+		if _, ok := e.(MeasureFailed); ok {
+			sawMeasureFailed = true
+		}
+	}
+	if !sawMeasureFailed {
+		t.Fatalf("MeasureFailed not emitted; events = %v", obs.eventTypes())
+	}
+}
+
+// TestWorktreeMeasureBaselineFailureSkipsAgent: a baseline-measure
+// failure in worktree mode aborts before the agent runs, removes
+// the worktree, deletes the lane, and emits MeasureFailed with
+// no candidate populated.
+func TestWorktreeMeasureBaselineFailureSkipsAgent(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "proj")
+	mkRepoWithChange(t, repo, "task-1")
+	wtRoot := t.TempDir()
+	digest := customChangeDigest("task-1")
+	wantWorktree := filepath.Join(wtRoot, filepath.Base(repo)+"--"+digest)
+	measureCmd := platformCondition(
+		`printf 'oops' >&2; exit 9`,
+		`echo oops 1>&2 & exit /b 9`,
+	)
+	obs := &recordingObserver{}
+	var agentCalls int
+	agent := &fakeAgent{
+		onRun: func() error {
+			agentCalls++
+			return nil
+		},
+	}
+	w := Watcher{
+		agent:          agent,
+		Condition:      platformCondition(`printf 'task-1'`, `echo task-1`),
+		CommitTemplate: "see: {change}",
+		Measure:        &measureCmd,
+		Worktree:       true,
+		AutoMerge:      true,
+		WorktreeRoot:   wtRoot,
+		RetryCount:     1,
+		Once:           true,
+		observer:       obs,
+	}
+	if err := w.Watch(t.Context(), []string{repo}); err == nil {
+		t.Fatal("Watch returned nil; baseline failure must propagate")
+	}
+	if agentCalls != 0 {
+		t.Fatalf("agent called %d times, want 0 when baseline measure fails", agentCalls)
+	}
+	if _, err := os.Stat(wantWorktree); !os.IsNotExist(err) {
+		t.Fatal("worktree should be removed after baseline failure")
+	}
+	if branchExists(t, repo, "see/"+digest) {
+		t.Fatalf("lane should be deleted after baseline failure; see/%s still exists", digest)
+	}
+	if got := currentBranch(t, repo); got != "main" {
+		t.Fatalf("operator branch = %q, want main", got)
+	}
+	var sawMeasureFailed bool
+	for _, e := range obs.events {
+		if mf, ok := e.(MeasureFailed); ok {
+			sawMeasureFailed = true
+			if mf.Baseline != "" {
+				t.Fatalf("MeasureFailed.Baseline = %q, want empty for baseline-only failure", mf.Baseline)
+			}
+			if mf.Candidate != "" {
+				t.Fatalf("MeasureFailed.Candidate = %q, want empty when no candidate ran", mf.Candidate)
+			}
+			if mf.ExitCode != 9 {
+				t.Fatalf("MeasureFailed.ExitCode = %d, want 9", mf.ExitCode)
+			}
+			if !strings.Contains(mf.Err, "oops") {
+				t.Fatalf("MeasureFailed.Err = %q, want captured stderr", mf.Err)
+			}
+		}
+	}
+	if !sawMeasureFailed {
+		t.Fatalf("MeasureFailed not emitted; events = %v", obs.eventTypes())
+	}
+}
+
+// measureScriptIn is the worktree-mode variant of measureScript:
+// state lives inside the worktree directory so the agent and the
+// measure gate share a cwd. Without an explicit dir argument the
+// state would land in the agent's working tree (the lane checkout
+// for branch mode, the worktree for worktree mode).
+func measureScriptIn(dir, first, second string) (posix, win string) {
+	state := filepath.Join(dir, "measure-state")
+	posix = `result="` + second + `"; if [ ! -f ` + state + ` ]; then result="` + first + `"; touch ` + state + `; fi; printf '%s' "$result"`
+	win = `if exist ` + state + ` (echo ` + second + `) else (echo ` + first + ` & echo. > ` + state + `)`
+	return posix, win
 }

@@ -65,6 +65,23 @@ error.
   the catch-up commit
 - **AND** the merge proceeds as if no gate were defined
 
+#### Scenario: Passing check precedes the merge
+
+- **WHEN** worktree mode with auto-merge is active, the workflow defines
+  a check, the agent succeeded and left changes, and the check exits `0`
+- **THEN** the check runs in the worktree directory before the catch-up
+  commit
+- **AND** the merge proceeds as if no check were defined
+
+#### Scenario: Failed check triggers rollback before any commit
+
+- **WHEN** worktree mode with auto-merge is active, the workflow defines
+  a check, and the check exits nonzero
+- **THEN** no catch-up commit is created on `see/<digest>`
+- **AND** the worktree is removed and `see/<digest>` is deleted (`-D`)
+- **AND** the operator's checkout is unchanged
+- **AND** the attempt returns the check-failure error
+
 #### Scenario: Failed check short-circuits the candidate measure
 
 - **WHEN** worktree mode with auto-merge is active, the workflow defines

@@ -36,9 +36,14 @@ type RetryAttemptMsg struct {
 }
 
 type ChangeDoneMsg struct {
-	Path     string
-	Workflow string
-	Change   string
+	Path      string
+	Workflow  string
+	Change    string
+	// Baseline and Candidate are populated when the workflow's
+	// measure gate resolved and a successful landing carried both
+	// metric strings. They are empty when no measure gate ran.
+	Baseline  string
+	Candidate string
 }
 
 type ChangeFailedMsg struct {
@@ -61,6 +66,25 @@ type CheckFailedMsg struct {
 	Command  string
 	ExitCode int
 	Err      string
+}
+
+// MeasureFailedMsg is the TUI mirror of main's MeasureFailed event:
+// the final attempt failed at the workflow measure gate (baseline
+// capture failure, candidate capture failure, or non-improvement).
+// It renders identically to CheckFailedMsg and ChangeFailedMsg —
+// the row goes to PhaseFailed with the failure message in the
+// error column — but is distinguished at the event layer so
+// consumers that surface "no improvement" differently from "check
+// failed" or "agent failed" can branch on the message type.
+type MeasureFailedMsg struct {
+	Path      string
+	Workflow  string
+	Change    string
+	Command   string
+	ExitCode  int
+	Baseline  string
+	Candidate string
+	Err       string
 }
 
 // WarningMsg reports a per-repo cleanup or pre-run check step that

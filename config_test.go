@@ -641,6 +641,61 @@ func TestValidateWorkflowsEmptyIsCompatibility(t *testing.T) {
 	}
 }
 
+// TestValidateWorkflowsRejectsBlankMeasure proves the optional
+// `measure` field follows the "present blank is fatal, absent is
+// fine" contract: a workflow entry that explicitly sets measure to
+// a blank/whitespace-only value fails startup with an error naming
+// the workflow and the field. Absent measure (nil) passes through
+// because the validator uses a pointer to distinguish "absent"
+// from "present blank".
+func TestValidateWorkflowsRejectsBlankMeasure(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{"empty string", ""},
+		{"whitespace only", "  \t\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			blank := tc.value
+			cfg := Config{Workflows: []WorkflowConfig{
+				{Name: "openspec", Prompt: "Apply {change}", Condition: "echo x", Commit: "see: {change}", Measure: &blank},
+			}}
+			err := validateWorkflows(cfg)
+			if err == nil {
+				t.Fatal("err = nil, want non-nil for blank measure")
+			}
+			if !strings.Contains(err.Error(), "workflows[0]") {
+				t.Fatalf("err = %q, want it to identify workflows[0]", err.Error())
+			}
+			if !strings.Contains(err.Error(), "measure") {
+				t.Fatalf("err = %q, want it to name the measure field", err.Error())
+			}
+			if !strings.Contains(err.Error(), "openspec") {
+				t.Fatalf("err = %q, want it to name the workflow 'openspec'", err.Error())
+			}
+		})
+	}
+	t.Run("absent measure is accepted", func(t *testing.T) {
+		cfg := Config{Workflows: []WorkflowConfig{
+			{Name: "openspec", Prompt: "Apply {change}", Condition: "echo x", Commit: "see: {change}"},
+		}}
+		if err := validateWorkflows(cfg); err != nil {
+			t.Fatalf("err = %v, want nil for absent measure", err)
+		}
+	})
+	t.Run("nonblank measure is accepted", func(t *testing.T) {
+		cmd := "./bench.sh"
+		cfg := Config{Workflows: []WorkflowConfig{
+			{Name: "openspec", Prompt: "Apply {change}", Condition: "echo x", Commit: "see: {change}", Measure: &cmd},
+		}}
+		if err := validateWorkflows(cfg); err != nil {
+			t.Fatalf("err = %v, want nil for nonblank measure", err)
+		}
+	})
+}
+
 // TestValidateWorkflowsChecksDisabledEntries proves the load-time filter
 // runs AFTER validation: a disabled entry with a blank required field,
 // and a disabled duplicate name, both still fail validateWorkflows on

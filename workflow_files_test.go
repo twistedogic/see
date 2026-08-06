@@ -112,6 +112,50 @@ func TestParseWorkflowFileDisableRoundTrip(t *testing.T) {
 	})
 }
 
+// TestParseWorkflowFileMeasureRoundTrip: the optional `measure`
+// frontmatter key threads onto the produced WorkflowConfig as a
+// pointer (nil when absent, non-nil when present). An unknown
+// frontmatter key continues to be rejected by the strict
+// known-field decoder.
+func TestParseWorkflowFileMeasureRoundTrip(t *testing.T) {
+	t.Run("measure present", func(t *testing.T) {
+		path := writeWorkflowFile(t, "openspec.md", strings.Join([]string{
+			"---",
+			"condition: \"echo add-dark-mode\"",
+			"commit: \"see: apply {change}\"",
+			"measure: \"./bench.sh\"",
+			"---",
+			"Apply the change.",
+		}, "\n"))
+		wf, err := parseWorkflowFile(path)
+		if err != nil {
+			t.Fatalf("parseWorkflowFile: %v", err)
+		}
+		if wf.Measure == nil {
+			t.Fatal("Measure = nil, want non-nil pointer")
+		}
+		if *wf.Measure != "./bench.sh" {
+			t.Fatalf("Measure = %q, want ./bench.sh", *wf.Measure)
+		}
+	})
+	t.Run("absent measure is nil", func(t *testing.T) {
+		path := writeWorkflowFile(t, "openspec.md", strings.Join([]string{
+			"---",
+			"condition: \"echo add-dark-mode\"",
+			"commit: \"see: apply {change}\"",
+			"---",
+			"Apply the change.",
+		}, "\n"))
+		wf, err := parseWorkflowFile(path)
+		if err != nil {
+			t.Fatalf("parseWorkflowFile: %v", err)
+		}
+		if wf.Measure != nil {
+			t.Fatalf("Measure = %q, want nil for absent field", *wf.Measure)
+		}
+	})
+}
+
 // TestParseWorkflowFileCheckRoundTrip: the optional `check`
 // frontmatter key threads onto the produced WorkflowConfig; an
 // absent check decodes to "". A sixth key (typo) continues to be

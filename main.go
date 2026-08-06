@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +41,20 @@ var defaultPromptTemplate string
 // tokens remain unchanged.
 func renderTemplate(template, change string) string {
 	return strings.ReplaceAll(template, "{change}", change)
+}
+
+// renderTemplateWithMetric substitutes `{change}` and `{metric}`
+// in template with the supplied values. `{metric}` is the
+// baseline measure value when a measure gate is resolved; an
+// empty metric is left literal (matching the "no measure gate"
+// contract from workflow-condition spec). `{change}` is always
+// substituted.
+func renderTemplateWithMetric(template, change, metric string) string {
+	out := renderTemplate(template, change)
+	if metric != "" {
+		out = strings.ReplaceAll(out, "{metric}", metric)
+	}
+	return out
 }
 
 func customChangeDigest(change string) string {
@@ -137,6 +152,93 @@ func runCheck(ctx context.Context, cwd, command string) error {
 		return &checkFailedError{command: command, exitCode: -1, stderr: strings.TrimSpace(stderr.String())}
 	}
 	return nil
+}
+
+// defaultMeasureDir is the directory `see` reads per-workflow
+// measure convention files from when no explicit Measure value is
+// supplied. Tilde-expanded by resolveMeasureCommand (matching the
+// log_dir / worktree_root shape).
+const defaultMeasureDir = "~/.config/see/measure"
+
+// resolveMeasureCommand selects the effective measure command for
+// a workflow: a nonblank measure string (frontmatter / config)
+// wins; otherwise the regular file at
+// ~/.config/see/measure/<name>.sh is read and returned verbatim;
+// otherwise ok=false means "no measure gate". A missing convention
+// directory is not an error. The resolved command is whatever the
+// shell will receive; the caller is responsible for substituting
+// {change} (the measure command consumes {change} but never
+// {metric}) and for actually running it.
+func resolveMeasureCommand(name string, measure *string) (string, bool) {
+	if measure != nil && strings.TrimSpace(*measure) != "" {
+		return strings.TrimSpace(*measure), true
+	}
+	dir, err := expandTilde(defaultMeasureDir)
+	if err != nil {
+		return "", false
+	}
+	path := filepath.Join(dir, name+".sh")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimRight(string(body), "\r\n"), true
+}
+
+// runMeasure executes command in cwd through the platform shell
+// using the same context / process-group plumbing as runCheck and
+// resolveCustomCondition. The rendered command's stdout is
+// normalized exactly like a condition value (trailing CR/LF
+// trimmed, single line, non-whitespace required). On success the
+// normalized value is returned as the metric string; the caller
+// parses it as float64 separately so the comparison and the
+// measure-failure error carry the raw string both forms expect.
+//
+// A nonzero exit produces a *measureFailedError carrying the
+// rendered command, the integer exit code, and the captured
+// stderr. Empty / whitespace-only / multi-line / unparseable
+// output also produce a *measureFailedError (the value field is
+// populated for the unparseable case so the failure is
+// identifiable). Cancellation of ctx terminates the shell so
+// SIGINT does not strand descendants; the resulting error is the
+// context error so callers can distinguish it from a measure
+// failure.
+func runMeasure(ctx context.Context, cwd, command string) (string, error) {
+	var shell string
+	var args []string
+	if runtime.GOOS == "windows" {
+		shell, args = "cmd.exe", []string{"/C", command}
+	} else {
+		shell, args = "/bin/sh", []string{"-c", command}
+	}
+
+	cmd := exec.CommandContext(ctx, shell, args...)
+	configureConditionCommand(cmd)
+	cmd.Dir = cwd
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return "", &measureFailedError{command: command, exitCode: exitErr.ExitCode(), stderr: strings.TrimSpace(stderr.String())}
+		}
+		return "", &measureFailedError{command: command, exitCode: -1, stderr: strings.TrimSpace(stderr.String())}
+	}
+	value := strings.TrimRight(stdout.String(), "\r\n")
+	if strings.TrimSpace(value) == "" {
+		return "", &measureFailedError{command: command, candidate: value}
+	}
+	if strings.ContainsAny(value, "\r\n") {
+		return "", &measureFailedError{command: command, candidate: value}
+	}
+	if _, err := strconv.ParseFloat(value, 64); err != nil {
+		return "", &measureFailedError{command: command, candidate: value}
+	}
+	return value, nil
 }
 
 type runMode int
@@ -383,9 +485,12 @@ func (w Watcher) rollbackWorkflowLane(path, change, digest, ref, commit string, 
 // as a Warning event before triggering rollback so the next
 // workflow can run on a clean checkout. The custom lane is left
 // checked out when no error is returned so the next polling pass
-// resumes the same persistent branch.
-func (w Watcher) catchUpCustomCommit(path, change string) error {
-	return stageAndCommitIfDirty(path, w.catchUpMessage(change))
+// resumes the same persistent branch. The baseline value (empty
+// when no measure gate is resolved) flows through to the catch-up
+// commit so a measure-gated workflow's commit message carries
+// `{metric}`.
+func (w Watcher) catchUpCustomCommit(path, change, baseline string) error {
+	return stageAndCommitIfDirty(path, w.catchUpMessage(change, baseline))
 }
 
 // runWorkflowCheckIfDirty runs the configured check gate against
@@ -415,10 +520,12 @@ func (w Watcher) runWorkflowCheckIfDirty(ctx context.Context, cwd, change string
 // the active mode: the rendered CommitTemplate in custom mode (where
 // a workflow supplies its own commit subject) and the OpenSpec
 // compatibility subject otherwise. Worktree mode reuses this so both
-// modes share one message contract.
-func (w Watcher) catchUpMessage(change string) string {
+// modes share one message contract. An empty baseline reduces to
+// the no-measure rendering (the `{metric}` token stays literal),
+// matching the "absent measure gate" contract from the spec.
+func (w Watcher) catchUpMessage(change, baseline string) string {
 	if w.customMode() {
-		return renderTemplate(w.CommitTemplate, change)
+		return renderTemplateWithMetric(w.CommitTemplate, change, baseline)
 	}
 	return fmt.Sprintf("see: apply openspec change %s", change)
 }
@@ -536,9 +643,12 @@ func (w Watcher) rollbackWorktree(repoPath, digest, worktreePath string, cause e
 // branch name, resolved to its tip at rebase time). It is the
 // manual-merge success path: the lane and worktree are left in place
 // for review. A rebase conflict aborts the rebase and returns the
-// error; the caller triggers rollbackWorktree.
-func (w Watcher) rebaseWorktreeLane(worktreePath, operatorRef, change string) error {
-	if err := stageAndCommitIfDirty(worktreePath, w.catchUpMessage(change)); err != nil {
+// error; the caller triggers rollbackWorktree. The baseline value
+// (empty when no measure gate is resolved) flows through to the
+// catch-up commit so a measure-gated workflow's commit message
+// carries `{metric}`.
+func (w Watcher) rebaseWorktreeLane(worktreePath, operatorRef, change, baseline string) error {
+	if err := stageAndCommitIfDirty(worktreePath, w.catchUpMessage(change, baseline)); err != nil {
 		return err
 	}
 	if out, err := exec.Command("git", "-C", worktreePath, "rebase", operatorRef).CombinedOutput(); err != nil {
@@ -553,9 +663,11 @@ func (w Watcher) rebaseWorktreeLane(worktreePath, operatorRef, change string) er
 // name, resolved to its tip at rebase time) and then fast-forward
 // merges the lane into the operator's branch via ffMergeLane. A rebase
 // conflict returns an error (after aborting the rebase) so the caller
-// can run rollbackWorktree.
-func (w Watcher) mergeWorktreeLane(repoPath, operatorRef, worktreePath, digest, change string) error {
-	if err := w.rebaseWorktreeLane(worktreePath, operatorRef, change); err != nil {
+// can run rollbackWorktree. The baseline value (empty when no measure
+// gate is resolved) flows through to the catch-up commit so a
+// measure-gated workflow's commit message carries `{metric}`.
+func (w Watcher) mergeWorktreeLane(repoPath, operatorRef, worktreePath, digest, change, baseline string) error {
+	if err := w.rebaseWorktreeLane(worktreePath, operatorRef, change, baseline); err != nil {
 		return err
 	}
 	return w.ffMergeLane(repoPath, worktreePath, digest, change)
@@ -685,6 +797,13 @@ type ChangeDone struct {
 	Path     string
 	Workflow string
 	Change   string
+	// Baseline and Candidate carry the normalized metric strings
+	// for a successful measure-gated landing. They are empty when
+	// the workflow has no measure gate, identical to the pre-change
+	// success payload; populated only when both values exist and the
+	// candidate strictly exceeded the baseline.
+	Baseline  string
+	Candidate string
 }
 
 func (ChangeDone) isEvent() {}
@@ -722,6 +841,33 @@ type CheckFailed struct {
 }
 
 func (CheckFailed) isEvent() {}
+
+// MeasureFailed is the terminal event when the final attempt for a
+// repository failed at the workflow measure gate. Either the
+// baseline or the candidate measure command errored (or produced
+// unparseable / multi-line / empty output), or the candidate did
+// not strictly exceed the baseline. It is mutually exclusive with
+// CheckFailed and ChangeFailed for the same final failure:
+// errors.As on *measureFailedError selects this event in runOnce.
+// Command is the rendered measure command; ExitCode is the integer
+// shell exit code (0 when the failure was an unparseable value or
+// a non-improvement rather than a shell error); Baseline and
+// Candidate are the normalized metric strings when available; Err
+// is the captured stderr (trimmed) for JSONL and TUI surfaces.
+type MeasureFailed struct {
+	Path      string
+	Workflow  string
+	Change    string
+	Command   string
+	ExitCode  int
+	Baseline  string
+	Candidate string
+	Err       string
+	// summary: see RetryAttempt.summary.
+	summary string
+}
+
+func (MeasureFailed) isEvent() {}
 
 type LogPath struct {
 	Path     string
@@ -805,6 +951,15 @@ type Watcher struct {
 	// and error semantics. The runtime check is trimmed; whitespace-
 	// only is treated as absent so callers do not have to.
 	Check string
+	// Measure is the resolved measure command for the active
+	// workflow: a nonblank value (frontmatter / config) wins;
+	// otherwise the convention file at
+	// ~/.config/see/measure/<workflow-name>.sh is consulted and its
+	// body becomes the command. Blank means "no measure gate".
+	// The runtime measure is trimmed; whitespace-only is treated
+	// as absent. The pointer mirrors WorkflowConfig.Measure so
+	// nil-vs-empty distinction is preserved through runOneWorkflow.
+	Measure *string
 	// Workflows is the ordered multi-workflow configuration. When
 	// non-empty, Watcher iterates over each workflow for every
 	// repository instead of falling through to the legacy
@@ -886,6 +1041,84 @@ func (w Watcher) checkEnabled() bool {
 	return strings.TrimSpace(w.Check) != ""
 }
 
+// SetMeasureTemplate stores the resolved measure command string
+// for the watcher. nil and whitespace-only both mean "no measure
+// gate". The trimmed effective string is kept as a plain string
+// so callers do not need to thread a pointer through the gate
+// decisions.
+func (w *Watcher) SetMeasureTemplate(s *string) {
+	if s == nil || strings.TrimSpace(*s) == "" {
+		w.Measure = nil
+		return
+	}
+	trimmed := strings.TrimSpace(*s)
+	w.Measure = &trimmed
+}
+
+// measureEnabled reports whether the watcher has a resolved
+// measure command. The runtime check mirrors checkEnabled: the
+// watcher copy carries the trimmed value (see runOneWorkflow),
+// and absent / whitespace-only both mean "no gate".
+func (w Watcher) measureEnabled() bool {
+	return w.Measure != nil && strings.TrimSpace(*w.Measure) != ""
+}
+
+// captureBaseline runs the measure gate in cwd to capture the
+// pre-agent baseline. Failure routes to the watcher's per-mode
+// rollback (branch or worktree) depending on w.Worktree so a
+// baseline error returns the wrapped measureFailedError unchanged.
+// The caller decides the rollback path because the lane/worktree
+// state is owned by the caller; the helper is a thin shell
+// wrapper around runMeasure.
+func (w Watcher) captureBaseline(ctx context.Context, cwd string) (string, error) {
+	if !w.measureEnabled() {
+		return "", nil
+	}
+	cmd := renderTemplate(*w.Measure, "")
+	value, err := runMeasure(ctx, cwd, cmd)
+	if err == nil {
+		return value, nil
+	}
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+	return "", err
+}
+
+// compareAndLand runs the candidate measure in cwd and returns
+// (candidate, nil) when the candidate strictly exceeds the
+// baseline; otherwise it returns a *measureFailedError carrying
+// the rendered command, exit code, baseline, candidate, and
+// stderr. The caller is responsible for staging + commit; this
+// helper is the gate decision only. When runMeasure returns its
+// own measure-failure (command error, empty / multi-line output,
+// or unparseable value), the baseline is filled in here so the
+// rolled-back event carries what was measured.
+func (w Watcher) compareAndLand(ctx context.Context, cwd, baseline string) (string, error) {
+	if !w.measureEnabled() {
+		return "", nil
+	}
+	cmd := renderTemplate(*w.Measure, "")
+	value, err := runMeasure(ctx, cwd, cmd)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		var mfe *measureFailedError
+		if errors.As(err, &mfe) {
+			mfe.baseline = baseline
+			return "", mfe
+		}
+		return "", err
+	}
+	bFloat, bErr := strconv.ParseFloat(baseline, 64)
+	cFloat, cErr := strconv.ParseFloat(value, 64)
+	if bErr != nil || cErr != nil || !(cFloat > bFloat) {
+		return "", &measureFailedError{command: cmd, baseline: baseline, candidate: value}
+	}
+	return value, nil
+}
+
 // NewWatcher constructs a fully-populated Watcher. PiAgent fields are
 // unexported (lowercase) to keep construction hermetic; this is the
 // blessed path for building one. Tests that need an Agent without a
@@ -945,7 +1178,11 @@ func (w Watcher) laneDigest(change string) string {
 // conflict, merge failure) routes through rollbackWorktree, which removes
 // the worktree and deletes the lane. The pre-attempt dirty-tree check is
 // defense in depth against writeful condition commands; the worktree
-// itself is built from a commit, not the working tree.
+// itself is built from a commit, not the working tree. A workflow with a
+// resolved measure gate captures a baseline before the agent, runs the
+// candidate measure after the agent succeeds (regardless of whether the
+// working tree is dirty), and only lands the change when the candidate
+// strictly exceeds the baseline.
 func (w Watcher) workResolvedWorktree(ctx context.Context, path, change, ref string) error {
 	digest := w.laneDigest(change)
 	if dirty, err := hasUntrackedOrModified(path); err != nil {
@@ -957,6 +1194,14 @@ func (w Watcher) workResolvedWorktree(ctx context.Context, path, change, ref str
 	if err != nil {
 		return err
 	}
+	var baseline, candidate string
+	if w.measureEnabled() {
+		baseline, err = w.captureBaseline(ctx, worktreePath)
+		if err != nil {
+			w.warn(path, change, err.Error())
+			return w.rollbackWorktree(path, digest, worktreePath, err)
+		}
+	}
 	if w.observer != nil {
 		w.observer.Observe(ChangeStarted{Path: path, Workflow: w.WorkflowName, Change: change})
 	}
@@ -964,7 +1209,8 @@ func (w Watcher) workResolvedWorktree(ctx context.Context, path, change, ref str
 	if template == "" {
 		template = defaultPromptTemplate
 	}
-	logPath, runErr := w.runAgent(ctx, worktreePath, digest, renderTemplate(template, change), w.Model)
+	renderedPrompt := renderTemplateWithMetric(template, change, baseline)
+	logPath, runErr := w.runAgent(ctx, worktreePath, digest, renderedPrompt, w.Model)
 	if logPath != "" && w.observer != nil {
 		w.observer.Observe(LogPath{Path: logPath, Workflow: w.WorkflowName, Change: change})
 	}
@@ -975,17 +1221,29 @@ func (w Watcher) workResolvedWorktree(ctx context.Context, path, change, ref str
 		w.warn(path, change, checkErr.Error())
 		return w.rollbackWorktree(path, digest, worktreePath, checkErr)
 	}
-	if w.AutoMerge {
-		if err := w.mergeWorktreeLane(path, ref, worktreePath, digest, change); err != nil {
-			return w.rollbackWorktree(path, digest, worktreePath, err)
-		}
-	} else {
-		if err := w.rebaseWorktreeLane(worktreePath, ref, change); err != nil {
+	if w.measureEnabled() {
+		candidate, err = w.compareAndLand(ctx, worktreePath, baseline)
+		if err != nil {
+			w.warn(path, change, err.Error())
 			return w.rollbackWorktree(path, digest, worktreePath, err)
 		}
 	}
+	if w.AutoMerge {
+		if err := w.mergeWorktreeLane(path, ref, worktreePath, digest, change, baseline); err != nil {
+			return w.rollbackWorktree(path, digest, worktreePath, err)
+		}
+	} else {
+		if err := w.rebaseWorktreeLane(worktreePath, ref, change, baseline); err != nil {
+			return w.rollbackWorktree(path, digest, worktreePath, err)
+		}
+	}
+	done := ChangeDone{Path: path, Workflow: w.WorkflowName, Change: change}
+	if w.measureEnabled() {
+		done.Baseline = baseline
+		done.Candidate = candidate
+	}
 	if w.observer != nil {
-		w.observer.Observe(ChangeDone{Path: path, Workflow: w.WorkflowName, Change: change})
+		w.observer.Observe(done)
 	}
 	return nil
 }
@@ -1021,6 +1279,14 @@ func (w Watcher) workResolved(ctx context.Context, path, change string) error {
 		if err != nil {
 			return err
 		}
+		var baseline, candidate string
+		if w.measureEnabled() {
+			baseline, err = w.captureBaseline(ctx, path)
+			if err != nil {
+				w.warn(path, change, err.Error())
+				return w.rollbackWorkflowLane(path, change, digest, ref, attemptTip, created, err)
+			}
+		}
 		if w.observer != nil {
 			w.observer.Observe(ChangeStarted{Path: path, Workflow: w.WorkflowName, Change: change})
 		}
@@ -1028,7 +1294,8 @@ func (w Watcher) workResolved(ctx context.Context, path, change string) error {
 		if template == "" {
 			template = defaultPromptTemplate
 		}
-		logPath, runErr := w.runAgent(ctx, path, digest, renderTemplate(template, change), w.Model)
+		renderedPrompt := renderTemplateWithMetric(template, change, baseline)
+		logPath, runErr := w.runAgent(ctx, path, digest, renderedPrompt, w.Model)
 		if logPath != "" && w.observer != nil {
 			w.observer.Observe(LogPath{Path: logPath, Workflow: w.WorkflowName, Change: change})
 		}
@@ -1039,12 +1306,24 @@ func (w Watcher) workResolved(ctx context.Context, path, change string) error {
 			w.warn(path, change, checkErr.Error())
 			return w.rollbackWorkflowLane(path, change, digest, ref, attemptTip, created, checkErr)
 		}
-		if commitErr := w.catchUpCustomCommit(path, change); commitErr != nil {
+		if w.measureEnabled() {
+			candidate, err = w.compareAndLand(ctx, path, baseline)
+			if err != nil {
+				w.warn(path, change, err.Error())
+				return w.rollbackWorkflowLane(path, change, digest, ref, attemptTip, created, err)
+			}
+		}
+		if commitErr := w.catchUpCustomCommit(path, change, baseline); commitErr != nil {
 			w.warn(path, change, commitErr.Error())
 			return w.rollbackWorkflowLane(path, change, digest, ref, attemptTip, created, commitErr)
 		}
+		done := ChangeDone{Path: path, Workflow: w.WorkflowName, Change: change}
+		if w.measureEnabled() {
+			done.Baseline = baseline
+			done.Candidate = candidate
+		}
 		if w.observer != nil {
-			w.observer.Observe(ChangeDone{Path: path, Workflow: w.WorkflowName, Change: change})
+			w.observer.Observe(done)
 		}
 		return nil
 	}
@@ -1086,7 +1365,7 @@ func (w Watcher) workResolved(ctx context.Context, path, change string) error {
 	if err := add.Run(); err != nil {
 		w.warn(path, change, fmt.Sprintf("git add failed: %v", err))
 	}
-	msg := w.catchUpMessage(change)
+	msg := w.catchUpMessage(change, "")
 	if err := exec.Command("git", "-C", path, "commit", "-m", msg).Run(); err != nil {
 		w.warn(path, change, fmt.Sprintf("git commit failed: %v", err))
 	}
@@ -1137,14 +1416,30 @@ func (w Watcher) runAgent(ctx context.Context, path, change, prompt, model strin
 }
 
 // observeWorkflowFailure emits the terminal event for a failed
-// workflow: CheckFailed when the final error is a check failure,
-// ChangeFailed otherwise. The two are mutually exclusive — the
-// selection is driven by errors.As walking the wrapping chain so a
-// rollback wrapper around *checkFailedError still selects the
-// check variant. Command, ExitCode, and Err on CheckFailed come
-// straight from the sentinel.
+// workflow: MeasureFailed when the final error is a measure failure,
+// CheckFailed when it is a check failure, ChangeFailed otherwise. The
+// three are mutually exclusive — the selection is driven by errors.As
+// walking the wrapping chain so a rollback wrapper around any of the
+// three sentinels still selects the right variant. Command, ExitCode,
+// and Err on each event come straight from the sentinel; Baseline /
+// Candidate carry the measure values when available.
 func (w Watcher) observeWorkflowFailure(repo, workflow, change string, err error) {
 	if w.observer == nil {
+		return
+	}
+	var mfe *measureFailedError
+	if errors.As(err, &mfe) {
+		w.observer.Observe(MeasureFailed{
+			Path:      repo,
+			Workflow:  workflow,
+			Change:    change,
+			Command:   mfe.command,
+			ExitCode:  mfe.exitCode,
+			Baseline:  mfe.baseline,
+			Candidate: mfe.candidate,
+			Err:       mfe.stderr,
+			summary:   summaryFor(err),
+		})
 		return
 	}
 	var cfe *checkFailedError
@@ -1181,6 +1476,12 @@ func (w Watcher) runOneWorkflow(ctx context.Context, repo string, wf WorkflowCon
 	child.Model = strings.TrimSpace(wf.Model)
 	child.SetPromptTemplate(wf.Prompt)
 	child.SetCheckTemplate(wf.Check)
+	resolved, ok := resolveMeasureCommand(wf.Name, wf.Measure)
+	if ok {
+		child.SetMeasureTemplate(&resolved)
+	} else {
+		child.SetMeasureTemplate(nil)
+	}
 	return child.runWithRetry(ctx, repo)
 }
 
@@ -1389,11 +1690,13 @@ func (o tuiObserver) Observe(e Event) {
 	case RetryAttempt:
 		o.send(tui.RetryAttemptMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change, N: e.N, Max: e.Max, Err: pickSummary(e.Err, e.summary)})
 	case ChangeDone:
-		o.send(tui.ChangeDoneMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change})
+		o.send(tui.ChangeDoneMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change, Baseline: e.Baseline, Candidate: e.Candidate})
 	case ChangeFailed:
 		o.send(tui.ChangeFailedMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change, Err: pickSummary(e.Err, e.summary)})
 	case CheckFailed:
 		o.send(tui.CheckFailedMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change, Command: e.Command, ExitCode: e.ExitCode, Err: pickSummary(e.Err, e.summary)})
+	case MeasureFailed:
+		o.send(tui.MeasureFailedMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change, Command: e.Command, ExitCode: e.ExitCode, Baseline: e.Baseline, Candidate: e.Candidate, Err: pickSummary(e.Err, e.summary)})
 	case Warning:
 		o.send(tui.WarningMsg{Path: e.Path, Workflow: e.Workflow, Change: e.Change, Msg: e.Msg})
 	case InfraError:

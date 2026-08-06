@@ -63,3 +63,46 @@ func (e *checkFailedError) Error() string {
 func (e *checkFailedError) Summary() string {
 	return "check failed"
 }
+
+// measureFailedError reports that a workflow's measure gate failed
+// at either the baseline (before the agent ran) or the candidate
+// (after the agent succeeded). It is the new sibling of
+// checkFailedError: the rendered command, exit code, the baseline
+// and candidate values when available, and the captured stderr are
+// carried so retries can summarize the failure and the terminal
+// MeasureFailed event has everything it needs without re-running
+// the shell. Error() distinguishes "no improvement" (both
+// baseline and candidate populated, candidate not strictly greater)
+// from "command errored" (baseline empty; candidate may carry the
+// unparseable value when the candidate phase caught it).
+// Summary() exposes the concise "no improvement" / "measure failed"
+// tier so the TUI grid and RetryAttempt events stay short. The
+// sentinel implements errorSummary so errors.As walks any rollback
+// wrapper cleanly.
+type measureFailedError struct {
+	command   string
+	exitCode  int
+	baseline  string
+	candidate string
+	stderr    string
+}
+
+func (e *measureFailedError) Error() string {
+	switch {
+	case e.baseline != "" && e.candidate != "":
+		return fmt.Sprintf("see: measure failed: candidate %s does not exceed baseline %s (%s)", e.candidate, e.baseline, e.command)
+	case e.candidate != "":
+		return fmt.Sprintf("see: measure failed: %s output %q is not a number", e.command, e.candidate)
+	case e.stderr != "":
+		return fmt.Sprintf("see: measure failed: %s (exit %d): %s", e.command, e.exitCode, e.stderr)
+	default:
+		return fmt.Sprintf("see: measure failed: %s (exit %d)", e.command, e.exitCode)
+	}
+}
+
+func (e *measureFailedError) Summary() string {
+	if e.baseline != "" && e.candidate != "" {
+		return "no improvement"
+	}
+	return "measure failed"
+}
