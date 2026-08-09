@@ -1,0 +1,34 @@
+version: "3"
+
+vars:
+  BINARY: see
+
+tasks:
+  default:
+    desc: Format, lint, test, and build
+    deps:
+      - test
+      - build
+
+  fmt:
+    desc: Format Go source (go fmt)
+    cmds:
+      - go fmt ./...
+
+  lint:
+    desc: Lint with go vet
+    cmds:
+      - go vet ./...
+
+  test:
+    desc: Run tests (30s timeout, matching CI)
+    deps:
+      - fmt
+      - lint
+    cmds:
+      - go test -timeout 30s ./...
+
+  build:
+    desc: Build the {{.BINARY}} binary
+    cmds:
+      - go build -o {{.BINARY}} .

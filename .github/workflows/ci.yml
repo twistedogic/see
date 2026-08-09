@@ -22,15 +22,12 @@ jobs:
         with:
           go-version: "1.26.4"
           cache: true
-      - name: gofmt
-        run: |
-          if [ "$(gofmt -l . | wc -l)" -ne 0 ]; then
-            echo "gofmt would reformat:"
-            gofmt -l .
-            exit 1
-          fi
-        shell: bash
-      - name: go vet
-        run: go vet ./...
-      - name: go test
-        run: go test -timeout 30s ./...
+      - uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+      - name: fmt, lint, test, build
+        run: task
+      - name: verify formatting
+        # `task` runs `go fmt` (in-place); fail CI if it changed anything,
+        # since that means a file was not committed formatted.
+        run: git diff --exit-code

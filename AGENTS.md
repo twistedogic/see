@@ -16,6 +16,10 @@ Guidelines for AI agents and contributors working on this project.
 
 ## Testing
 
+- Local Continuous Integration (CI) runs through `task` (see
+  `Taskfile.yml`), which mirrors `.github/workflows/ci.yml`: `task` or
+  `task default` runs format → lint → test → build, and `task fmt`,
+  `task lint`, `task test`, and `task build` run each step alone.
 - `main` is a watch loop: `Watcher.Watch` (`main.go`) runs one
   `runOnce` pass immediately, then waits `Watcher.PollInterval`
   (`DefaultPollInterval` = five minutes via `NewWatcher`) after every
@@ -31,7 +35,7 @@ Guidelines for AI agents and contributors working on this project.
   - Set `Watcher.PollInterval` to a short duration or zero in unit
     tests so the loop returns within a bounded deadline. A literal
     `Watcher{}` defaults to zero interval for this reason.
-  - Always run `go test -timeout 30s ./...` (or shorter). A wedged
+  - Always run `task test` (`go test -timeout 30s ./...`, or shorter). A wedged
     poll loop or goroutine should fail fast at 30 seconds rather than
     hitting the runner's default 10-minute ceiling and masking the
     real bug under a generic timeout.
