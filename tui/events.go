@@ -36,9 +36,9 @@ type RetryAttemptMsg struct {
 }
 
 type ChangeDoneMsg struct {
-	Path      string
-	Workflow  string
-	Change    string
+	Path     string
+	Workflow string
+	Change   string
 	// Baseline and Candidate are populated when the workflow's
 	// measure gate resolved and a successful landing carried both
 	// metric strings. They are empty when no measure gate ran.

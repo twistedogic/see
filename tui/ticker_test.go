@@ -146,7 +146,7 @@ func TestTickerResetOnNewActivityAndResize(t *testing.T) {
 // starts inside the gap.
 func TestTickerLoopContainsVisibleGap(t *testing.T) {
 	m := NewModel()
-	m.width = 15 // middleWidth = 10
+	m.width = 15                 // middleWidth = 10
 	m.activity = "abcdefghijklm" // 13 wide → overflows the 10-wide window
 	m.tickerOffset = runewidth.StringWidth(m.activity)
 	rows := footerRows(m)

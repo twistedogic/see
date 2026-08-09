@@ -70,8 +70,8 @@ type Model struct {
 	infraErr     string
 	activity     string
 	tickerOffset int
-	discoverSeq  uint64 // monotonic, assigned to a row on first RepoSeen
-	activitySeq  uint64 // monotonic, advanced on each meaningful lifecycle event
+	discoverSeq  uint64     // monotonic, assigned to a row on first RepoSeen
+	activitySeq  uint64     // monotonic, advanced on each meaningful lifecycle event
 	help         help.Model // bubbles help bar; ShowAll toggles short/full
 	keys         keymap     // typed source of truth for footer key bindings
 }
