@@ -13,11 +13,11 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -75,20 +75,24 @@ func workflowIdentityDigest(name, change string) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-// resolveCustomCondition runs the configured predicate in the platform
-// shell. A status of 1 is the normal idle result; successful stdout is
-// normalized into the single-line custom change identity.
-func resolveCustomCondition(ctx context.Context, path, condition string) (string, error) {
-	var shell string
-	var args []string
-	if runtime.GOOS == "windows" {
-		shell, args = "cmd.exe", []string{"/C", condition}
-	} else {
-		shell, args = "/bin/sh", []string{"-c", condition}
+// configureProcessGroup makes context cancellation terminate the shell's
+// process group, not only the shell parent that may have spawned a child.
+func configureProcessGroup(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
+}
 
-	cmd := exec.CommandContext(ctx, shell, args...)
-	configureConditionCommand(cmd)
+// resolveCustomCondition runs the configured predicate in /bin/sh. A
+// status of 1 is the normal idle result; successful stdout is normalized
+// into the single-line custom change identity.
+func resolveCustomCondition(ctx context.Context, path, condition string) (string, error) {
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", condition)
+	configureProcessGroup(cmd)
 	cmd.Dir = path
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -125,16 +129,8 @@ func resolveCustomCondition(ctx context.Context, path, condition string) (string
 // SIGINT does not strand descendants; the resulting error is the
 // context error so callers can distinguish it from a check failure.
 func runCheck(ctx context.Context, cwd, command string) error {
-	var shell string
-	var args []string
-	if runtime.GOOS == "windows" {
-		shell, args = "cmd.exe", []string{"/C", command}
-	} else {
-		shell, args = "/bin/sh", []string{"-c", command}
-	}
-
-	cmd := exec.CommandContext(ctx, shell, args...)
-	configureConditionCommand(cmd)
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", command)
+	configureProcessGroup(cmd)
 	cmd.Dir = cwd
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -204,16 +200,8 @@ func resolveMeasureCommand(name string, measure *string) (string, bool) {
 // context error so callers can distinguish it from a measure
 // failure.
 func runMeasure(ctx context.Context, cwd, command string) (string, error) {
-	var shell string
-	var args []string
-	if runtime.GOOS == "windows" {
-		shell, args = "cmd.exe", []string{"/C", command}
-	} else {
-		shell, args = "/bin/sh", []string{"-c", command}
-	}
-
-	cmd := exec.CommandContext(ctx, shell, args...)
-	configureConditionCommand(cmd)
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", command)
+	configureProcessGroup(cmd)
 	cmd.Dir = cwd
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

@@ -263,7 +263,7 @@ func TestDirtyTreeErrorPropagatesSummaryThroughWatcherToTUI(t *testing.T) {
 		observer:   obs,
 		Workflows: []WorkflowConfig{{
 			Name:      "dirty-test",
-			Condition: platformCondition(`printf 'task-1'`, `echo task-1`),
+			Condition: `printf 'task-1'`,
 			Prompt:    "Apply {change}",
 			Commit:    "see: apply {change}",
 		}},

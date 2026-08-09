@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -256,9 +255,6 @@ func TestPiAgentRespectsSeeLogDir(t *testing.T) {
 }
 
 func TestPiAgentPassesModelFlag(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses a POSIX shell script to record argv")
-	}
 	args := runPiAgentWithRecordedArgs(t, "openai/gpt-5-mini")
 	want := []string{"--mode", "json", "--no-session", "--model", "openai/gpt-5-mini", "prompt text"}
 	if strings.Join(args, "\x00") != strings.Join(want, "\x00") {
@@ -267,9 +263,6 @@ func TestPiAgentPassesModelFlag(t *testing.T) {
 }
 
 func TestPiAgentOmitsModelFlagWhenBlank(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses a POSIX shell script to record argv")
-	}
 	want := []string{"--mode", "json", "--no-session", "prompt text"}
 	for _, model := range []string{"", "  "} {
 		t.Run(fmt.Sprintf("model-%q", model), func(t *testing.T) {
@@ -2043,18 +2036,8 @@ func TestCompatibilityModeRetainsOpenSpecContract(t *testing.T) {
 	})
 }
 
-func platformCondition(unix, windows string) string {
-	if runtime.GOOS == "windows" {
-		return windows
-	}
-	return unix
-}
-
 func TestResolveCustomConditionUsesPlatformShellAndNormalizesOutput(t *testing.T) {
-	got, err := resolveCustomCondition(t.Context(), t.TempDir(), platformCondition(
-		`printf 'add-dark-mode\r\n'`,
-		`echo add-dark-mode`,
-	))
+	got, err := resolveCustomCondition(t.Context(), t.TempDir(), `printf 'add-dark-mode\r\n'`)
 	if err != nil {
 		t.Fatalf("resolveCustomCondition: %v", err)
 	}
@@ -2064,10 +2047,7 @@ func TestResolveCustomConditionUsesPlatformShellAndNormalizesOutput(t *testing.T
 }
 
 func TestResolveCustomConditionExitOneReportsIdle(t *testing.T) {
-	got, err := resolveCustomCondition(t.Context(), t.TempDir(), platformCondition(
-		`exit 1`,
-		`exit /b 1`,
-	))
+	got, err := resolveCustomCondition(t.Context(), t.TempDir(), `exit 1`)
 	if err != nil {
 		t.Fatalf("exit 1 returned error: %v", err)
 	}
@@ -2077,10 +2057,7 @@ func TestResolveCustomConditionExitOneReportsIdle(t *testing.T) {
 }
 
 func TestResolveCustomConditionFailureIncludesStderr(t *testing.T) {
-	_, err := resolveCustomCondition(t.Context(), t.TempDir(), platformCondition(
-		`printf 'syntax error' >&2; exit 2`,
-		`echo syntax error 1>&2 & exit /b 2`,
-	))
+	_, err := resolveCustomCondition(t.Context(), t.TempDir(), `printf 'syntax error' >&2; exit 2`)
 	if err == nil {
 		t.Fatal("resolveCustomCondition returned nil error for exit 2")
 	}
@@ -2095,7 +2072,7 @@ func TestResolveCustomConditionFailureIncludesStderr(t *testing.T) {
 // error and stderr is captured-but-ignored on success.
 func TestRunCheckPassesOnExitZero(t *testing.T) {
 	dir := t.TempDir()
-	if err := runCheck(t.Context(), dir, platformCondition(`exit 0`, `exit /b 0`)); err != nil {
+	if err := runCheck(t.Context(), dir, `exit 0`); err != nil {
 		t.Fatalf("runCheck: %v, want nil", err)
 	}
 }
@@ -2106,10 +2083,7 @@ func TestRunCheckPassesOnExitZero(t *testing.T) {
 // "check failed" tier.
 func TestRunCheckNonZeroReturnsCheckFailedError(t *testing.T) {
 	dir := t.TempDir()
-	err := runCheck(t.Context(), dir, platformCondition(
-		`printf 'build failed' >&2; exit 7`,
-		`echo build failed 1>&2 & exit /b 7`,
-	))
+	err := runCheck(t.Context(), dir, `printf 'build failed' >&2; exit 7`)
 	if err == nil {
 		t.Fatal("runCheck returned nil error for nonzero exit")
 	}
@@ -2134,10 +2108,7 @@ func TestRunCheckNonZeroReturnsCheckFailedError(t *testing.T) {
 func TestRunCheckRunsInCwd(t *testing.T) {
 	dir := t.TempDir()
 	marker := "check-ran-here"
-	if err := runCheck(t.Context(), dir, platformCondition(
-		`printf x > `+marker,
-		`echo x > `+marker,
-	)); err != nil {
+	if err := runCheck(t.Context(), dir, `printf x > `+marker); err != nil {
 		t.Fatalf("runCheck: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, marker)); err != nil {
@@ -2149,9 +2120,6 @@ func TestRunCheckRunsInCwd(t *testing.T) {
 // context terminates the check shell so SIGINT does not strand
 // descendants, matching the condition contract.
 func TestRunCheckCancellationStopsShell(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses POSIX sleep to drive a long-running shell")
-	}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	dir := t.TempDir()
@@ -2189,10 +2157,7 @@ func TestRunCheckCancellationStopsShell(t *testing.T) {
 // single line, non-whitespace.
 func TestRunMeasureReturnsNormalizedValue(t *testing.T) {
 	dir := t.TempDir()
-	got, err := runMeasure(t.Context(), dir, platformCondition(
-		`printf '0.73\n'`,
-		`echo 0.73`,
-	))
+	got, err := runMeasure(t.Context(), dir, `printf '0.73\n'`)
 	if err != nil {
 		t.Fatalf("runMeasure: %v", err)
 	}
@@ -2208,10 +2173,7 @@ func TestRunMeasureReturnsNormalizedValue(t *testing.T) {
 // selection path in runOnce.
 func TestRunMeasureRejectsUnparseableValue(t *testing.T) {
 	dir := t.TempDir()
-	_, err := runMeasure(t.Context(), dir, platformCondition(
-		`printf 'ok\n'`,
-		`echo ok`,
-	))
+	_, err := runMeasure(t.Context(), dir, `printf 'ok\n'`)
 	if err == nil {
 		t.Fatal("runMeasure returned nil error for unparseable value")
 	}
@@ -2232,10 +2194,7 @@ func TestRunMeasureRejectsUnparseableValue(t *testing.T) {
 // spec requires non-whitespace output.
 func TestRunMeasureRejectsEmptyValue(t *testing.T) {
 	dir := t.TempDir()
-	_, err := runMeasure(t.Context(), dir, platformCondition(
-		`printf '   '`,
-		`echo    `,
-	))
+	_, err := runMeasure(t.Context(), dir, `printf '   '`)
 	if err == nil {
 		t.Fatal("runMeasure returned nil for whitespace-only value")
 	}
@@ -2250,10 +2209,7 @@ func TestRunMeasureRejectsEmptyValue(t *testing.T) {
 // single-line output.
 func TestRunMeasureRejectsMultilineValue(t *testing.T) {
 	dir := t.TempDir()
-	_, err := runMeasure(t.Context(), dir, platformCondition(
-		`printf '0.5\n0.6\n'`,
-		`echo 0.5 & echo 0.6`,
-	))
+	_, err := runMeasure(t.Context(), dir, `printf '0.5\n0.6\n'`)
 	if err == nil {
 		t.Fatal("runMeasure returned nil for multi-line value")
 	}
@@ -2270,10 +2226,7 @@ func TestRunMeasureRejectsMultilineValue(t *testing.T) {
 // shell.
 func TestRunMeasureNonZeroReturnsMeasureFailed(t *testing.T) {
 	dir := t.TempDir()
-	_, err := runMeasure(t.Context(), dir, platformCondition(
-		`printf 'benchmark crashed' >&2; exit 9`,
-		`echo benchmark crashed 1>&2 & exit /b 9`,
-	))
+	_, err := runMeasure(t.Context(), dir, `printf 'benchmark crashed' >&2; exit 9`)
 	if err == nil {
 		t.Fatal("runMeasure returned nil error for nonzero exit")
 	}
@@ -2300,10 +2253,7 @@ func TestRunMeasureNonZeroReturnsMeasureFailed(t *testing.T) {
 func TestRunMeasureRunsInCwd(t *testing.T) {
 	dir := t.TempDir()
 	marker := "measure-ran-here"
-	if _, err := runMeasure(t.Context(), dir, platformCondition(
-		`(printf 0.5; touch `+marker+`) | cat`,
-		`(echo 0.5 & echo. > `+marker+`)`,
-	)); err != nil {
+	if _, err := runMeasure(t.Context(), dir, `(printf 0.5; touch `+marker+`) | cat`); err != nil {
 		t.Fatalf("runMeasure: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, marker)); err != nil {
@@ -2315,9 +2265,6 @@ func TestRunMeasureRunsInCwd(t *testing.T) {
 // watcher context terminates the measure shell so SIGINT does not
 // strand descendants, matching the condition/check contract.
 func TestRunMeasureCancellationStopsShell(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses POSIX sleep to drive a long-running shell")
-	}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	dir := t.TempDir()
@@ -2424,10 +2371,7 @@ func TestResolveCustomConditionCancellationStopsShell(t *testing.T) {
 	dir := t.TempDir()
 	result := make(chan error, 1)
 	go func() {
-		_, err := resolveCustomCondition(ctx, dir, platformCondition(
-			`touch condition-started; sleep 30`,
-			`echo started > condition-started & ping -n 30 127.0.0.1 >NUL`,
-		))
+		_, err := resolveCustomCondition(ctx, dir, `touch condition-started; sleep 30`)
 		result <- err
 	}()
 
@@ -2460,17 +2404,17 @@ func TestResolveCustomConditionRejectsInvalidSuccessfulOutput(t *testing.T) {
 	}{
 		{
 			name:    "empty",
-			command: platformCondition(`printf ''`, `type nul`),
+			command: `printf ''`,
 			wantErr: "empty",
 		},
 		{
 			name:    "whitespace-only",
-			command: platformCondition(`printf ' \t'`, `echo    `),
+			command: `printf ' \t'`,
 			wantErr: "empty",
 		},
 		{
 			name:    "multiline",
-			command: platformCondition(`printf 'first\nsecond\n'`, `echo first & echo second`),
+			command: `printf 'first\nsecond\n'`,
 			wantErr: "single-line",
 		},
 	}
@@ -2967,9 +2911,6 @@ func currentBranch(t *testing.T, repo string) string {
 
 func writeSequenceCondition(t *testing.T, outputs ...string) string {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("sequence condition test uses a POSIX shell script")
-	}
 	dir := t.TempDir()
 	state := filepath.Join(dir, "state")
 	script := filepath.Join(dir, "condition")
@@ -3024,7 +2965,7 @@ func TestCustomConditionIsLevelTriggeredAcrossPollingPasses(t *testing.T) {
 
 func TestCustomConditionExitOneLeavesRepoIdle(t *testing.T) {
 	repo := mkCleanCustomRepo(t)
-	condition := platformCondition("exit 1", "exit /b 1")
+	condition := "exit 1"
 	agent := &fakeAgent{}
 	obs := &recordingObserver{}
 	w := Watcher{agent: agent, Condition: condition, RetryCount: 1, Once: true, observer: obs}
@@ -3050,7 +2991,7 @@ func TestCustomConditionExitOneLeavesRepoIdle(t *testing.T) {
 // field name regardless of resolver.
 func TestCustomConditionReportsHasChangeOnWork(t *testing.T) {
 	repo := mkCleanCustomRepo(t)
-	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	condition := `printf 'add-foo'`
 	agent := &fakeAgent{}
 	obs := &recordingObserver{}
 	w := Watcher{agent: agent, Condition: condition, RetryCount: 1, Once: true, observer: obs}
@@ -3076,7 +3017,7 @@ func TestCustomConditionReportsHasChangeOnWork(t *testing.T) {
 // broken.
 func TestCustomConditionFailureReportsHasChangeFalseWithFailedEvent(t *testing.T) {
 	repo := mkCleanCustomRepo(t)
-	condition := platformCondition("exit 2", "exit /b 2")
+	condition := "exit 2"
 	agent := &fakeAgent{}
 	obs := &recordingObserver{}
 	w := Watcher{agent: agent, Condition: condition, RetryCount: 1, Once: true, observer: obs}
@@ -3185,7 +3126,7 @@ func TestCustomRetryConditionExitOneBecomesIdle(t *testing.T) {
 
 func TestCustomCatchUpCommitRendersCommitTemplate(t *testing.T) {
 	repo := mkCleanCustomRepo(t)
-	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	condition := `printf 'add-foo'`
 	agent := &fakeAgent{
 		onRun: func() error {
 			return os.WriteFile(filepath.Join(repo, "leftover.txt"), []byte("agent work"), 0o644)
@@ -3224,7 +3165,7 @@ func TestCustomCatchUpCommitPreservesAgentCommits(t *testing.T) {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
 	}
-	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	condition := `printf 'add-foo'`
 	agent := &fakeAgent{
 		onRun: func() error {
 			if err := os.WriteFile(filepath.Join(repo, "agent.txt"), []byte("agent work"), 0o644); err != nil {
@@ -3268,7 +3209,7 @@ func TestCustomCatchUpCommitPreservesAgentCommits(t *testing.T) {
 
 func TestCustomCatchUpCommitIsWarningFreeNoOpWhenUnchanged(t *testing.T) {
 	repo := mkCleanCustomRepo(t)
-	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	condition := `printf 'add-foo'`
 	// agent has no onRun and no error → success with zero changes
 	agent := &fakeAgent{}
 	obs := &recordingObserver{}
@@ -3306,7 +3247,7 @@ func TestCustomCatchUpCommitIsWarningFreeNoOpWhenUnchanged(t *testing.T) {
 // the agent ran in.
 func TestCustomCheckPassesThenCatchesUp(t *testing.T) {
 	repo := mkCleanCustomRepo(t)
-	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	condition := `printf 'add-foo'`
 	marker := "check-ran.txt"
 	agent := &fakeAgent{
 		onRun: func() error {
@@ -3318,7 +3259,7 @@ func TestCustomCheckPassesThenCatchesUp(t *testing.T) {
 		agent:          agent,
 		Condition:      condition,
 		CommitTemplate: "see: complete {change}",
-		Check:          platformCondition(`printf ok > `+marker+`; exit 0`, `echo ok > `+marker),
+		Check:          `printf ok > ` + marker + `; exit 0`,
 		RetryCount:     1,
 		Once:           true,
 		observer:       obs,
@@ -3353,11 +3294,8 @@ func TestCustomCheckPassesThenCatchesUp(t *testing.T) {
 // event for the workflow. Captured stderr reaches the event so the
 // operator can diagnose without re-running the agent.
 func TestCustomCheckFailureRollsBackAndYieldsCheckFailed(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses POSIX shell to emit a known stderr message")
-	}
 	repo := mkCleanCustomRepo(t)
-	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	condition := `printf 'add-foo'`
 	agent := &fakeAgent{
 		onRun: func() error {
 			// Commit one change but leave another dirty so the
@@ -3433,7 +3371,7 @@ func TestCustomCheckFailureRollsBackAndYieldsCheckFailed(t *testing.T) {
 // no-op. The check's marker file must not appear on disk.
 func TestCustomCheckSkippedOnNoOp(t *testing.T) {
 	repo := mkCleanCustomRepo(t)
-	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	condition := `printf 'add-foo'`
 	agent := &fakeAgent{} // success, no file changes
 	obs := &recordingObserver{}
 	w := Watcher{
@@ -3463,7 +3401,7 @@ func TestCustomCheckSkippedOnNoOp(t *testing.T) {
 // execution, matching the prompt/commit substitution rule.
 func TestCustomCheckRendersChange(t *testing.T) {
 	repo := mkCleanCustomRepo(t)
-	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	condition := `printf 'add-foo'`
 	agent := &fakeAgent{
 		onRun: func() error {
 			return os.WriteFile(filepath.Join(repo, "leftover.txt"), []byte("agent work"), 0o644)
@@ -3472,10 +3410,7 @@ func TestCustomCheckRendersChange(t *testing.T) {
 	// The check writes the value of {change} to a marker file so
 	// the test can read it back and assert the rendered command.
 	marker := "change-rendered.txt"
-	checkCmd := platformCondition(
-		`printf '%s' "{change}" > `+marker,
-		`echo {change} > `+marker,
-	)
+	checkCmd := `printf '%s' "{change}" > ` + marker
 	w := Watcher{
 		agent:          agent,
 		Condition:      condition,
@@ -3498,17 +3433,15 @@ func TestCustomCheckRendersChange(t *testing.T) {
 
 // --- measure gate: add-workflow-measure tasks 4.1, 5.x, 6.x --------------
 
-// measureScript returns a POSIX / Windows-friendly shell command
+// measureScript returns a POSIX shell command
 // that outputs `first` on the first invocation and `second` on
-// every later invocation. State lives in <repo>/measure-state so
-// each repo gets its own counter. Used by the measure integration
+// every later invocation. State lives in <dir>/measure-state so
+// each directory gets its own counter. Used by the measure integration
 // tests to emulate a "baseline then candidate" measure without
 // the watcher needing a "measure phase" selector.
-func measureScript(repo, first, second string) (posix, win string) {
-	state := filepath.Join(repo, "measure-state")
-	posix = `result="` + second + `"; if [ ! -f ` + state + ` ]; then result="` + first + `"; touch ` + state + `; fi; printf '%s' "$result"`
-	win = `if exist ` + state + ` (echo ` + second + `) else (echo ` + first + ` & echo. > ` + state + `)`
-	return posix, win
+func measureScript(dir, first, second string) string {
+	state := filepath.Join(dir, "measure-state")
+	return `result="` + second + `"; if [ ! -f ` + state + ` ]; then result="` + first + `"; touch ` + state + `; fi; printf '%s' "$result"`
 }
 
 // TestCustomMeasureBaselineCapturedBeforeAgent: the baseline
@@ -3518,11 +3451,10 @@ func measureScript(repo, first, second string) (posix, win string) {
 // proves the gate ran before the agent.
 func TestCustomMeasureBaselineCapturedBeforeAgent(t *testing.T) {
 	repo := mkCleanCustomRepo(t)
-	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	condition := `printf 'add-foo'`
 	// Baseline is 0.73; candidate (the second invocation) is 0.79,
 	// so the measure gate passes and a commit lands.
-	posix, win := measureScript(repo, "0.73", "0.79")
-	measureCmd := platformCondition(posix, win)
+	measureCmd := measureScript(repo, "0.73", "0.79")
 	var agentSawBaseline string
 	agent := &fakeAgent{
 		onRun: func() error {
@@ -3564,9 +3496,8 @@ func TestCustomMeasureBaselineCapturedBeforeAgent(t *testing.T) {
 // carries the baseline and candidate values.
 func TestCustomMeasureImprovementLandsAndCommits(t *testing.T) {
 	repo := mkCleanCustomRepo(t)
-	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
-	posix, win := measureScript(repo, "0.73", "0.79")
-	measureCmd := platformCondition(posix, win)
+	condition := `printf 'add-foo'`
+	measureCmd := measureScript(repo, "0.73", "0.79")
 	obs := &recordingObserver{}
 	agent := &fakeAgent{
 		onRun: func() error {
@@ -3621,9 +3552,8 @@ func TestCustomMeasureImprovementLandsAndCommits(t *testing.T) {
 // show "no improvement" honestly.
 func TestCustomMeasureNonImprovementRollsBackAndYieldsMeasureFailed(t *testing.T) {
 	repo := mkCleanCustomRepo(t)
-	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
-	posix, win := measureScript(repo, "0.73", "0.71")
-	measureCmd := platformCondition(posix, win)
+	condition := `printf 'add-foo'`
+	measureCmd := measureScript(repo, "0.73", "0.71")
 	obs := &recordingObserver{}
 	agent := &fakeAgent{
 		onRun: func() error {
@@ -3699,11 +3629,8 @@ func TestCustomMeasureNonImprovementRollsBackAndYieldsMeasureFailed(t *testing.T
 // measured).
 func TestCustomMeasureBaselineFailureSkipsAgent(t *testing.T) {
 	repo := mkCleanCustomRepo(t)
-	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
-	measureCmd := platformCondition(
-		`printf 'oops' >&2; exit 9`,
-		`echo oops 1>&2 & exit /b 9`,
-	)
+	condition := `printf 'add-foo'`
+	measureCmd := `printf 'oops' >&2; exit 9`
 	obs := &recordingObserver{}
 	var agentCalls int
 	agent := &fakeAgent{
@@ -3765,9 +3692,8 @@ func TestCustomMeasureBaselineFailureSkipsAgent(t *testing.T) {
 // from command-exit-failure (baseline populated).
 func TestCustomMeasureUnparseableCandidateRollsBack(t *testing.T) {
 	repo := mkCleanCustomRepo(t)
-	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
-	posix, win := measureScript(repo, "0.73", "ok")
-	measureCmd := platformCondition(posix, win)
+	condition := `printf 'add-foo'`
+	measureCmd := measureScript(repo, "0.73", "ok")
 	obs := &recordingObserver{}
 	agent := &fakeAgent{
 		onRun: func() error {
@@ -3815,7 +3741,7 @@ func TestCustomMeasureUnparseableCandidateRollsBack(t *testing.T) {
 // is never invoked.
 func TestCustomMeasureSkippedWithoutMeasureField(t *testing.T) {
 	repo := mkCleanCustomRepo(t)
-	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	condition := `printf 'add-foo'`
 	obs := &recordingObserver{}
 	agent := &fakeAgent{
 		onRun: func() error {
@@ -3865,13 +3791,9 @@ func TestCustomMeasureSkippedWithoutMeasureField(t *testing.T) {
 // invoked (no candidate produced), and the attempt emits
 // CheckFailed, not MeasureFailed.
 func TestCustomMeasureFailureShortCircuitsCheck(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses POSIX shell to emit a known stderr message")
-	}
 	repo := mkCleanCustomRepo(t)
-	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
-	posix, win := measureScript(repo, "0.73", "0.79")
-	measureCmd := platformCondition(posix, win)
+	condition := `printf 'add-foo'`
+	measureCmd := measureScript(repo, "0.73", "0.79")
 	obs := &recordingObserver{}
 	agent := &fakeAgent{
 		onRun: func() error {
@@ -3918,11 +3840,10 @@ func TestCustomMeasureFailureShortCircuitsCheck(t *testing.T) {
 // summary.
 func TestCustomMeasureRetriesOnFailure(t *testing.T) {
 	repo := mkCleanCustomRepo(t)
-	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	condition := `printf 'add-foo'`
 	// Baseline OK; candidate always worse — every attempt fails
 	// the measure gate, exercising the retry loop.
-	posix, win := measureScript(repo, "0.73", "0.50")
-	measureCmd := platformCondition(posix, win)
+	measureCmd := measureScript(repo, "0.73", "0.50")
 	obs := &recordingObserver{}
 	agent := &fakeAgent{
 		onRun: func() error {
@@ -4007,8 +3928,8 @@ func TestWorkflowLogPathUsesScopedDigest(t *testing.T) {
 		Once:       true,
 		observer:   obs,
 		Workflows: []WorkflowConfig{
-			{Name: "openspec", Condition: platformCondition(`printf 'shared'`, `echo shared`), Prompt: "A {change}", Commit: "see: a {change}"},
-			{Name: "update", Condition: platformCondition(`printf 'shared'`, `echo shared`), Prompt: "B {change}", Commit: "see: b {change}"},
+			{Name: "openspec", Condition: `printf 'shared'`, Prompt: "A {change}", Commit: "see: a {change}"},
+			{Name: "update", Condition: `printf 'shared'`, Prompt: "B {change}", Commit: "see: b {change}"},
 		},
 	}
 	if err := w.Watch(t.Context(), []string{repo}); err != nil {
@@ -4077,13 +3998,13 @@ func TestWatcherIteratesWorkflowsInOrder(t *testing.T) {
 		Workflows: []WorkflowConfig{
 			{
 				Name:      "openspec",
-				Condition: platformCondition(`printf 'change-1'`, `echo change-1`),
+				Condition: `printf 'change-1'`,
 				Prompt:    "Apply first {change}",
 				Commit:    "see: first {change}",
 			},
 			{
 				Name:      "update",
-				Condition: platformCondition(`printf 'change-2'`, `echo change-2`),
+				Condition: `printf 'change-2'`,
 				Prompt:    "Update second {change}",
 				Commit:    "see: second {change}",
 			},
@@ -4114,7 +4035,7 @@ func TestWorkflowModelFlowsToAgent(t *testing.T) {
 		Once:       true,
 		Workflows: []WorkflowConfig{{
 			Name:      "modelled",
-			Condition: platformCondition(`printf 'change'`, `echo change`),
+			Condition: `printf 'change'`,
 			Prompt:    "Apply {change}",
 			Commit:    "see: apply {change}",
 			Model:     "openai/gpt-5-mini",
@@ -4137,7 +4058,7 @@ func TestWorkflowBlankModelDoesNotPropagate(t *testing.T) {
 		Once:       true,
 		Workflows: []WorkflowConfig{{
 			Name:      "default-model",
-			Condition: platformCondition(`printf 'change'`, `echo change`),
+			Condition: `printf 'change'`,
 			Prompt:    "Apply {change}",
 			Commit:    "see: apply {change}",
 			Model:     "  ",
@@ -4163,8 +4084,8 @@ func TestWatcherDifferentWorkflowsSameChangeDifferentLanes(t *testing.T) {
 		RetryCount: 1,
 		Once:       true,
 		Workflows: []WorkflowConfig{
-			{Name: "openspec", Condition: platformCondition(`printf 'shared'`, `echo shared`), Prompt: "A {change}", Commit: "see: a {change}"},
-			{Name: "update", Condition: platformCondition(`printf 'shared'`, `echo shared`), Prompt: "B {change}", Commit: "see: b {change}"},
+			{Name: "openspec", Condition: `printf 'shared'`, Prompt: "A {change}", Commit: "see: a {change}"},
+			{Name: "update", Condition: `printf 'shared'`, Prompt: "B {change}", Commit: "see: b {change}"},
 		},
 	}
 	if err := w.Watch(t.Context(), []string{repo}); err != nil {
@@ -4200,8 +4121,8 @@ func TestWatcherWorkflowExitOneSkipsThatWorkflow(t *testing.T) {
 		RetryCount: 1,
 		Once:       true,
 		Workflows: []WorkflowConfig{
-			{Name: "idle", Condition: platformCondition("exit 1", "exit /b 1"), Prompt: "Idle {change}", Commit: "see: idle {change}"},
-			{Name: "active", Condition: platformCondition(`printf 'change'`, `echo change`), Prompt: "Active {change}", Commit: "see: active {change}"},
+			{Name: "idle", Condition: "exit 1", Prompt: "Idle {change}", Commit: "see: idle {change}"},
+			{Name: "active", Condition: `printf 'change'`, Prompt: "Active {change}", Commit: "see: active {change}"},
 		},
 	}
 	if err := w.Watch(t.Context(), []string{repo}); err != nil {
@@ -4261,13 +4182,13 @@ func TestWatcherWorkflowAgentFailureIsolatedAndLaterRuns(t *testing.T) {
 		Workflows: []WorkflowConfig{
 			{
 				Name:      "first",
-				Condition: platformCondition(`printf 'change-1'`, `echo change-1`),
+				Condition: `printf 'change-1'`,
 				Prompt:    "First {change}",
 				Commit:    "see: first {change}",
 			},
 			{
 				Name:      "second",
-				Condition: platformCondition(`printf 'change-2'`, `echo change-2`),
+				Condition: `printf 'change-2'`,
 				Prompt:    "Second {change}",
 				Commit:    "see: second {change}",
 			},
@@ -4344,13 +4265,13 @@ func TestWatcherRendersOwnCommitTemplatePerWorkflow(t *testing.T) {
 		Workflows: []WorkflowConfig{
 			{
 				Name:      "openspec",
-				Condition: platformCondition(`printf 'change-1'`, `echo change-1`),
+				Condition: `printf 'change-1'`,
 				Prompt:    "First {change}",
 				Commit:    "see: openspec {change}",
 			},
 			{
 				Name:      "update",
-				Condition: platformCondition(`printf 'change-2'`, `echo change-2`),
+				Condition: `printf 'change-2'`,
 				Prompt:    "Second {change}",
 				Commit:    "see: update {change}",
 			},
@@ -4403,13 +4324,13 @@ func TestWorkflowEventsCarryWorkflowName(t *testing.T) {
 		Workflows: []WorkflowConfig{
 			{
 				Name:      "openspec",
-				Condition: platformCondition(`printf 'change-1'`, `echo change-1`),
+				Condition: `printf 'change-1'`,
 				Prompt:    "First {change}",
 				Commit:    "see: openspec {change}",
 			},
 			{
 				Name:      "update",
-				Condition: platformCondition(`printf 'change-1'`, `echo change-1`),
+				Condition: `printf 'change-1'`,
 				Prompt:    "Second {change}",
 				Commit:    "see: update {change}",
 			},
@@ -4569,13 +4490,13 @@ func TestWatcherWorkflowConditionFailureIsolatedAndLaterRuns(t *testing.T) {
 		Workflows: []WorkflowConfig{
 			{
 				Name:      "broken",
-				Condition: platformCondition("exit 2", "exit /b 2"),
+				Condition: "exit 2",
 				Prompt:    "Broken {change}",
 				Commit:    "see: broken {change}",
 			},
 			{
 				Name:      "healthy",
-				Condition: platformCondition(`printf 'change-2'`, `echo change-2`),
+				Condition: `printf 'change-2'`,
 				Prompt:    "Healthy {change}",
 				Commit:    "see: healthy {change}",
 			},
@@ -4626,9 +4547,6 @@ func TestWatcherWorkflowConditionFailureIsolatedAndLaterRuns(t *testing.T) {
 // checkout, the second workflow's lane is created and committed
 // cleanly.
 func TestWatcherWorkflowCatchUpCommitFailureIsolatedAndLaterRuns(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("pre-commit hook is a POSIX shell script")
-	}
 	repo := mkCleanCustomRepo(t)
 	hookPath := filepath.Join(repo, ".git", "hooks", "pre-commit")
 	hookBody := []byte("#!/bin/sh\nexit 1\n")
@@ -4658,13 +4576,13 @@ func TestWatcherWorkflowCatchUpCommitFailureIsolatedAndLaterRuns(t *testing.T) {
 		Workflows: []WorkflowConfig{
 			{
 				Name:      "broken-commit",
-				Condition: platformCondition(`printf 'change-1'`, `echo change-1`),
+				Condition: `printf 'change-1'`,
 				Prompt:    "First {change}",
 				Commit:    "see: first {change}",
 			},
 			{
 				Name:      "healthy",
-				Condition: platformCondition(`printf 'change-2'`, `echo change-2`),
+				Condition: `printf 'change-2'`,
 				Prompt:    "Second {change}",
 				Commit:    "see: healthy {change}",
 			},
@@ -4738,7 +4656,7 @@ func TestWatcherIteratesRepositoriesInOrder(t *testing.T) {
 		Workflows: []WorkflowConfig{
 			{
 				Name:      "only",
-				Condition: platformCondition(`printf 'change'`, `echo change`),
+				Condition: `printf 'change'`,
 				Prompt:    "Apply {change}",
 				Commit:    "see: apply {change}",
 			},
@@ -4807,7 +4725,7 @@ func TestWatcherExistingWorkflowLaneFailurePreservesHistory(t *testing.T) {
 		Workflows: []WorkflowConfig{
 			{
 				Name:      "first",
-				Condition: platformCondition(`printf 'change-1'`, `echo change-1`),
+				Condition: `printf 'change-1'`,
 				Prompt:    "First {change}",
 				Commit:    "see: first {change}",
 			},
@@ -4888,13 +4806,13 @@ func TestWatcherSwitchesBetweenExistingWorkflowLanes(t *testing.T) {
 		Workflows: []WorkflowConfig{
 			{
 				Name:      "openspec",
-				Condition: platformCondition(`printf 'change-1'`, `echo change-1`),
+				Condition: `printf 'change-1'`,
 				Prompt:    "First {change}",
 				Commit:    "see: openspec {change}",
 			},
 			{
 				Name:      "update",
-				Condition: platformCondition(`printf 'change-2'`, `echo change-2`),
+				Condition: `printf 'change-2'`,
 				Prompt:    "Second {change}",
 				Commit:    "see: update {change}",
 			},
@@ -4939,9 +4857,6 @@ func TestWatcherSwitchesBetweenExistingWorkflowLanes(t *testing.T) {
 // accepts the change (ignored files don't count toward dirtiness)
 // and the run is a warning-free no-op so far as commits go.
 func TestWatcherWorkflowIgnoresIgnoredFiles(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Gitignore-based ignored file test uses POSIX semantics")
-	}
 	repo := mkCleanCustomRepo(t)
 	run := func(args ...string) {
 		t.Helper()
@@ -4973,7 +4888,7 @@ func TestWatcherWorkflowIgnoresIgnoredFiles(t *testing.T) {
 		Workflows: []WorkflowConfig{
 			{
 				Name:      "only",
-				Condition: platformCondition(`printf 'change'`, `echo change`),
+				Condition: `printf 'change'`,
 				Prompt:    "Apply {change}",
 				Commit:    "see: apply {change}",
 			},
@@ -5007,7 +4922,7 @@ func TestWatcherWorkflowDirtyTreeBlocksAllWorkflows(t *testing.T) {
 		Workflows: []WorkflowConfig{
 			{
 				Name:      "only",
-				Condition: platformCondition(`printf 'change'`, `echo change`),
+				Condition: `printf 'change'`,
 				Prompt:    "Apply {change}",
 				Commit:    "see: apply {change}",
 			},
@@ -5642,9 +5557,9 @@ func TestWorktreeCheckPassesThenMerges(t *testing.T) {
 	obs := &recordingObserver{}
 	w := Watcher{
 		agent:          agent,
-		Condition:      platformCondition(`printf 'task-1'`, `echo task-1`),
+		Condition:      `printf 'task-1'`,
 		CommitTemplate: "see: {change}",
-		Check:          platformCondition(`exit 0`, `exit /b 0`),
+		Check:          `exit 0`,
 		Worktree:       true,
 		AutoMerge:      true,
 		WorktreeRoot:   wtRoot,
@@ -5677,9 +5592,6 @@ func TestWorktreeCheckPassesThenMerges(t *testing.T) {
 // the lane with -D, leaves the operator untouched, and emits
 // CheckFailed as the terminal event (not ChangeFailed).
 func TestWorktreeCheckFailureRemovesWorktreeAndLane(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses POSIX shell to emit a known stderr message")
-	}
 	repo := filepath.Join(t.TempDir(), "proj")
 	mkRepoWithChange(t, repo, "task-1")
 	wtRoot := t.TempDir()
@@ -5702,7 +5614,7 @@ func TestWorktreeCheckFailureRemovesWorktreeAndLane(t *testing.T) {
 	obs := &recordingObserver{}
 	w := Watcher{
 		agent:          agent,
-		Condition:      platformCondition(`printf 'task-1'`, `echo task-1`),
+		Condition:      `printf 'task-1'`,
 		CommitTemplate: "see: {change}",
 		Check:          `printf 'build failed' >&2; exit 7`,
 		Worktree:       true,
@@ -5755,9 +5667,6 @@ func TestWorktreeCheckFailureRemovesWorktreeAndLane(t *testing.T) {
 // attempt regardless of auto_merge. The terminal event is
 // CheckFailed.
 func TestWorktreeManualMergeCheckFailureRollsBack(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses POSIX shell to emit a known stderr message")
-	}
 	repo := filepath.Join(t.TempDir(), "proj")
 	mkRepoWithChange(t, repo, "task-1")
 	wtRoot := t.TempDir()
@@ -5778,7 +5687,7 @@ func TestWorktreeManualMergeCheckFailureRollsBack(t *testing.T) {
 	obs := &recordingObserver{}
 	w := Watcher{
 		agent:          agent,
-		Condition:      platformCondition(`printf 'task-1'`, `echo task-1`),
+		Condition:      `printf 'task-1'`,
 		CommitTemplate: "see: {change}",
 		Check:          `exit 9`,
 		Worktree:       true,
@@ -5814,11 +5723,8 @@ func TestWorktreeManualMergeCheckFailureRollsBack(t *testing.T) {
 // CheckFailed. RetryAttempt events between attempts carry the
 // check-failure summary.
 func TestCheckFailureRetriesAndYieldsCheckFailed(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses POSIX shell to emit a known stderr message")
-	}
 	repo := mkCleanCustomRepo(t)
-	condition := platformCondition(`printf 'add-foo'`, `echo add-foo`)
+	condition := `printf 'add-foo'`
 	var runs int
 	agent := &fakeAgent{
 		onRun: func() error {
@@ -5893,8 +5799,7 @@ func TestWorktreeMeasureImprovementAutoMerges(t *testing.T) {
 	wtRoot := t.TempDir()
 	digest := customChangeDigest("task-1")
 	wantWorktree := filepath.Join(wtRoot, filepath.Base(repo)+"--"+digest)
-	posix, win := measureScriptIn(wantWorktree, "0.73", "0.79")
-	measureCmd := platformCondition(posix, win)
+	measureCmd := measureScript(wantWorktree, "0.73", "0.79")
 	obs := &recordingObserver{}
 	agent := &fakeAgent{
 		onRun: func() error {
@@ -5907,7 +5812,7 @@ func TestWorktreeMeasureImprovementAutoMerges(t *testing.T) {
 	}
 	w := Watcher{
 		agent:          agent,
-		Condition:      platformCondition(`printf 'task-1'`, `echo task-1`),
+		Condition:      `printf 'task-1'`,
 		CommitTemplate: "see: {change}",
 		Measure:        &measureCmd,
 		Worktree:       true,
@@ -5954,8 +5859,7 @@ func TestWorktreeMeasureNonImprovementAutoMergeRollsBack(t *testing.T) {
 	wtRoot := t.TempDir()
 	digest := customChangeDigest("task-1")
 	wantWorktree := filepath.Join(wtRoot, filepath.Base(repo)+"--"+digest)
-	posix, win := measureScriptIn(wantWorktree, "0.73", "0.71")
-	measureCmd := platformCondition(posix, win)
+	measureCmd := measureScript(wantWorktree, "0.73", "0.71")
 	obs := &recordingObserver{}
 	agent := &fakeAgent{
 		onRun: func() error {
@@ -5968,7 +5872,7 @@ func TestWorktreeMeasureNonImprovementAutoMergeRollsBack(t *testing.T) {
 	}
 	w := Watcher{
 		agent:          agent,
-		Condition:      platformCondition(`printf 'task-1'`, `echo task-1`),
+		Condition:      `printf 'task-1'`,
 		CommitTemplate: "see: {change}",
 		Measure:        &measureCmd,
 		Worktree:       true,
@@ -6031,8 +5935,7 @@ func TestWorktreeMeasureNonImprovementManualMergeRollsBack(t *testing.T) {
 	wtRoot := t.TempDir()
 	digest := customChangeDigest("task-1")
 	wantWorktree := filepath.Join(wtRoot, filepath.Base(repo)+"--"+digest)
-	posix, win := measureScriptIn(wantWorktree, "0.73", "0.71")
-	measureCmd := platformCondition(posix, win)
+	measureCmd := measureScript(wantWorktree, "0.73", "0.71")
 	obs := &recordingObserver{}
 	agent := &fakeAgent{
 		onRun: func() error {
@@ -6045,7 +5948,7 @@ func TestWorktreeMeasureNonImprovementManualMergeRollsBack(t *testing.T) {
 	}
 	w := Watcher{
 		agent:          agent,
-		Condition:      platformCondition(`printf 'task-1'`, `echo task-1`),
+		Condition:      `printf 'task-1'`,
 		CommitTemplate: "see: {change}",
 		Measure:        &measureCmd,
 		Worktree:       true,
@@ -6088,10 +5991,7 @@ func TestWorktreeMeasureBaselineFailureSkipsAgent(t *testing.T) {
 	wtRoot := t.TempDir()
 	digest := customChangeDigest("task-1")
 	wantWorktree := filepath.Join(wtRoot, filepath.Base(repo)+"--"+digest)
-	measureCmd := platformCondition(
-		`printf 'oops' >&2; exit 9`,
-		`echo oops 1>&2 & exit /b 9`,
-	)
+	measureCmd := `printf 'oops' >&2; exit 9`
 	obs := &recordingObserver{}
 	var agentCalls int
 	agent := &fakeAgent{
@@ -6102,7 +6002,7 @@ func TestWorktreeMeasureBaselineFailureSkipsAgent(t *testing.T) {
 	}
 	w := Watcher{
 		agent:          agent,
-		Condition:      platformCondition(`printf 'task-1'`, `echo task-1`),
+		Condition:      `printf 'task-1'`,
 		CommitTemplate: "see: {change}",
 		Measure:        &measureCmd,
 		Worktree:       true,
@@ -6148,16 +6048,4 @@ func TestWorktreeMeasureBaselineFailureSkipsAgent(t *testing.T) {
 	if !sawMeasureFailed {
 		t.Fatalf("MeasureFailed not emitted; events = %v", obs.eventTypes())
 	}
-}
-
-// measureScriptIn is the worktree-mode variant of measureScript:
-// state lives inside the worktree directory so the agent and the
-// measure gate share a cwd. Without an explicit dir argument the
-// state would land in the agent's working tree (the lane checkout
-// for branch mode, the worktree for worktree mode).
-func measureScriptIn(dir, first, second string) (posix, win string) {
-	state := filepath.Join(dir, "measure-state")
-	posix = `result="` + second + `"; if [ ! -f ` + state + ` ]; then result="` + first + `"; touch ` + state + `; fi; printf '%s' "$result"`
-	win = `if exist ` + state + ` (echo ` + second + `) else (echo ` + first + ` & echo. > ` + state + `)`
-	return posix, win
 }

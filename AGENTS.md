@@ -60,8 +60,7 @@ Guidelines for AI agents and contributors working on this project.
 ## Configuration
 
 `see` reads one global configuration file at `os.UserConfigDir()/see/config.yaml`
-(Linux/macOS: `$XDG_CONFIG_HOME/see/config.yaml` or `~/.config/see/config.yaml`;
-Windows: `%AppData%/see/config.yaml`). The file is YAML Ain't Markup Language
+(Linux/macOS: `$XDG_CONFIG_HOME/see/config.yaml` or `~/.config/see/config.yaml`). The file is YAML Ain't Markup Language
 (YAML), parsed strictly: unknown fields, wrong field types, malformed input, and
 multi-document input are rejected at startup with an actionable error. A missing
 or empty file is treated as "no configuration" and is not an error.
@@ -390,8 +389,7 @@ treated as blank.
 The condition runs in the repository's working directory under the
 platform shell:
 
-- `/bin/sh -c <condition>` on Unix-like systems,
-- `cmd.exe /C <condition>` on Windows.
+- `/bin/sh -c <condition>`.
 
 The watcher's context is attached so SIGINT/SIGTERM cancels an
 in-flight condition. On Unix the child is placed in its own process
@@ -524,8 +522,8 @@ attempts carry the concise "check failed" summary unchanged.
 A configured workflow may carry an optional `check` shell command
 that runs after a successful agent attempt and before any git
 landing operation. The command uses the same platform-shell contract
-as `condition` (`/bin/sh -c` on Unix, `cmd.exe /C` on Windows), the
-watcher context is attached, and on Unix the shell runs in its own
+as `condition` (`/bin/sh -c`), the
+watcher context is attached, and the shell runs in its own
 process group so cancellation does not strand descendants. The
 literal token `{change}` is substituted under the same rule as
 `prompt`, `condition`, and `commit`.
@@ -565,8 +563,8 @@ after a passing check (or after the agent when no check is defined) to
 capture the **candidate**. Both values are held in `see`'s memory and
 are never written where the agent can read them. The measure command
 uses the same platform-shell contract as `condition` and `check`
-(`/bin/sh -c` on Unix, `cmd.exe /C` on Windows), the watcher context
-is attached, and on Unix the shell runs in its own process group so
+(`/bin/sh -c`), the watcher context
+is attached, and the shell runs in its own process group so
 cancellation does not strand descendants. The command runs with its
 working directory set to the agent's working directory (the lane
 checkout in branch mode, the worktree directory in worktree mode).

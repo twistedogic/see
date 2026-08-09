@@ -39,7 +39,7 @@ The strict configuration schema SHALL accept an optional sequence of named workf
 - **AND** the error identifies the workflow name and field
 
 ### Requirement: Custom condition resolves one change through the platform shell
-For each configured workflow and watched repository, `see` SHALL execute that workflow's predicate in the repository through the platform shell with the watcher context. Unix-like systems SHALL use `/bin/sh -c`; Windows SHALL use `cmd.exe /C`. Exit status `0` SHALL mean work is available, exit status `1` SHALL mean that workflow is idle, and any other nonzero status SHALL be a workflow condition error containing captured standard error when available.
+For each configured workflow and watched repository, `see` SHALL execute that workflow's predicate in the repository through `/bin/sh -c` with the watcher context. Exit status `0` SHALL mean work is available, exit status `1` SHALL mean that workflow is idle, and any other nonzero status SHALL be a workflow condition error containing captured standard error when available.
 
 #### Scenario: Condition succeeds with work
 - **WHEN** the condition exits with status `0` and writes `add-dark-mode` to standard output
@@ -79,7 +79,7 @@ After a condition exits with status `0`, `see` SHALL remove trailing carriage-re
 - **WHEN** a successful condition writes `add-dark-mode\n`
 - **THEN** the normalized change is exactly `add-dark-mode`
 
-#### Scenario: Windows trailing newline is removed
+#### Scenario: Trailing carriage return is removed
 - **WHEN** a successful condition writes `add-dark-mode\r\n`
 - **THEN** the normalized change is exactly `add-dark-mode`
 
@@ -316,10 +316,9 @@ naming the workflow and the field.
 
 When a workflow defines a `check` and a polling pass reaches a
 successful agent run that left working-tree changes to land, `see` SHALL
-execute the rendered `check` command through the platform shell under
-the same contract as the workflow `condition`: `/bin/sh -c` on Unix-like
-systems and `cmd.exe /C` on Windows, with the watcher context attached,
-in its own process group on Unix so cancellation does not strand
+execute the rendered `check` command through `/bin/sh -c` under
+the same contract as the workflow `condition`, with the watcher context
+attached, in its own process group so cancellation does not strand
 descendants. The command SHALL run with its working directory set to the
 agent's working directory (the lane checkout in branch mode, the
 worktree directory in worktree mode) so it observes the agent's
@@ -431,10 +430,9 @@ The resolved measure command SHALL be selected in this order:
    convention directory or a missing `<workflow-name>.sh` SHALL mean the
    workflow has no measure gate and SHALL NOT be an error.
 
-The measure command SHALL run through the platform shell under the same
-contract as the workflow `condition` and `check`: `/bin/sh -c` on
-Unix-like systems and `cmd.exe /C` on Windows, with the watcher context
-attached, in its own process group on Unix so cancellation does not
+The measure command SHALL run through `/bin/sh -c` under the same
+contract as the workflow `condition` and `check`, with the watcher
+context attached, in its own process group so cancellation does not
 strand descendants. The command SHALL run with its working directory set
 to the agent's working directory (the lane checkout in branch mode, the
 worktree directory in worktree mode). The literal token `{change}` SHALL
