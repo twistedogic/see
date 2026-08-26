@@ -10,6 +10,7 @@ import (
 )
 
 func TestPiActivityParserSummarizesMeaningfulEvents(t *testing.T) {
+	t.Parallel()
 	var got []string
 	p := newPiActivityParser(func(activity string) { got = append(got, activity) })
 	input := strings.Join([]string{
@@ -47,6 +48,7 @@ func TestPiActivityParserSummarizesMeaningfulEvents(t *testing.T) {
 }
 
 func TestPiActivityParserIgnoresOversizedLinesAndBoundsState(t *testing.T) {
+	t.Parallel()
 	var got []string
 	p := newPiActivityParser(func(activity string) { got = append(got, activity) })
 	oversized := strings.Repeat("x", maxPiParserLineBytes+100)
@@ -66,6 +68,7 @@ func TestPiActivityParserIgnoresOversizedLinesAndBoundsState(t *testing.T) {
 }
 
 func TestPiActivityParserTreatsEmbeddedNewlineAsFieldSeparator(t *testing.T) {
+	t.Parallel()
 	var got []string
 	p := newPiActivityParser(func(activity string) { got = append(got, activity) })
 	if _, err := p.Write([]byte("first line\nsecond line\n")); err != nil {
@@ -77,6 +80,7 @@ func TestPiActivityParserTreatsEmbeddedNewlineAsFieldSeparator(t *testing.T) {
 }
 
 func TestPiAgentStreamsActivityBeforeExitAndPreservesRawBytes(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	logDir := filepath.Join(dir, "logs")
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
@@ -108,7 +112,7 @@ func TestPiAgentStreamsActivityBeforeExitAndPreservesRawBytes(t *testing.T) {
 		if !strings.Contains(activity, "bash") || !strings.Contains(activity, "echo hi") {
 			t.Fatalf("activity = %q, want streamed tool summary", activity)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("activity arrived after process exit or not at all")
 	}
 	if err := <-result; err != nil {
@@ -124,6 +128,7 @@ func TestPiAgentStreamsActivityBeforeExitAndPreservesRawBytes(t *testing.T) {
 }
 
 func TestPiAgentRunWithoutActivityKeepsLogModePath(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	logDir := filepath.Join(dir, "logs")
 	if err := os.MkdirAll(logDir, 0o755); err != nil {

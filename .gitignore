@@ -1,2 +1,3 @@
 see
 *.jsonl
+.auto/

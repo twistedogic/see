@@ -42,6 +42,16 @@ Guidelines for AI agents and contributors working on this project.
   - Reserve spawning the binary for manual smoke checks and one-shot
     `see --once` runs against a fixture repo, never inside an
     automated test.
+- Tests run concurrently: any test that does not call `t.Setenv`
+  (directly or via a helper) and does not mutate package globals must
+  call `t.Parallel()` as its first statement. The suite is dominated
+  by git subprocess latency, so parallelism is the primary runtime
+  lever. Wall-clock assertions in parallel tests must be load-robust:
+  assert ordering / interval-gap properties rather than absolute
+  latencies, cancel from callbacks or observers instead of racing a
+  fixed `time.Sleep`, and use generous anti-hang deadlines (10s),
+  since scheduler and fork/exec load from sibling tests can stall
+  shell-kill paths far beyond nominal latency.
 
 ## Technical Decisions
 

@@ -19,6 +19,7 @@ import (
 // implement Summary(), the summary field stays empty so the
 // existing full-message fallback applies.
 func TestEventsCarrySummaryAlongsideFullErr(t *testing.T) {
+	t.Parallel()
 	const fullText = "see: working tree on /repos/myrepo is dirty; commit or stash before see runs"
 	const summaryText = "dirty working tree; commit or stash"
 
@@ -69,6 +70,7 @@ func (e *plainStringError) Error() string { return e.s }
 // contract is the on-disk JSONL schema and it must not grow a
 // presentation-only duplicate.
 func TestEventLoggerDoesNotSerializeSummaryField(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	logger, err := openEventLogger(dir)
 	if err != nil {
@@ -132,6 +134,7 @@ func (c *captureTuiObserver) send(msg tea.Msg) { c.msgs = append(c.msgs, msg) }
 // populated differently. This pins the split without spinning up a
 // real bubbletea Program.
 func TestTuiObserverForwardsSummaryWhenPresent(t *testing.T) {
+	t.Parallel()
 	const fullText = "see: working tree on /repos/myrepo is dirty; commit or stash before see runs"
 	const summaryText = "dirty working tree; commit or stash"
 
@@ -168,6 +171,7 @@ func TestTuiObserverForwardsSummaryWhenPresent(t *testing.T) {
 // message type. The concise summary propagates; the full command
 // and exit code ride along on the dedicated fields.
 func TestTuiObserverForwardsCheckFailed(t *testing.T) {
+	t.Parallel()
 	const fullText = "see: check failed: go test ./... (exit 7): build failed"
 	const summaryText = "check failed"
 
@@ -210,6 +214,7 @@ func TestTuiObserverForwardsCheckFailed(t *testing.T) {
 // exported Err verbatim. This is the contract that keeps every
 // pre-existing failure path byte-identical to the prior behavior.
 func TestTuiObserverFallsBackToErrWhenNoSummary(t *testing.T) {
+	t.Parallel()
 	const fullText = "see: agent exit 7"
 	cap := &captureTuiObserver{}
 	obs := tuiObserver{send: cap.send}
@@ -239,6 +244,7 @@ func TestTuiObserverFallsBackToErrWhenNoSummary(t *testing.T) {
 // of the full diagnostic. End-to-end: dirty tree → event → JSONL
 // (full Err) → tui (concise summary).
 func TestDirtyTreeErrorPropagatesSummaryThroughWatcherToTUI(t *testing.T) {
+	t.Parallel()
 	repo := filepath.Join(t.TempDir(), "proj")
 	mkRepoWithChange(t, repo, "task-1")
 	if err := os.WriteFile(filepath.Join(repo, "untracked.txt"), []byte("x"), 0o644); err != nil {

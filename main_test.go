@@ -64,6 +64,7 @@ func (r *recordingObserver) eventTypes() []string {
 }
 
 func TestSelectRunMode(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		mode    string
@@ -96,6 +97,7 @@ func TestSelectRunMode(t *testing.T) {
 }
 
 func TestListActiveOpenSpecChanges(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	changes := filepath.Join(dir, "openspec", "changes")
 	for _, name := range []string{"alpha", "beta"} {
@@ -120,6 +122,7 @@ func TestListActiveOpenSpecChanges(t *testing.T) {
 }
 
 func TestRenderTemplateSubstitutesChangeInPromptAndCommit(t *testing.T) {
+	t.Parallel()
 	for template, want := range map[string]string{
 		"Apply {change}":                 "Apply add-foo",
 		"see: apply {change} ({change})": "see: apply add-foo (add-foo)",
@@ -135,6 +138,7 @@ func TestRenderTemplateSubstitutesChangeInPromptAndCommit(t *testing.T) {
 }
 
 func TestDefaultTemplateMentionsChange(t *testing.T) {
+	t.Parallel()
 	if !strings.Contains(renderTemplate(defaultPromptTemplate, "add-foo"), "add-foo") {
 		t.Fatalf("default template should mention change name after substitution; got %q",
 			renderTemplate(defaultPromptTemplate, "add-foo"))
@@ -142,6 +146,7 @@ func TestDefaultTemplateMentionsChange(t *testing.T) {
 }
 
 func TestWatcherRendersUserPrompt(t *testing.T) {
+	t.Parallel()
 	dir := bootstrapPromptRepo(t, "add-foo")
 	agent := &fakeAgent{}
 	w := Watcher{agent: agent, RetryCount: 1}
@@ -158,6 +163,7 @@ func TestWatcherRendersUserPrompt(t *testing.T) {
 }
 
 func TestWatcherFallsBackToEmbeddedDefault(t *testing.T) {
+	t.Parallel()
 	dir := bootstrapPromptRepo(t, "add-foo")
 	agent := &fakeAgent{}
 	w := Watcher{agent: agent, RetryCount: 1}
@@ -180,24 +186,67 @@ func TestWatcherFallsBackToEmbeddedDefault(t *testing.T) {
 // active openspec change and HEAD on main. The prompt-template tests
 // only need a working git tree + one active change to drive
 // Watcher.runWithRetry down to the Agent.Run call.
+// shellRun runs one platform-shell command in dir, failing the test on a
+// nonzero exit. Used to batch git scaffolding into a single exec.
+func shellRun(t *testing.T, dir, script string) {
+	t.Helper()
+	cmd := exec.Command("/bin/sh", "-c", script)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("sh %q in %s: %v\n%s", script, dir, err, out)
+	}
+}
+
+// TestMain exports git commit identity through the environment so every
+// child git process (test scaffolding and watcher-driven commits alike)
+// has author/committer identity without per-repo `git config` execs.
+// testBaseRepo is the shared empty repository (branch main, one
+// "init" commit) TestMain builds once; tests clone it via
+// cloneBaseRepo. Read-only after TestMain builds it, so parallel
+// tests may share it.
+var testBaseRepo string
+
+func TestMain(m *testing.M) {
+	for _, kv := range [][2]string{
+		{"GIT_AUTHOR_NAME", "t"},
+		{"GIT_AUTHOR_EMAIL", "t@e"},
+		{"GIT_COMMITTER_NAME", "t"},
+		{"GIT_COMMITTER_EMAIL", "t@e"},
+	} {
+		if os.Getenv(kv[0]) == "" {
+			os.Setenv(kv[0], kv[1])
+		}
+	}
+	root, err := os.MkdirTemp("", "see-test-base-*")
+	if err != nil {
+		panic(err)
+	}
+	testBaseRepo = filepath.Join(root, "proj")
+	if out, err := exec.Command("git", "init", "-q", "-b", "main", testBaseRepo).CombinedOutput(); err != nil {
+		panic(fmt.Sprintf("git init base: %v\n%s", err, out))
+	}
+	if out, err := exec.Command("git", "-C", testBaseRepo, "commit", "--allow-empty", "-q", "-m", "init").CombinedOutput(); err != nil {
+		panic(fmt.Sprintf("git commit base: %v\n%s", err, out))
+	}
+	code := m.Run()
+	os.RemoveAll(root)
+	os.Exit(code)
+}
+
+// cloneBaseRepo clones the shared base repository into dst (one exec,
+// replacing the old init + commit scaffolding pair). Commit identity
+// comes from the TestMain environment variables.
+func cloneBaseRepo(t *testing.T, dst string) {
+	t.Helper()
+	if out, err := exec.Command("git", "clone", "-q", "--branch", "main", testBaseRepo, dst).CombinedOutput(); err != nil {
+		t.Fatalf("git clone base into %s: %v\n%s", dst, err, out)
+	}
+}
+
 func bootstrapPromptRepo(t *testing.T, change string) string {
 	t.Helper()
 	dir := t.TempDir()
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	run("init", "-q")
-	run("config", "user.email", "t@e")
-	run("config", "user.name", "t")
-	run("commit", "--allow-empty", "-q", "-m", "init")
-	if err := exec.Command("git", "-C", dir, "show-ref", "--verify", "--quiet", "refs/heads/main").Run(); err != nil {
-		run("switch", "-c", "main")
-	}
+	cloneBaseRepo(t, dir)
 	if err := os.MkdirAll(filepath.Join(dir, "openspec", "changes", change), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -205,6 +254,7 @@ func bootstrapPromptRepo(t *testing.T, change string) string {
 }
 
 func TestPiAgentCapturesOutputToLogFile(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	logDir := filepath.Join(dir, "logs")
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
@@ -233,6 +283,7 @@ func TestPiAgentCapturesOutputToLogFile(t *testing.T) {
 }
 
 func TestPiAgentRespectsSeeLogDir(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	logDir := filepath.Join(dir, "custom")
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
@@ -255,6 +306,7 @@ func TestPiAgentRespectsSeeLogDir(t *testing.T) {
 }
 
 func TestPiAgentPassesModelFlag(t *testing.T) {
+	t.Parallel()
 	args := runPiAgentWithRecordedArgs(t, "openai/gpt-5-mini")
 	want := []string{"--mode", "json", "--no-session", "--model", "openai/gpt-5-mini", "prompt text"}
 	if strings.Join(args, "\x00") != strings.Join(want, "\x00") {
@@ -263,6 +315,7 @@ func TestPiAgentPassesModelFlag(t *testing.T) {
 }
 
 func TestPiAgentOmitsModelFlagWhenBlank(t *testing.T) {
+	t.Parallel()
 	want := []string{"--mode", "json", "--no-session", "prompt text"}
 	for _, model := range []string{"", "  "} {
 		t.Run(fmt.Sprintf("model-%q", model), func(t *testing.T) {
@@ -281,16 +334,17 @@ func runPiAgentWithRecordedArgs(t *testing.T, model string) []string {
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	argvPath := filepath.Join(dir, "argv")
+	// The script records its argv next to itself (its path is unique per
+	// test), so no environment variable is needed and the callers can run
+	// in parallel.
 	script := filepath.Join(dir, "agent")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$SEE_TEST_ARGV\"\n"), 0o755); err != nil {
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/argv\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("SEE_TEST_ARGV", argvPath)
 	if _, err := (PiAgent{binary: script, logDir: logDir}).Run(context.Background(), dir, "task-1", "prompt text", model, nil); err != nil {
 		t.Fatal(err)
 	}
-	body, err := os.ReadFile(argvPath)
+	body, err := os.ReadFile(filepath.Join(dir, "argv"))
 	if err != nil {
 		t.Fatalf("read recorded argv: %v", err)
 	}
@@ -298,6 +352,7 @@ func runPiAgentWithRecordedArgs(t *testing.T, model string) []string {
 }
 
 func TestPiAgentPreservesExitCodeByDefault(t *testing.T) {
+	t.Parallel()
 	script := filepath.Join(t.TempDir(), "agent")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 7\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -314,6 +369,7 @@ func TestPiAgentPreservesExitCodeByDefault(t *testing.T) {
 // as a non-nil error and an empty logPath, without invoking the agent.
 // The agent must not run with stderr/stdout unredirected.
 func TestPiAgentRunSurfacesFileCreateError(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	// SEE_LOG_DIR points at a path under a regular file -> MkdirAll
 	// fails, so any os.Create at that location fails with ENOTDIR.
@@ -482,6 +538,7 @@ func TestResolveLogDirFailsWhenPathBlocked(t *testing.T) {
 }
 
 func TestEventLoggerWritesJSONL(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	events, err := openEventLogger(dir)
 	if err != nil {
@@ -538,6 +595,7 @@ func TestEventLoggerWritesJSONL(t *testing.T) {
 // Used to fail in the same shape as TestEventLoggerWritesJSONL:
 // the mirror was missing entirely and events only landed on disk.
 func TestEventLoggerMirrorsEncodedEvents(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	events, err := openEventLogger(dir)
 	if err != nil {
@@ -579,6 +637,7 @@ func TestEventLoggerMirrorsEncodedEvents(t *testing.T) {
 // must emit only HasChange; downstream consumers read the JSONL
 // expecting one canonical name.
 func TestRepoSeenPayloadUsesHasChangeNotHasOpenspec(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	events, err := openEventLogger(dir)
 	if err != nil {
@@ -626,6 +685,7 @@ func TestRepoSeenPayloadUsesHasChangeNotHasOpenspec(t *testing.T) {
 // lose ordering. The wrapper is the only line format; mixing wrapped
 // and unwrapped lines is invalid.
 func TestEventLoggerStampsObservedAtOnEachEntry(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	events, err := openEventLogger(dir)
 	if err != nil {
@@ -678,6 +738,7 @@ func TestEventLoggerStampsObservedAtOnEachEntry(t *testing.T) {
 }
 
 func TestEventLoggerFansOutToSecondary(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	events, err := openEventLogger(dir)
 	if err != nil {
@@ -708,26 +769,10 @@ func TestEventLoggerFansOutToSecondary(t *testing.T) {
 // later attempt returning nil while a prior attempt errored) is
 // unreachable.
 func TestRunOnceRetryLoopReturnsLastErrorWhenAllAttemptsFail(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	repo := filepath.Join(root, "p")
-	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repo
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	run("init", "-q")
-	run("config", "user.email", "t@e")
-	run("config", "user.name", "t")
-	run("commit", "--allow-empty", "-q", "-m", "init")
-	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/main").Run(); err != nil {
-		run("switch", "-c", "main")
-	}
+	cloneBaseRepo(t, repo)
 	// An active change is the trigger for work() to invoke the agent.
 	if err := os.MkdirAll(filepath.Join(repo, "openspec", "changes", "dummy"), 0o755); err != nil {
 		t.Fatal(err)
@@ -759,28 +804,12 @@ func TestRunOnceRetryLoopReturnsLastErrorWhenAllAttemptsFail(t *testing.T) {
 // so the change survives a watcher restart. The agent's edits would otherwise
 // sit unstaged in the working tree.
 func TestWorkCommitsOnSuccess(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	repo := filepath.Join(root, "proj")
-	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repo
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	run("init", "-q")
-	run("config", "user.email", "t@e")
-	run("config", "user.name", "t")
-	run("commit", "--allow-empty", "-q", "-m", "init")
+	cloneBaseRepo(t, repo)
 	// Guarantee HEAD is on a real branch named main; modern git auto-creates an
 	// unborn main on the first commit, older git may land on master.
-	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/main").Run(); err != nil {
-		run("switch", "-c", "main")
-	}
 	if err := os.MkdirAll(filepath.Join(repo, "openspec", "changes", "task-1"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -821,26 +850,10 @@ func TestWorkCommitsOnSuccess(t *testing.T) {
 // seam added by the add-tui-grid change so future refactors cannot
 // silently drop event emission.
 func TestRunOnceEmitsEventSequenceOnSuccess(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	repo := filepath.Join(root, "proj")
-	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repo
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	run("init", "-q")
-	run("config", "user.email", "t@e")
-	run("config", "user.name", "t")
-	run("commit", "--allow-empty", "-q", "-m", "init")
-	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/main").Run(); err != nil {
-		run("switch", "-c", "main")
-	}
+	cloneBaseRepo(t, repo)
 	if err := os.MkdirAll(filepath.Join(repo, "openspec", "changes", "task-1"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -909,28 +922,12 @@ func TestRunOnceEmitsEventSequenceOnSuccess(t *testing.T) {
 // branch is left untouched and HEAD stays on the workspace branch. Pins
 // the post-remove-merge-step contract.
 func TestWorkIsolatesAgentRunOnBranch(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	repo := filepath.Join(root, "proj")
-	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repo
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	run("init", "-q")
-	run("config", "user.email", "t@e")
-	run("config", "user.name", "t")
-	run("commit", "--allow-empty", "-q", "-m", "init")
+	cloneBaseRepo(t, repo)
 	// Guarantee HEAD is on a real branch named main. Modern git auto-creates
 	// one on first commit; only seed when the init/config didn't.
-	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/main").Run(); err != nil {
-		run("switch", "-c", "main")
-	}
 	originalSHA, err := GetCurrentCommit(repo)
 	if err != nil {
 		t.Fatal(err)
@@ -1022,23 +1019,10 @@ func TestWorkIsolatesAgentRunOnBranch(t *testing.T) {
 
 // Regression: runOnce must pass the repo subdir path to work, not the parent wd.
 func TestRunOncePassesRepoPathToAgent(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	repo := filepath.Join(root, "proj")
-	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repo
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	run("init", "-q")
-	run("config", "user.email", "t@e")
-	run("config", "user.name", "t")
-	run("commit", "--allow-empty", "-q", "-m", "init")
+	cloneBaseRepo(t, repo)
 	if err := os.MkdirAll(filepath.Join(repo, "openspec", "changes", "task-1"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1078,26 +1062,10 @@ func TestRunOncePassesRepoPathToAgent(t *testing.T) {
 // Regression: when the agent errors mid-run, the original branch must be left
 // untouched and the see/<change> branch must be deleted.
 func TestWorkRollsBackBranchOnAgentFailure(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	repo := filepath.Join(root, "proj")
-	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repo
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	run("init", "-q")
-	run("config", "user.email", "t@e")
-	run("config", "user.name", "t")
-	run("commit", "--allow-empty", "-q", "-m", "init")
-	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/main").Run(); err != nil {
-		run("switch", "-c", "main")
-	}
+	cloneBaseRepo(t, repo)
 	preSHA, err := GetCurrentCommit(repo)
 	if err != nil {
 		t.Fatal(err)
@@ -1161,11 +1129,9 @@ func TestWorkRollsBackBranchOnAgentFailure(t *testing.T) {
 // leak into the run. After a successful run the workspace branch is left
 // in place on the user's working tree.
 func TestWorkReusesExistingBranchAndResetsToOriginalSHA(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	repo := filepath.Join(root, "proj")
-	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	run := func(args ...string) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
@@ -1174,13 +1140,7 @@ func TestWorkReusesExistingBranchAndResetsToOriginalSHA(t *testing.T) {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
 	}
-	run("init", "-q")
-	run("config", "user.email", "t@e")
-	run("config", "user.name", "t")
-	run("commit", "--allow-empty", "-q", "-m", "init")
-	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/main").Run(); err != nil {
-		run("switch", "-c", "main")
-	}
+	cloneBaseRepo(t, repo)
 	originalSHA, err := GetCurrentCommit(repo)
 	if err != nil {
 		t.Fatal(err)
@@ -1263,11 +1223,9 @@ func TestWorkReusesExistingBranchAndResetsToOriginalSHA(t *testing.T) {
 // before mutating repo state. v1 contract is "bail with an error"; the user
 // must switch to a real branch first.
 func TestWorkRejectsDetachedHead(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	repo := filepath.Join(root, "proj")
-	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	run := func(args ...string) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
@@ -1276,10 +1234,7 @@ func TestWorkRejectsDetachedHead(t *testing.T) {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
 	}
-	run("init", "-q")
-	run("config", "user.email", "t@e")
-	run("config", "user.name", "t")
-	run("commit", "--allow-empty", "-q", "-m", "init")
+	cloneBaseRepo(t, repo)
 	// Seed change so runWithRetry reaches workResolved (where the detached-HEAD guard lives).
 	if err := os.MkdirAll(filepath.Join(repo, "openspec", "changes", "task-1"), 0o755); err != nil {
 		t.Fatal(err)
@@ -1325,26 +1280,10 @@ func TestWorkRejectsDetachedHead(t *testing.T) {
 // not on the first attempt. Pin the ordering for the agent-fails-twice-
 // then-succeeds scenario.
 func TestObserverReceivesRetrySequence(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	repo := filepath.Join(root, "proj")
-	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repo
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	run("init", "-q")
-	run("config", "user.email", "t@e")
-	run("config", "user.name", "t")
-	run("commit", "--allow-empty", "-q", "-m", "init")
-	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/main").Run(); err != nil {
-		run("switch", "-c", "main")
-	}
+	cloneBaseRepo(t, repo)
 	if err := os.MkdirAll(filepath.Join(repo, "openspec", "changes", "task-1"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1407,26 +1346,10 @@ func TestObserverReceivesRetrySequence(t *testing.T) {
 // Regression: after retryN exhausts attempts, ChangeFailed must fire
 // exactly once with the final error.
 func TestObserverReceivesChangeFailedAfterRetriesExhausted(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	repo := filepath.Join(root, "proj")
-	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repo
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	run("init", "-q")
-	run("config", "user.email", "t@e")
-	run("config", "user.name", "t")
-	run("commit", "--allow-empty", "-q", "-m", "init")
-	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/main").Run(); err != nil {
-		run("switch", "-c", "main")
-	}
+	cloneBaseRepo(t, repo)
 	if err := os.MkdirAll(filepath.Join(repo, "openspec", "changes", "task-1"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1472,23 +1395,10 @@ func TestObserverReceivesChangeFailedAfterRetriesExhausted(t *testing.T) {
 // Regression: a git repo with no openspec/ must still emit RepoSeen
 // (with HasChange=false) and nothing else.
 func TestRepoSeenFiresForRepoWithoutOpenspec(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	repo := filepath.Join(root, "proj")
-	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repo
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	run("init", "-q")
-	run("config", "user.email", "t@e")
-	run("config", "user.name", "t")
-	run("commit", "--allow-empty", "-q", "-m", "init")
+	cloneBaseRepo(t, repo)
 	obs := &recordingObserver{}
 	agent := &fakeAgent{err: nil}
 	w := Watcher{agent: agent, RetryCount: 1, observer: obs}
@@ -1517,26 +1427,10 @@ func TestRepoSeenFiresForRepoWithoutOpenspec(t *testing.T) {
 // same code path as today without panicking. Existing tests cover this
 // transitively; this is the explicit assertion.
 func TestNilObserverIsSafe(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	repo := filepath.Join(root, "proj")
-	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repo
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	run("init", "-q")
-	run("config", "user.email", "t@e")
-	run("config", "user.name", "t")
-	run("commit", "--allow-empty", "-q", "-m", "init")
-	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/main").Run(); err != nil {
-		run("switch", "-c", "main")
-	}
+	cloneBaseRepo(t, repo)
 	if err := os.MkdirAll(filepath.Join(repo, "openspec", "changes", "task-1"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1566,6 +1460,7 @@ func TestNilObserverIsSafe(t *testing.T) {
 // run with capture enabled. Pins the surfacing of the per-run log
 // path so TUI consumers can render it.
 func TestWorkEmitsLogPathOnSuccessfulCapture(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	repo := filepath.Join(root, "proj")
 	mkRepoWithChange(t, repo, "task-1")
@@ -1606,6 +1501,7 @@ func TestWorkEmitsLogPathOnSuccessfulCapture(t *testing.T) {
 // work must NOT emit LogPath. Capture is observability, not correctness,
 // and a missing file means there is no path to surface.
 func TestWorkDoesNotEmitLogPathOnCaptureFailure(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	repo := filepath.Join(root, "proj")
 	mkRepoWithChange(t, repo, "task-1")
@@ -1635,6 +1531,7 @@ func TestWorkDoesNotEmitLogPathOnCaptureFailure(t *testing.T) {
 // Regression: with Watcher.Once=true, Watch returns after a single pass,
 // even when the context is still live. Agent is invoked exactly once.
 func TestWatchReturnsAfterOnePassWhenOnce(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	repo := filepath.Join(root, "proj")
 	mkRepoWithChange(t, repo, "task-1")
@@ -1660,28 +1557,34 @@ func TestWatchReturnsAfterOnePassWhenOnce(t *testing.T) {
 // until the context is cancelled. Agent runs at least once and ctx
 // cancellation propagates a clean nil return.
 func TestWatchLoopsUntilCtxCancelWhenNotOnce(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	repo := filepath.Join(root, "proj")
 	mkRepoWithChange(t, repo, "task-1")
-	agent := &fakeAgent{err: nil} // no onRun → change stays active → loop continues
-	w := Watcher{agent: agent, RetryCount: 1, Once: false}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		cancel()
-	}()
+	var agent *fakeAgent
+	agent = &fakeAgent{err: nil, onRun: func() error {
+		// Cancel from the second pass: proves the loop actually repeats and
+		// removes the race between a fixed sleep and scheduler load.
+		if len(agent.runs) >= 2 {
+			cancel()
+		}
+		return nil
+	}}
+	w := Watcher{agent: agent, RetryCount: 1, Once: false}
 	if err := w.Watch(ctx, []string{repo}); err != nil {
 		t.Fatalf("Watch returned %v, want nil after cancel", err)
 	}
-	if len(agent.runs) < 1 {
-		t.Fatalf("agent.Run called %d times, want >= 1", len(agent.runs))
+	if len(agent.runs) < 2 {
+		t.Fatalf("agent.Run called %d times, want >= 2", len(agent.runs))
 	}
 }
 
 // Regression: with Watcher.Once=false, a non-nil runOnce error must
 // surface immediately from Watch without invoking runOnce again.
 func TestWatchStopsOnFirstPassError(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	repo := filepath.Join(root, "proj")
 	mkRepoWithChange(t, repo, "task-1")
@@ -1739,6 +1642,7 @@ func (r *runClock) snapshot() []time.Duration {
 // the first pass is immediate and the next pass does not start until
 // at least the interval has elapsed since the previous pass.
 func TestWatchDelaysNextPassByPollInterval(t *testing.T) {
+	t.Parallel()
 	repo := newIntervalTestRepo(t)
 	clock := &runClock{}
 	agent := &fakeAgent{
@@ -1752,9 +1656,15 @@ func TestWatchDelaysNextPassByPollInterval(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
-		// Give the loop room for two passes plus the interval.
-		time.Sleep(3 * interval)
-		cancel()
+		// Cancel as soon as the second pass starts: the test observes the
+		// interval delay without racing a fixed sleep against scheduler load.
+		for {
+			if len(clock.snapshot()) >= 2 {
+				cancel()
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
 	}()
 	if err := w.Watch(ctx, []string{repo}); err != nil {
 		t.Fatalf("Watch returned %v, want nil", err)
@@ -1763,8 +1673,8 @@ func TestWatchDelaysNextPassByPollInterval(t *testing.T) {
 	if len(offsets) < 2 {
 		t.Fatalf("agent.Run called %d times, want >= 2; offsets=%v", len(offsets), offsets)
 	}
-	if offsets[0] > 20*time.Millisecond {
-		t.Fatalf("first pass took %v, want < 20ms (immediate)", offsets[0])
+	if offsets[0] >= interval {
+		t.Fatalf("first pass at %v, want < %v (immediate, no interval wait)", offsets[0], interval)
 	}
 	if offsets[1] < interval {
 		t.Fatalf("second pass at %v, want >= %v (interval)", offsets[1], interval)
@@ -1774,6 +1684,7 @@ func TestWatchDelaysNextPassByPollInterval(t *testing.T) {
 // Regression: cancellation during a long configured interval wakes
 // Watch promptly without starting another pass.
 func TestWatchCancellationInterruptsPollInterval(t *testing.T) {
+	t.Parallel()
 	repo := newIntervalTestRepo(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	agent := &fakeAgent{onRun: func() error {
@@ -1787,8 +1698,10 @@ func TestWatchCancellationInterruptsPollInterval(t *testing.T) {
 		t.Fatalf("Watch returned %v, want nil", err)
 	}
 	elapsed := time.Since(start)
-	if elapsed > 2*time.Second {
-		t.Fatalf("Watch took %v to return after cancel, want < 2s", elapsed)
+	// The property is "returns long before the 1h interval elapses"; the
+	// bound tolerates heavy parallel-test load instead of pinning latency.
+	if elapsed > 10*time.Second {
+		t.Fatalf("Watch took %v to return after cancel, want < 10s", elapsed)
 	}
 	if len(agent.runs) != 1 {
 		t.Fatalf("agent.Run called %d times, want exactly 1 (cancel before next pass)", len(agent.runs))
@@ -1798,8 +1711,9 @@ func TestWatchCancellationInterruptsPollInterval(t *testing.T) {
 // Regression: PollInterval=0 preserves the immediate-polling behavior
 // — the next pass runs as soon as the previous one completes.
 func TestWatchZeroIntervalPollsImmediately(t *testing.T) {
+	t.Parallel()
 	repo := newIntervalTestRepo(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	runs := 0
 	agent := &fakeAgent{
@@ -1824,6 +1738,7 @@ func TestWatchZeroIntervalPollsImmediately(t *testing.T) {
 // production callers do not busy-poll. Direct Watcher literals still
 // observe the zero-value zero-delay default — tests stay explicit.
 func TestNewWatcherDefaultPollInterval(t *testing.T) {
+	t.Parallel()
 	w := NewWatcher("pi", "/tmp/logs", 3, false)
 	if got, want := w.PollInterval, 5*time.Minute; got != want {
 		t.Fatalf("NewWatcher PollInterval = %v, want %v (5-minute default)", got, want)
@@ -1833,6 +1748,7 @@ func TestNewWatcherDefaultPollInterval(t *testing.T) {
 // Regression: a literal Watcher{} has PollInterval=0 so direct
 // construction is explicit and matches the pre-change tight-poll loop.
 func TestWatcherLiteralZeroPollInterval(t *testing.T) {
+	t.Parallel()
 	var w Watcher
 	if w.PollInterval != 0 {
 		t.Fatalf("Watcher{}.PollInterval = %v, want 0", w.PollInterval)
@@ -1844,24 +1760,7 @@ func TestWatcherLiteralZeroPollInterval(t *testing.T) {
 // Watcher.Watch tests that need a real repo for the watcher to find.
 func mkRepoWithChange(t *testing.T, repo, change string) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repo
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	run("init", "-q")
-	run("config", "user.email", "t@e")
-	run("config", "user.name", "t")
-	run("commit", "--allow-empty", "-q", "-m", "init")
-	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/main").Run(); err != nil {
-		run("switch", "-c", "main")
-	}
+	cloneBaseRepo(t, repo)
 	if err := os.MkdirAll(filepath.Join(repo, "openspec", "changes", change), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1879,7 +1778,9 @@ func mkRepoWithChange(t *testing.T, repo, change string) {
 // a fresh repo so the success path's branch state cannot leak into
 // the failure path.
 func TestCompatibilityModeRetainsOpenSpecContract(t *testing.T) {
+	t.Parallel()
 	t.Run("success", func(t *testing.T) {
+		t.Parallel()
 		repo := filepath.Join(t.TempDir(), "proj")
 		mkRepoWithChange(t, repo, "task-1")
 		preSHA, err := GetCurrentCommit(repo)
@@ -1968,6 +1869,7 @@ func TestCompatibilityModeRetainsOpenSpecContract(t *testing.T) {
 	})
 
 	t.Run("failure_rolls_back", func(t *testing.T) {
+		t.Parallel()
 		repo := filepath.Join(t.TempDir(), "proj")
 		mkRepoWithChange(t, repo, "task-1")
 		preSHA, err := GetCurrentCommit(repo)
@@ -2037,6 +1939,7 @@ func TestCompatibilityModeRetainsOpenSpecContract(t *testing.T) {
 }
 
 func TestResolveCustomConditionUsesPlatformShellAndNormalizesOutput(t *testing.T) {
+	t.Parallel()
 	got, err := resolveCustomCondition(t.Context(), t.TempDir(), `printf 'add-dark-mode\r\n'`)
 	if err != nil {
 		t.Fatalf("resolveCustomCondition: %v", err)
@@ -2047,6 +1950,7 @@ func TestResolveCustomConditionUsesPlatformShellAndNormalizesOutput(t *testing.T
 }
 
 func TestResolveCustomConditionExitOneReportsIdle(t *testing.T) {
+	t.Parallel()
 	got, err := resolveCustomCondition(t.Context(), t.TempDir(), `exit 1`)
 	if err != nil {
 		t.Fatalf("exit 1 returned error: %v", err)
@@ -2057,6 +1961,7 @@ func TestResolveCustomConditionExitOneReportsIdle(t *testing.T) {
 }
 
 func TestResolveCustomConditionFailureIncludesStderr(t *testing.T) {
+	t.Parallel()
 	_, err := resolveCustomCondition(t.Context(), t.TempDir(), `printf 'syntax error' >&2; exit 2`)
 	if err == nil {
 		t.Fatal("resolveCustomCondition returned nil error for exit 2")
@@ -2071,6 +1976,7 @@ func TestResolveCustomConditionFailureIncludesStderr(t *testing.T) {
 // TestRunCheckPassesOnExitZero: a command that exits 0 produces no
 // error and stderr is captured-but-ignored on success.
 func TestRunCheckPassesOnExitZero(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := runCheck(t.Context(), dir, `exit 0`); err != nil {
 		t.Fatalf("runCheck: %v, want nil", err)
@@ -2082,6 +1988,7 @@ func TestRunCheckPassesOnExitZero(t *testing.T) {
 // exit code, and captured stderr. Summary() exposes the concise
 // "check failed" tier.
 func TestRunCheckNonZeroReturnsCheckFailedError(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	err := runCheck(t.Context(), dir, `printf 'build failed' >&2; exit 7`)
 	if err == nil {
@@ -2106,6 +2013,7 @@ func TestRunCheckNonZeroReturnsCheckFailedError(t *testing.T) {
 // caller-supplied cwd (the agent's lane/worktree dir), not the
 // watcher's CWD. A command that creates a marker in $PWD proves it.
 func TestRunCheckRunsInCwd(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	marker := "check-ran-here"
 	if err := runCheck(t.Context(), dir, `printf x > `+marker); err != nil {
@@ -2120,6 +2028,7 @@ func TestRunCheckRunsInCwd(t *testing.T) {
 // context terminates the check shell so SIGINT does not strand
 // descendants, matching the condition contract.
 func TestRunCheckCancellationStopsShell(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	dir := t.TempDir()
@@ -2127,7 +2036,7 @@ func TestRunCheckCancellationStopsShell(t *testing.T) {
 	go func() {
 		result <- runCheck(ctx, dir, `touch check-started; sleep 30`)
 	}()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "check-started")); err == nil {
 			break
@@ -2143,7 +2052,7 @@ func TestRunCheckCancellationStopsShell(t *testing.T) {
 		if err == nil {
 			t.Fatal("runCheck returned nil after cancellation; want a failure")
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("runCheck did not stop after cancellation")
 	}
 }
@@ -2156,6 +2065,7 @@ func TestRunCheckCancellationStopsShell(t *testing.T) {
 // same way a condition value is normalized: trailing newlines gone,
 // single line, non-whitespace.
 func TestRunMeasureReturnsNormalizedValue(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	got, err := runMeasure(t.Context(), dir, `printf '0.73\n'`)
 	if err != nil {
@@ -2172,6 +2082,7 @@ func TestRunMeasureReturnsNormalizedValue(t *testing.T) {
 // success). errors.As on *measureFailedError matches the
 // selection path in runOnce.
 func TestRunMeasureRejectsUnparseableValue(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	_, err := runMeasure(t.Context(), dir, `printf 'ok\n'`)
 	if err == nil {
@@ -2193,6 +2104,7 @@ func TestRunMeasureRejectsUnparseableValue(t *testing.T) {
 // writes only whitespace (or nothing) is a measure failure: the
 // spec requires non-whitespace output.
 func TestRunMeasureRejectsEmptyValue(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	_, err := runMeasure(t.Context(), dir, `printf '   '`)
 	if err == nil {
@@ -2208,6 +2120,7 @@ func TestRunMeasureRejectsEmptyValue(t *testing.T) {
 // writes two lines is a measure failure: the spec requires
 // single-line output.
 func TestRunMeasureRejectsMultilineValue(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	_, err := runMeasure(t.Context(), dir, `printf '0.5\n0.6\n'`)
 	if err == nil {
@@ -2225,6 +2138,7 @@ func TestRunMeasureRejectsMultilineValue(t *testing.T) {
 // MeasureFailed event have what they need without re-running the
 // shell.
 func TestRunMeasureNonZeroReturnsMeasureFailed(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	_, err := runMeasure(t.Context(), dir, `printf 'benchmark crashed' >&2; exit 9`)
 	if err == nil {
@@ -2251,6 +2165,7 @@ func TestRunMeasureNonZeroReturnsMeasureFailed(t *testing.T) {
 // also creates a marker in $PWD proves the cwd is the agent's
 // working dir without losing the stdout metric to a redirect.
 func TestRunMeasureRunsInCwd(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	marker := "measure-ran-here"
 	if _, err := runMeasure(t.Context(), dir, `(printf 0.5; touch `+marker+`) | cat`); err != nil {
@@ -2265,6 +2180,7 @@ func TestRunMeasureRunsInCwd(t *testing.T) {
 // watcher context terminates the measure shell so SIGINT does not
 // strand descendants, matching the condition/check contract.
 func TestRunMeasureCancellationStopsShell(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	dir := t.TempDir()
@@ -2273,7 +2189,7 @@ func TestRunMeasureCancellationStopsShell(t *testing.T) {
 		_, err := runMeasure(ctx, dir, `touch measure-started; sleep 30`)
 		result <- err
 	}()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "measure-started")); err == nil {
 			break
@@ -2289,7 +2205,7 @@ func TestRunMeasureCancellationStopsShell(t *testing.T) {
 		if err == nil {
 			t.Fatal("runMeasure returned nil after cancellation; want a failure")
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("runMeasure did not stop after cancellation")
 	}
 }
@@ -2366,6 +2282,7 @@ func TestResolveMeasureCommandReturnsFalseWhenAbsent(t *testing.T) {
 }
 
 func TestResolveCustomConditionCancellationStopsShell(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	dir := t.TempDir()
@@ -2375,7 +2292,7 @@ func TestResolveCustomConditionCancellationStopsShell(t *testing.T) {
 		result <- err
 	}()
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "condition-started")); err == nil {
 			break
@@ -2391,12 +2308,13 @@ func TestResolveCustomConditionCancellationStopsShell(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("cancellation error = %v, want context.Canceled", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("resolveCustomCondition did not stop after cancellation")
 	}
 }
 
 func TestResolveCustomConditionRejectsInvalidSuccessfulOutput(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
@@ -2432,6 +2350,7 @@ func TestResolveCustomConditionRejectsInvalidSuccessfulOutput(t *testing.T) {
 }
 
 func TestCustomChangeDigestDefinesFullSHA256BranchIdentity(t *testing.T) {
+	t.Parallel()
 	const want = "243ec3b4ff67401f58a9534d5661dc6bcf486321807fe4bc73db785264a7c1db"
 	got := customChangeDigest("add-dark-mode")
 	if got != want {
@@ -2443,6 +2362,7 @@ func TestCustomChangeDigestDefinesFullSHA256BranchIdentity(t *testing.T) {
 }
 
 func TestCustomChangeDigestIsStableAndDistinct(t *testing.T) {
+	t.Parallel()
 	first := customChangeDigest("add-dark-mode")
 	if repeated := customChangeDigest("add-dark-mode"); repeated != first {
 		t.Fatalf("repeated digest = %q, want stable %q", repeated, first)
@@ -2453,6 +2373,7 @@ func TestCustomChangeDigestIsStableAndDistinct(t *testing.T) {
 }
 
 func TestCustomAgentLogFilenameUsesDigest(t *testing.T) {
+	t.Parallel()
 	const digest = "982587f309f9eb3d4ba019c9ee283fa89351bc6fc8905c80c9924dc38d00a93a"
 	const change = "../unsafe change"
 	got := pathFor("/repos/myproj", customChangeDigest(change))
@@ -2476,24 +2397,7 @@ func mkCleanCustomRepo(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	repo := filepath.Join(root, "proj")
-	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repo
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	run("init", "-q")
-	run("config", "user.email", "t@e")
-	run("config", "user.name", "t")
-	run("commit", "--allow-empty", "-q", "-m", "init")
-	if err := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/main").Run(); err != nil {
-		run("switch", "-c", "main")
-	}
+	cloneBaseRepo(t, repo)
 	return repo
 }
 
@@ -2519,6 +2423,7 @@ func branchTip(t *testing.T, repo, branch string) string {
 // dirty tree before any branching. The agent never runs, the lane is
 // never created, and the operator's edits remain unchanged.
 func TestCustomLaneRejectsDirtyWorkingTree(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	if err := os.WriteFile(filepath.Join(repo, "untracked.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
@@ -2549,6 +2454,7 @@ func TestCustomLaneRejectsDirtyWorkingTree(t *testing.T) {
 // exist, the watcher creates it at the captured current commit and
 // checks it out before the agent runs. `created` reports true.
 func TestCustomLaneFirstRunCreatesBranch(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	preSHA, err := GetCurrentCommit(repo)
 	if err != nil {
@@ -2580,6 +2486,7 @@ func TestCustomLaneFirstRunCreatesBranch(t *testing.T) {
 // runs the agent from the lane tip without resetting or deleting
 // prior commits. `created` reports false.
 func TestCustomLaneResumesWithoutReset(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	digest := customChangeDigest("add-foo")
 	branch := "see/" + digest
@@ -2634,6 +2541,7 @@ func TestCustomLaneResumesWithoutReset(t *testing.T) {
 // either branch. `created` reports false and the lane tip stays
 // where prior successful runs left it.
 func TestCustomLaneSwitchesFromCleanCheckout(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	digest := customChangeDigest("add-foo")
 	branch := "see/" + digest
@@ -2682,6 +2590,7 @@ func TestCustomLaneSwitchesFromCleanCheckout(t *testing.T) {
 // exists. The dirty-tree guard is the only constraint left now
 // that we permit clean cross-branch switching.
 func TestCustomLaneStillRefusesDirtyTree(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	digest := customChangeDigest("add-foo")
 	branch := "see/" + digest
@@ -2718,6 +2627,7 @@ func TestCustomLaneStillRefusesDirtyTree(t *testing.T) {
 // ignored files beyond the commit still qualifies as clean and the
 // lane can be created or resumed.
 func TestCustomLaneAcceptsIgnoredOnlyChanges(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("ignored/\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -2748,10 +2658,12 @@ func TestCustomLaneAcceptsIgnoredOnlyChanges(t *testing.T) {
 }
 
 func TestRollbackCustomLane(t *testing.T) {
+	t.Parallel()
 	const change = "add-foo"
 	branch := "see/" + customChangeDigest(change)
 
 	t.Run("existing lane restores its tip and untracked state", func(t *testing.T) {
+		t.Parallel()
 		repo := mkCleanCustomRepo(t)
 		run := func(args ...string) {
 			t.Helper()
@@ -2820,6 +2732,7 @@ func TestRollbackCustomLane(t *testing.T) {
 	})
 
 	t.Run("new lane restores source branch and is deleted", func(t *testing.T) {
+		t.Parallel()
 		repo := mkCleanCustomRepo(t)
 		run := func(args ...string) {
 			t.Helper()
@@ -2880,6 +2793,7 @@ func TestRollbackCustomLane(t *testing.T) {
 }
 
 func TestRollbackCustomLaneWarnsForEveryCleanupFailure(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	if err := os.RemoveAll(repo); err != nil {
 		t.Fatal(err)
@@ -2939,6 +2853,7 @@ func writeSequenceCondition(t *testing.T, outputs ...string) string {
 }
 
 func TestCustomConditionIsLevelTriggeredAcrossPollingPasses(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	condition := writeSequenceCondition(t, "same-change\\n")
 	ctx, cancel := context.WithCancel(t.Context())
@@ -2964,6 +2879,7 @@ func TestCustomConditionIsLevelTriggeredAcrossPollingPasses(t *testing.T) {
 }
 
 func TestCustomConditionExitOneLeavesRepoIdle(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	condition := "exit 1"
 	agent := &fakeAgent{}
@@ -2990,6 +2906,7 @@ func TestCustomConditionExitOneLeavesRepoIdle(t *testing.T) {
 // availability signal so downstream consumers can switch on one
 // field name regardless of resolver.
 func TestCustomConditionReportsHasChangeOnWork(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	condition := `printf 'add-foo'`
 	agent := &fakeAgent{}
@@ -3016,6 +2933,7 @@ func TestCustomConditionReportsHasChangeOnWork(t *testing.T) {
 // ChangeFailed event so the operator can distinguish idle from
 // broken.
 func TestCustomConditionFailureReportsHasChangeFalseWithFailedEvent(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	condition := "exit 2"
 	agent := &fakeAgent{}
@@ -3047,6 +2965,7 @@ func TestCustomConditionFailureReportsHasChangeFalseWithFailedEvent(t *testing.T
 }
 
 func TestCustomConditionChangeSelectsDifferentLane(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	condition := writeSequenceCondition(t, "first\\n", "second\\n")
 	ctx, cancel := context.WithCancel(t.Context())
@@ -3078,6 +2997,7 @@ func TestCustomConditionChangeSelectsDifferentLane(t *testing.T) {
 }
 
 func TestCustomRetryReResolvesCondition(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	condition := writeSequenceCondition(t, "first\\n", "second\\n")
 	var runs int
@@ -3101,6 +3021,7 @@ func TestCustomRetryReResolvesCondition(t *testing.T) {
 }
 
 func TestCustomRetryConditionExitOneBecomesIdle(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	condition := writeSequenceCondition(t, "first\\n", "<idle>")
 	var runs int
@@ -3125,6 +3046,7 @@ func TestCustomRetryConditionExitOneBecomesIdle(t *testing.T) {
 // the same persistent branch.
 
 func TestCustomCatchUpCommitRendersCommitTemplate(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	condition := `printf 'add-foo'`
 	agent := &fakeAgent{
@@ -3156,6 +3078,7 @@ func TestCustomCatchUpCommitRendersCommitTemplate(t *testing.T) {
 }
 
 func TestCustomCatchUpCommitPreservesAgentCommits(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	run := func(args ...string) {
 		t.Helper()
@@ -3208,6 +3131,7 @@ func TestCustomCatchUpCommitPreservesAgentCommits(t *testing.T) {
 }
 
 func TestCustomCatchUpCommitIsWarningFreeNoOpWhenUnchanged(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	condition := `printf 'add-foo'`
 	// agent has no onRun and no error → success with zero changes
@@ -3246,6 +3170,7 @@ func TestCustomCatchUpCommitIsWarningFreeNoOpWhenUnchanged(t *testing.T) {
 // changes reach the lane. The check observes the same directory
 // the agent ran in.
 func TestCustomCheckPassesThenCatchesUp(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	condition := `printf 'add-foo'`
 	marker := "check-ran.txt"
@@ -3294,6 +3219,7 @@ func TestCustomCheckPassesThenCatchesUp(t *testing.T) {
 // event for the workflow. Captured stderr reaches the event so the
 // operator can diagnose without re-running the agent.
 func TestCustomCheckFailureRollsBackAndYieldsCheckFailed(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	condition := `printf 'add-foo'`
 	agent := &fakeAgent{
@@ -3370,6 +3296,7 @@ func TestCustomCheckFailureRollsBackAndYieldsCheckFailed(t *testing.T) {
 // changes, the check is skipped and the run stays a warning-free
 // no-op. The check's marker file must not appear on disk.
 func TestCustomCheckSkippedOnNoOp(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	condition := `printf 'add-foo'`
 	agent := &fakeAgent{} // success, no file changes
@@ -3400,6 +3327,7 @@ func TestCustomCheckSkippedOnNoOp(t *testing.T) {
 // command is replaced with the normalized change value before
 // execution, matching the prompt/commit substitution rule.
 func TestCustomCheckRendersChange(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	condition := `printf 'add-foo'`
 	agent := &fakeAgent{
@@ -3450,6 +3378,7 @@ func measureScript(dir, first, second string) string {
 // {metric} token. A baseline capture that records a known value
 // proves the gate ran before the agent.
 func TestCustomMeasureBaselineCapturedBeforeAgent(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	condition := `printf 'add-foo'`
 	// Baseline is 0.73; candidate (the second invocation) is 0.79,
@@ -3495,6 +3424,7 @@ func TestCustomMeasureBaselineCapturedBeforeAgent(t *testing.T) {
 // the agent's leftover files reach the lane. The success event
 // carries the baseline and candidate values.
 func TestCustomMeasureImprovementLandsAndCommits(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	condition := `printf 'add-foo'`
 	measureCmd := measureScript(repo, "0.73", "0.79")
@@ -3551,6 +3481,7 @@ func TestCustomMeasureImprovementLandsAndCommits(t *testing.T) {
 // Baseline and Candidate reach the event so the JSONL stream can
 // show "no improvement" honestly.
 func TestCustomMeasureNonImprovementRollsBackAndYieldsMeasureFailed(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	condition := `printf 'add-foo'`
 	measureCmd := measureScript(repo, "0.73", "0.71")
@@ -3628,6 +3559,7 @@ func TestCustomMeasureNonImprovementRollsBackAndYieldsMeasureFailed(t *testing.T
 // no candidate populated (because no candidate was ever
 // measured).
 func TestCustomMeasureBaselineFailureSkipsAgent(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	condition := `printf 'add-foo'`
 	measureCmd := `printf 'oops' >&2; exit 9`
@@ -3691,6 +3623,7 @@ func TestCustomMeasureBaselineFailureSkipsAgent(t *testing.T) {
 // distinguishes unparseable (value populated, baseline empty)
 // from command-exit-failure (baseline populated).
 func TestCustomMeasureUnparseableCandidateRollsBack(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	condition := `printf 'add-foo'`
 	measureCmd := measureScript(repo, "0.73", "ok")
@@ -3740,6 +3673,7 @@ func TestCustomMeasureUnparseableCandidateRollsBack(t *testing.T) {
 // event carries no Baseline / Candidate fields. The measure shell
 // is never invoked.
 func TestCustomMeasureSkippedWithoutMeasureField(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	condition := `printf 'add-foo'`
 	obs := &recordingObserver{}
@@ -3791,6 +3725,7 @@ func TestCustomMeasureSkippedWithoutMeasureField(t *testing.T) {
 // invoked (no candidate produced), and the attempt emits
 // CheckFailed, not MeasureFailed.
 func TestCustomMeasureFailureShortCircuitsCheck(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	condition := `printf 'add-foo'`
 	measureCmd := measureScript(repo, "0.73", "0.79")
@@ -3839,6 +3774,7 @@ func TestCustomMeasureFailureShortCircuitsCheck(t *testing.T) {
 // RetryAttempt events between attempts carry the measure-failure
 // summary.
 func TestCustomMeasureRetriesOnFailure(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	condition := `printf 'add-foo'`
 	// Baseline OK; candidate always worse — every attempt fails
@@ -3888,6 +3824,7 @@ func TestCustomMeasureRetriesOnFailure(t *testing.T) {
 // different identities even when the change value is identical,
 // while the same name + change pair is stable across calls.
 func TestWorkflowIdentityDigestStableAndDistinct(t *testing.T) {
+	t.Parallel()
 	a := workflowIdentityDigest("openspec", "add-foo")
 	b := workflowIdentityDigest("openspec", "add-foo")
 	if a != b {
@@ -3906,6 +3843,7 @@ func TestWorkflowIdentityDigestStableAndDistinct(t *testing.T) {
 // separator between name and change must prevent collisions
 // across (a, bc) and (ab, c) pairs.
 func TestWorkflowIdentityDigestAvoidsBoundaryCollision(t *testing.T) {
+	t.Parallel()
 	left := workflowIdentityDigest("a", "bc")
 	right := workflowIdentityDigest("ab", "c")
 	if left == right {
@@ -3919,6 +3857,7 @@ func TestWorkflowIdentityDigestAvoidsBoundaryCollision(t *testing.T) {
 // distinct. Raw condition output never appears as a path component;
 // the digest drives the file name under the shared log dir.
 func TestWorkflowLogPathUsesScopedDigest(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	agent := &digestAgent{}
 	obs := &recordingObserver{}
@@ -3965,6 +3904,7 @@ func (d *digestAgent) Run(_ context.Context, _, digest, _, _ string, _ ActivityC
 // workflow-scoped digest when WorkflowName is set and falls back
 // to the legacy change-only digest when it is empty.
 func TestWatcherLaneDigestUsesWorkflowName(t *testing.T) {
+	t.Parallel()
 	withName := Watcher{WorkflowName: "openspec"}
 	nameDigest := withName.laneDigest("add-foo")
 	if want := workflowIdentityDigest("openspec", "add-foo"); nameDigest != want {
@@ -3983,6 +3923,7 @@ func TestWatcherLaneDigestUsesWorkflowName(t *testing.T) {
 // per workflow. The agent receives each workflow's prompt
 // rendered with the active change.
 func TestWatcherIteratesWorkflowsInOrder(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	var calls []string
 	agent := &fakeAgent{
@@ -4027,6 +3968,7 @@ func TestWatcherIteratesWorkflowsInOrder(t *testing.T) {
 }
 
 func TestWorkflowModelFlowsToAgent(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	agent := &fakeAgent{}
 	w := Watcher{
@@ -4050,6 +3992,7 @@ func TestWorkflowModelFlowsToAgent(t *testing.T) {
 }
 
 func TestWorkflowBlankModelDoesNotPropagate(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	agent := &fakeAgent{}
 	w := Watcher{
@@ -4077,6 +4020,7 @@ func TestWorkflowBlankModelDoesNotPropagate(t *testing.T) {
 // the workflow-scoped digest so the persistent lanes stay isolated.
 // Equal collisions in the change alone must not produce the same branch.
 func TestWatcherDifferentWorkflowsSameChangeDifferentLanes(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	agent := &fakeAgent{}
 	w := Watcher{
@@ -4108,6 +4052,7 @@ func TestWatcherDifferentWorkflowsSameChangeDifferentLanes(t *testing.T) {
 // while the next workflow in configuration order is still
 // evaluated. The agent does not run for the idle workflow.
 func TestWatcherWorkflowExitOneSkipsThatWorkflow(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	var calls []string
 	agent := &fakeAgent{
@@ -4146,6 +4091,7 @@ func TestWatcherWorkflowExitOneSkipsThatWorkflow(t *testing.T) {
 // back lane is gone, and the second workflow's lane is checked out
 // with the catch-up commit applied.
 func TestWatcherWorkflowAgentFailureIsolatedAndLaterRuns(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	run := func(args ...string) {
 		t.Helper()
@@ -4239,6 +4185,7 @@ func TestWatcherWorkflowAgentFailureIsolatedAndLaterRuns(t *testing.T) {
 // change substitution. The first workflow's lane carries the first
 // template; the second workflow's lane carries the second.
 func TestWatcherRendersOwnCommitTemplatePerWorkflow(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	run := func(args ...string) {
 		t.Helper()
@@ -4313,6 +4260,7 @@ func TestWatcherRendersOwnCommitTemplatePerWorkflow(t *testing.T) {
 // OpenSpec-compat and single-workflow paths must leave the
 // Workflow field blank.
 func TestWorkflowEventsCarryWorkflowName(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	obs := &recordingObserver{}
 	agent := &fakeAgent{}
@@ -4403,13 +4351,14 @@ func TestWorkflowEventsCarryWorkflowName(t *testing.T) {
 // field is purely additive so existing consumers that ignore
 // it stay correct.
 func TestLegacyEventsLeaveWorkflowBlank(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	changes := filepath.Join(dir, "openspec", "changes", "alpha")
 	if err := os.MkdirAll(changes, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	repo := filepath.Join(dir, "proj")
-	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+	if err := os.MkdirAll(repo, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	run := func(args ...string) {
@@ -4473,6 +4422,7 @@ func TestLegacyEventsLeaveWorkflowBlank(t *testing.T) {
 // creates its lane and runs its agent without inheriting the
 // first workflow's error.
 func TestWatcherWorkflowConditionFailureIsolatedAndLaterRuns(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	var calls []string
 	agent := &fakeAgent{
@@ -4547,6 +4497,7 @@ func TestWatcherWorkflowConditionFailureIsolatedAndLaterRuns(t *testing.T) {
 // checkout, the second workflow's lane is created and committed
 // cleanly.
 func TestWatcherWorkflowCatchUpCommitFailureIsolatedAndLaterRuns(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	hookPath := filepath.Join(repo, ".git", "hooks", "pre-commit")
 	hookBody := []byte("#!/bin/sh\nexit 1\n")
@@ -4640,6 +4591,7 @@ func TestWatcherWorkflowCatchUpCommitFailureIsolatedAndLaterRuns(t *testing.T) {
 // produce interleaved events per-repo: repo-A's full sequence
 // (started/log/done) precedes repo-B's full sequence.
 func TestWatcherIteratesRepositoriesInOrder(t *testing.T) {
+	t.Parallel()
 	repoA := mkCleanCustomRepo(t)
 	repoB := mkCleanCustomRepo(t)
 	var calls []string
@@ -4684,6 +4636,7 @@ func TestWatcherIteratesRepositoriesInOrder(t *testing.T) {
 // pre-attempt tip and preserves history. The watcher must remain
 // on the cleaned lane so later workflows can run.
 func TestWatcherExistingWorkflowLaneFailurePreservesHistory(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	run := func(args ...string) {
 		t.Helper()
@@ -4767,6 +4720,7 @@ func TestWatcherExistingWorkflowLaneFailurePreservesHistory(t *testing.T) {
 // (or main) to each workflow lane in turn. Each lane's prior
 // commits remain reachable and neither is reset.
 func TestWatcherSwitchesBetweenExistingWorkflowLanes(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	run := func(args ...string) {
 		t.Helper()
@@ -4857,6 +4811,7 @@ func TestWatcherSwitchesBetweenExistingWorkflowLanes(t *testing.T) {
 // accepts the change (ignored files don't count toward dirtiness)
 // and the run is a warning-free no-op so far as commits go.
 func TestWatcherWorkflowIgnoresIgnoredFiles(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	run := func(args ...string) {
 		t.Helper()
@@ -4910,6 +4865,7 @@ func TestWatcherWorkflowIgnoresIgnoredFiles(t *testing.T) {
 // and leave the workflow on the safe branch (main). No agent is
 // invoked and no lane is created.
 func TestWatcherWorkflowDirtyTreeBlocksAllWorkflows(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	if err := os.WriteFile(filepath.Join(repo, "untracked.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
@@ -4992,6 +4948,7 @@ func branchExists(t *testing.T, repo, branch string) bool {
 // worktree directory, points its .git at the repo's worktree metadata,
 // reports created=true, and leaves the operator on main.
 func TestEnsureWorktreeCreatesFreshLane(t *testing.T) {
+	t.Parallel()
 	repo, wtRoot, digest := mkWorktreeSetup(t)
 	created, wtPath, err := ensureWorktree(repo, digest, wtRoot)
 	if err != nil {
@@ -5021,6 +4978,7 @@ func TestEnsureWorktreeCreatesFreshLane(t *testing.T) {
 // exists with prior commits, ensureWorktree reuses it (created=false),
 // preserves its tip, and checks the worktree out from that tip.
 func TestEnsureWorktreeReusesExistingLane(t *testing.T) {
+	t.Parallel()
 	repo, wtRoot, digest := mkWorktreeSetup(t)
 	branch := "see/" + digest
 	gitRun(t, repo, "switch", "-c", branch)
@@ -5051,6 +5009,7 @@ func TestEnsureWorktreeReusesExistingLane(t *testing.T) {
 // expected worktree path (not a registered worktree) is cleared and a
 // fresh worktree is created over it.
 func TestEnsureWorktreeRecoversStaleDirectory(t *testing.T) {
+	t.Parallel()
 	repo, wtRoot, digest := mkWorktreeSetup(t)
 	wtPath := filepath.Join(wtRoot, filepath.Base(repo)+"--"+digest)
 	if err := os.MkdirAll(wtPath, 0o755); err != nil {
@@ -5083,6 +5042,7 @@ func TestEnsureWorktreeRecoversStaleDirectory(t *testing.T) {
 // deletes see/<digest>, leaves the operator on main, and returns the
 // original cause unchanged.
 func TestRollbackWorktreeRemovesLaneAndWorktree(t *testing.T) {
+	t.Parallel()
 	repo, wtRoot, digest := mkWorktreeSetup(t)
 	_, wtPath, err := ensureWorktree(repo, digest, wtRoot)
 	if err != nil {
@@ -5108,6 +5068,7 @@ func TestRollbackWorktreeRemovesLaneAndWorktree(t *testing.T) {
 // see/<digest> are rebased onto the operator's main and fast-forward
 // merged; main advances, the lane is deleted, the worktree is gone.
 func TestMergeWorktreeLaneRebasesAndMerges(t *testing.T) {
+	t.Parallel()
 	repo, wtRoot, digest := mkWorktreeSetup(t)
 	branch := "see/" + digest
 	_, wtPath, err := ensureWorktree(repo, digest, wtRoot)
@@ -5148,6 +5109,7 @@ func TestMergeWorktreeLaneRebasesAndMerges(t *testing.T) {
 // the operator's commit and the agent's commit end up reachable from
 // main (agent replayed on top).
 func TestMergeWorktreeLaneOnOperatorCommitDuringRun(t *testing.T) {
+	t.Parallel()
 	repo, wtRoot, digest := mkWorktreeSetup(t)
 	_, wtPath, err := ensureWorktree(repo, digest, wtRoot)
 	if err != nil {
@@ -5185,6 +5147,7 @@ func TestMergeWorktreeLaneOnOperatorCommitDuringRun(t *testing.T) {
 // returns the rebase error and rollback removes the worktree and lane
 // while leaving the operator's checkout untouched.
 func TestMergeWorktreeLaneRebaseConflictTriggersRollback(t *testing.T) {
+	t.Parallel()
 	repo, wtRoot, digest := mkWorktreeSetup(t)
 	branch := "see/" + digest
 	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("base"), 0o644); err != nil {
@@ -5242,6 +5205,7 @@ func TestMergeWorktreeLaneRebaseConflictTriggersRollback(t *testing.T) {
 // a dirty-merge-time error; rollback cleans up while preserving the
 // operator's uncommitted edits.
 func TestMergeWorktreeLaneOperatorDirtyTriggersRollback(t *testing.T) {
+	t.Parallel()
 	repo, wtRoot, digest := mkWorktreeSetup(t)
 	branch := "see/" + digest
 	_, wtPath, err := ensureWorktree(repo, digest, wtRoot)
@@ -5277,6 +5241,7 @@ func TestMergeWorktreeLaneOperatorDirtyTriggersRollback(t *testing.T) {
 // the fast-forward fails; rollback runs and the operator's late commit
 // is preserved on main.
 func TestMergeWorktreeLaneFastForwardFailureTriggersRollback(t *testing.T) {
+	t.Parallel()
 	repo, wtRoot, digest := mkWorktreeSetup(t)
 	branch := "see/" + digest
 	_, wtPath, err := ensureWorktree(repo, digest, wtRoot)
@@ -5315,6 +5280,7 @@ func TestMergeWorktreeLaneFastForwardFailureTriggersRollback(t *testing.T) {
 // operator's checkout stays on main, main receives the rebased agent
 // commits, the worktree and lane are cleaned up, and ChangeDone fires.
 func TestWorktreeModeEndToEnd(t *testing.T) {
+	t.Parallel()
 	repo := filepath.Join(t.TempDir(), "proj")
 	mkRepoWithChange(t, repo, "task-1")
 	wtRoot := t.TempDir()
@@ -5367,6 +5333,7 @@ func TestWorktreeModeEndToEnd(t *testing.T) {
 // TestWatcherDispatchesToWorktreeMode: with Worktree=true the agent is
 // invoked in the worktree directory, not the operator's checkout.
 func TestWatcherDispatchesToWorktreeMode(t *testing.T) {
+	t.Parallel()
 	repo := filepath.Join(t.TempDir(), "proj")
 	mkRepoWithChange(t, repo, "task-1")
 	wtRoot := t.TempDir()
@@ -5393,6 +5360,7 @@ func TestWatcherDispatchesToWorktreeMode(t *testing.T) {
 // branch-mode path is taken; the agent is invoked in the operator's
 // checkout (the repo), not a worktree.
 func TestWatcherDispatchesToBranchMode(t *testing.T) {
+	t.Parallel()
 	repo := filepath.Join(t.TempDir(), "proj")
 	mkRepoWithChange(t, repo, "task-1")
 	agent := &fakeAgent{}
@@ -5415,6 +5383,7 @@ func TestWatcherDispatchesToBranchMode(t *testing.T) {
 // worktree, are both rejected by resolveLaneIsolation with an error
 // naming auto_merge (which main surfaces as an exit-status-2 failure).
 func TestCLIRaisesAutoMergeWithoutWorktree(t *testing.T) {
+	t.Parallel()
 	t.Run("flag_auto_merge_true_without_worktree", func(t *testing.T) {
 		cfg := Config{}
 		explicit := map[string]bool{"auto-merge": true}
@@ -5457,6 +5426,7 @@ func TestCLIRaisesAutoMergeWithoutWorktree(t *testing.T) {
 // --auto-merge=false overrides auto_merge: true, and --worktree=false
 // overrides worktree: true.
 func TestCLIFlagsOverrideConfig(t *testing.T) {
+	t.Parallel()
 	t.Run("worktree_flag_overrides_false", func(t *testing.T) {
 		cfg := Config{Worktree: false}
 		wt, _, _, err := resolveLaneIsolation(cfg, map[string]bool{"worktree": true}, true, true, "")
@@ -5494,6 +5464,7 @@ func TestCLIFlagsOverrideConfig(t *testing.T) {
 // (~/.cache/see/worktrees). With --worktree-root ~/custom it expands
 // to <home>/custom. An empty root stays empty in branch mode.
 func TestWorktreeRootDefaultAndOverride(t *testing.T) {
+	t.Parallel()
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatal(err)
@@ -5534,6 +5505,7 @@ func TestWorktreeRootDefaultAndOverride(t *testing.T) {
 // commit + rebase + ff-merge. A passing check proceeds exactly as
 // without a check; main receives the agent's commits.
 func TestWorktreeCheckPassesThenMerges(t *testing.T) {
+	t.Parallel()
 	repo := filepath.Join(t.TempDir(), "proj")
 	mkRepoWithChange(t, repo, "task-1")
 	wtRoot := t.TempDir()
@@ -5592,6 +5564,7 @@ func TestWorktreeCheckPassesThenMerges(t *testing.T) {
 // the lane with -D, leaves the operator untouched, and emits
 // CheckFailed as the terminal event (not ChangeFailed).
 func TestWorktreeCheckFailureRemovesWorktreeAndLane(t *testing.T) {
+	t.Parallel()
 	repo := filepath.Join(t.TempDir(), "proj")
 	mkRepoWithChange(t, repo, "task-1")
 	wtRoot := t.TempDir()
@@ -5667,6 +5640,7 @@ func TestWorktreeCheckFailureRemovesWorktreeAndLane(t *testing.T) {
 // attempt regardless of auto_merge. The terminal event is
 // CheckFailed.
 func TestWorktreeManualMergeCheckFailureRollsBack(t *testing.T) {
+	t.Parallel()
 	repo := filepath.Join(t.TempDir(), "proj")
 	mkRepoWithChange(t, repo, "task-1")
 	wtRoot := t.TempDir()
@@ -5723,6 +5697,7 @@ func TestWorktreeManualMergeCheckFailureRollsBack(t *testing.T) {
 // CheckFailed. RetryAttempt events between attempts carry the
 // check-failure summary.
 func TestCheckFailureRetriesAndYieldsCheckFailed(t *testing.T) {
+	t.Parallel()
 	repo := mkCleanCustomRepo(t)
 	condition := `printf 'add-foo'`
 	var runs int
@@ -5794,6 +5769,7 @@ func TestCheckFailureRetriesAndYieldsCheckFailed(t *testing.T) {
 // cleaned up. The success event carries the baseline and
 // candidate.
 func TestWorktreeMeasureImprovementAutoMerges(t *testing.T) {
+	t.Parallel()
 	repo := filepath.Join(t.TempDir(), "proj")
 	mkRepoWithChange(t, repo, "task-1")
 	wtRoot := t.TempDir()
@@ -5854,6 +5830,7 @@ func TestWorktreeMeasureImprovementAutoMerges(t *testing.T) {
 // operator untouched, and emits MeasureFailed. No catch-up commit
 // is created.
 func TestWorktreeMeasureNonImprovementAutoMergeRollsBack(t *testing.T) {
+	t.Parallel()
 	repo := filepath.Join(t.TempDir(), "proj")
 	mkRepoWithChange(t, repo, "task-1")
 	wtRoot := t.TempDir()
@@ -5930,6 +5907,7 @@ func TestWorktreeMeasureNonImprovementAutoMergeRollsBack(t *testing.T) {
 // also removes the worktree + lane (manual-merge never preserves
 // a failed attempt) and emits MeasureFailed.
 func TestWorktreeMeasureNonImprovementManualMergeRollsBack(t *testing.T) {
+	t.Parallel()
 	repo := filepath.Join(t.TempDir(), "proj")
 	mkRepoWithChange(t, repo, "task-1")
 	wtRoot := t.TempDir()
@@ -5986,6 +5964,7 @@ func TestWorktreeMeasureNonImprovementManualMergeRollsBack(t *testing.T) {
 // the worktree, deletes the lane, and emits MeasureFailed with
 // no candidate populated.
 func TestWorktreeMeasureBaselineFailureSkipsAgent(t *testing.T) {
+	t.Parallel()
 	repo := filepath.Join(t.TempDir(), "proj")
 	mkRepoWithChange(t, repo, "task-1")
 	wtRoot := t.TempDir()

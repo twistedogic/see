@@ -85,6 +85,12 @@ func configureProcessGroup(cmd *exec.Cmd) {
 		}
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
+	// Bound teardown after cancellation: a killed process group can
+	// still hold stdout/stderr pipes open via an inherited descriptor,
+	// which would block Wait indefinitely. WaitDelay forces Wait to
+	// return once the pipes are the only thing left. Harmless on the
+	// normal path (pipes close when the group dies).
+	cmd.WaitDelay = 5 * time.Second
 }
 
 // resolveCustomCondition runs the configured predicate in /bin/sh. A
@@ -329,19 +335,39 @@ func GetCurrentCommit(cwd string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// originalRef returns the short symbolic-ref for HEAD on the repo at path,
-// or empty string when HEAD is detached. `git symbolic-ref --short HEAD`
-// exits non-zero with "fatal: not a symbolic ref" when HEAD points directly
-// at a commit; that's an expected state, not a watch error.
-func originalRef(path string) (string, error) {
-	out, err := exec.Command("git", "-C", path, "symbolic-ref", "--short", "HEAD").CombinedOutput()
-	if err != nil && strings.Contains(string(out), "not a symbolic ref") {
-		return "", nil
+// repoProbe captures the per-attempt repository state in one
+// `git status --porcelain=v2 --branch` exec: the HEAD commit, the
+// checked-out branch (empty when detached), and whether the working
+// tree has tracked or untracked changes (ignored files never appear,
+// matching hasUntrackedOrModified). Porcelain v2 is git's documented
+// stable output contract (git-status(1)), so this replaces the
+// historical rev-parse + symbolic-ref + status trio without a
+// hand-rolled protocol; when the exec fails, their three
+// indistinguishable errors collapse into one clear message. An
+// unborn HEAD (no commits yet) reports branch.oid "(initial)" and
+// fails here, matching the old rev-parse HEAD failure.
+func repoProbe(path string) (sha, ref string, dirty bool, err error) {
+	out, gerr := exec.Command("git", "-C", path, "status", "--porcelain=v2", "--branch").CombinedOutput()
+	if gerr != nil {
+		return "", "", false, fmt.Errorf("see: git status on %s: %w\n%s", path, gerr, out)
 	}
-	if err != nil {
-		return "", err
+	for _, line := range strings.Split(string(out), "\n") {
+		switch {
+		case strings.HasPrefix(line, "# branch.oid "):
+			sha = strings.TrimPrefix(line, "# branch.oid ")
+		case strings.HasPrefix(line, "# branch.head "):
+			ref = strings.TrimPrefix(line, "# branch.head ")
+		case line != "" && line[0] != '#':
+			dirty = true
+		}
 	}
-	return strings.TrimSpace(string(out)), nil
+	if sha == "(initial)" {
+		return "", "", false, fmt.Errorf("see: no commits on HEAD in %s", path)
+	}
+	if ref == "(detached)" {
+		ref = ""
+	}
+	return sha, ref, dirty, nil
 }
 
 // ensureBranch creates or reuses branch name in the repo at path, then pins
@@ -387,23 +413,28 @@ func ensureBranch(path, sha, name string) error {
 // The legacy OpenSpec branch path (ensureBranch) is left untouched:
 // this helper only governs the custom-mode lane.
 func ensureCustomLane(path, change string) (created bool, err error) {
-	return ensureWorkflowLane(path, customChangeDigest(change))
+	dirty, err := hasUntrackedOrModified(path)
+	if err != nil {
+		return false, err
+	}
+	return ensureWorkflowLane(path, customChangeDigest(change), dirty)
 }
 
 // ensureWorkflowLane is the workflow-aware variant. The digest is
 // supplied by the caller so a workflow can hash its own name plus
 // the change while the legacy single-workflow path keeps using
 // customChangeDigest for backward compat.
-func ensureWorkflowLane(path, digest string) (created bool, err error) {
+func ensureWorkflowLane(path, digest string, dirty bool) (created bool, err error) {
 	branch := "see/" + digest
 
 	// Dirty working tree blocks all three success paths. A clean
 	// tree is also the rollback baseline for failed attempts. The
 	// guard exists so a downstream `git switch` cannot lose tracked
-	// or non-ignored untracked edits the operator has staged.
-	if dirty, derr := hasUntrackedOrModified(path); derr != nil {
-		return false, derr
-	} else if dirty {
+	// or non-ignored untracked edits the operator has staged. The
+	// flag comes from the caller's repoProbe (or, on the standalone
+	// ensureCustomLane path, a fresh status) — nothing runs between
+	// the probe and this switch decision.
+	if dirty {
 		return false, &dirtyWorkingTreeError{path: path}
 	}
 
@@ -530,12 +561,13 @@ func stageAndCommitIfDirty(cwd, message string) error {
 	}
 	// ponytail: diff --cached --quiet exits 0 when the index matches
 	// HEAD and 1 when it differs. Skipping `git commit` on the empty
-	// case keeps an idempotent run warning-free.
-	diff := exec.Command("git", "-C", cwd, "diff", "--cached", "--quiet")
-	if err := diff.Run(); err == nil {
-		return nil
-	}
-	if out, err := exec.Command("git", "-C", cwd, "commit", "-m", message).CombinedOutput(); err != nil {
+	// case keeps an idempotent run warning-free. diff and commit run in
+	// one shell round-trip: on any nonzero diff exit the shell execs the
+	// commit, so the Go-side error and stderr are exactly git commit's.
+	commit := exec.Command("/bin/sh", "-c",
+		`git -C "$1" diff --cached --quiet && exit 0; exec git -C "$1" commit -m "$2"`,
+		"stageAndCommitIfDirty", cwd, message)
+	if out, err := commit.CombinedOutput(); err != nil {
 		return fmt.Errorf("see: git commit failed: %w\n%s", err, out)
 	}
 	return nil
@@ -1171,11 +1203,9 @@ func (w Watcher) laneDigest(change string) string {
 // candidate measure after the agent succeeds (regardless of whether the
 // working tree is dirty), and only lands the change when the candidate
 // strictly exceeds the baseline.
-func (w Watcher) workResolvedWorktree(ctx context.Context, path, change, ref string) error {
+func (w Watcher) workResolvedWorktree(ctx context.Context, path, change, ref string, dirty bool) error {
 	digest := w.laneDigest(change)
-	if dirty, err := hasUntrackedOrModified(path); err != nil {
-		return err
-	} else if dirty {
+	if dirty {
 		return &dirtyWorkingTreeError{path: path}
 	}
 	_, worktreePath, err := ensureWorktree(path, digest, w.WorktreeRoot)
@@ -1237,11 +1267,7 @@ func (w Watcher) workResolvedWorktree(ctx context.Context, path, change, ref str
 }
 
 func (w Watcher) workResolved(ctx context.Context, path, change string) error {
-	current, err := GetCurrentCommit(path)
-	if err != nil {
-		return err
-	}
-	ref, err := originalRef(path)
+	current, ref, dirty, err := repoProbe(path)
 	if err != nil {
 		return err
 	}
@@ -1254,18 +1280,26 @@ func (w Watcher) workResolved(ctx context.Context, path, change string) error {
 	// worktree and never switches the operator's checkout; the default
 	// branch-mode path below is unchanged when Worktree is false.
 	if w.Worktree {
-		return w.workResolvedWorktree(ctx, path, change, ref)
+		return w.workResolvedWorktree(ctx, path, change, ref, dirty)
 	}
 
 	if w.customMode() {
 		digest := w.laneDigest(change)
-		created, err := ensureWorkflowLane(path, digest)
+		created, err := ensureWorkflowLane(path, digest, dirty)
 		if err != nil {
 			return err
 		}
-		attemptTip, err := GetCurrentCommit(path)
-		if err != nil {
-			return err
+		// attemptTip is the lane tip rollback restores to. When the lane
+		// was just created (switch -c at the probe's current commit) or
+		// HEAD was already on it, current IS the tip; only switching to
+		// an existing lane from another branch moves HEAD.
+		branch := "see/" + digest
+		attemptTip := current
+		if !created && ref != branch {
+			attemptTip, err = GetCurrentCommit(path)
+			if err != nil {
+				return err
+			}
 		}
 		var baseline, candidate string
 		if w.measureEnabled() {

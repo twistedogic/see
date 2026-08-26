@@ -78,6 +78,7 @@ func listStem(t *testing.T, dir, stem string) []string {
 // the 5 newest; the oldest 2 are deleted; a stem with ≤5 is
 // untouched. (tasks.md 3.1)
 func TestRotateLogsTrimsToKeepCount(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	stem := "myproj--add-dark-mode"
 	writeInvocFiles(t, dir, stem, []string{
@@ -102,6 +103,7 @@ func TestRotateLogsTrimsToKeepCount(t *testing.T) {
 // TestRotateLogsNoopForUnderLimit: a stem with ≤ keep files is left
 // untouched. (tasks.md 3.1)
 func TestRotateLogsNoopForUnderLimit(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	stem := "myproj--add"
 	written := writeInvocFiles(t, dir, stem, []string{
@@ -118,6 +120,7 @@ func TestRotateLogsNoopForUnderLimit(t *testing.T) {
 // files for stem "myproj--add-dark-mode"; each group rotates
 // independently. (tasks.md 3.2)
 func TestRotateLogsPrefixSelectivity(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	short := "myproj--add"
 	long := "myproj--add-dark-mode"
@@ -155,6 +158,7 @@ func TestRotateLogsPrefixSelectivity(t *testing.T) {
 // TestRotateLogsBatchLogExclusion: see--<ts>--<pid>.jsonl files in the
 // same directory are never selected or deleted by rotation. (tasks.md 3.3)
 func TestRotateLogsBatchLogExclusion(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	batch := "see--20240101T000000--1.jsonl"
 	if err := os.WriteFile(filepath.Join(dir, batch), []byte("batch"), 0o644); err != nil {
@@ -182,6 +186,7 @@ func TestRotateLogsBatchLogExclusion(t *testing.T) {
 // rotateLogs must swallow that and still remove the other deletable
 // file.
 func TestRotateLogsBestEffortDeletion(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	stem := "myproj--add"
 	oldest := invocFileName(stem, "20240101T000000")
@@ -228,6 +233,7 @@ func TestRotateLogsBestEffortDeletion(t *testing.T) {
 // retained and is closed before rotation; the run's returned
 // (logPath, err) is unchanged by rotation. (tasks.md 3.6)
 func TestPiAgentRunRotatesAfterSuccess(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	logDir := filepath.Join(dir, "logs")
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
@@ -272,6 +278,7 @@ func TestPiAgentRunRotatesAfterSuccess(t *testing.T) {
 // agent run fails; the run's returned error is unchanged. (tasks.md
 // 3.6)
 func TestPiAgentRunRotatesAfterFailure(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	logDir := filepath.Join(dir, "logs")
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
@@ -311,6 +318,7 @@ func TestPiAgentRunRotatesAfterFailure(t *testing.T) {
 // activity-parser code path too, not only the nil-activity one.
 // (tasks.md 2.2)
 func TestPiAgentRunRotatesWithActivityParser(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	logDir := filepath.Join(dir, "logs")
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
@@ -349,6 +357,7 @@ func TestPiAgentRunRotatesWithActivityParser(t *testing.T) {
 // file cannot be created, no rotation runs (no file was written, so
 // nothing tipped the stem over the cap). (tasks.md 2.3)
 func TestPiAgentRunSkipsRotationOnFileCreateFailure(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	// Rogue: a regular file where the logDir would need to be a
 	// directory. MkdirAll fails, so os.Create fails, Run returns
@@ -381,6 +390,7 @@ func TestPiAgentRunSkipsRotationOnFileCreateFailure(t *testing.T) {
 // files and call Run twice with different `change` arguments; each
 // stem must be bounded independently.
 func TestPiAgentRunRotationBothModes(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	logDir := filepath.Join(dir, "logs")
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
@@ -423,6 +433,7 @@ func TestPiAgentRunRotationBothModes(t *testing.T) {
 // distinguish check failures by payload type rather than parsing
 // the message string.
 func TestEventLoggerMarshalsCheckFailed(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	logger, err := openEventLogger(dir)
 	if err != nil {
